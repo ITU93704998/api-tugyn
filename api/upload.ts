@@ -32,7 +32,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!folder) return res.status(400).json({ error: "Nome de pasta inválido." });
 
   const image = parseImage(body.image);
-  if (!image.ok) return res.status(image.status).json({ error: image.error });
+  if (image.ok === false) return res.status(image.status).json({ error: image.error });
 
   const account = getAccount(bucket);
   if (!account) {
