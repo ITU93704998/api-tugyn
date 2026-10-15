@@ -34,13 +34,23 @@ export const isAvatar = (bucket: Bucket, folder: string): boolean =>
 
 export type ImageCheck = { ok: true; bytes: number } | { ok: false; status: 400 | 413; error: string };
 
-const hasImageSignature = (bytes: Buffer): boolean => {
-  const isJpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-  const isPng =
-    bytes.length >= 8 &&
-    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+/**
+ * Confere os primeiros bytes: só aceita assinaturas de JPEG/PNG/WebP.
+ * Usa Uint8Array puro (sem métodos exclusivos de Buffer) para evitar atrito de tipos
+ * entre TypeScript 5.9 e @types/node no runtime da Vercel.
+ */
+const hasImageSignature = (bytes: Uint8Array): boolean => {
+  const isJpeg =
+    bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const isPng = bytes.length >= 8 && pngSignature.every((b, i) => bytes[i] === b);
+
   const isWebp =
-    bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
+    bytes.length >= 12 &&
+    String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF" &&
+    String.fromCharCode(...bytes.subarray(8, 12)) === "WEBP";
+
   return isJpeg || isPng || isWebp;
 };
 
@@ -70,7 +80,8 @@ export const parseImage = (value: unknown): ImageCheck => {
   if (bytes > MAX_IMAGE_BYTES) return { ok: false, status: 413, error: "A imagem é grande demais." };
 
   // Confere os primeiros bytes: o que diz ser imagem precisa começar como imagem.
-  if (!hasImageSignature(Buffer.from(body.slice(0, 24), "base64"))) {
+  const head = new Uint8Array(Buffer.from(body.slice(0, 24), "base64"));
+  if (!hasImageSignature(head)) {
     return { ok: false, status: 400, error: "O arquivo não é uma imagem válida." };
   }
 
