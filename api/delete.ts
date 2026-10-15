@@ -1,54 +1,52 @@
-import { VercelRequest, VercelResponse } from '@vercel/node';
-import { v2 as cloudinary } from 'cloudinary';
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { v2 as cloudinary } from "cloudinary";
+import { requireUser } from "./_lib/auth";
+import { getAccount } from "./_lib/config";
+import { dentroDoLimite } from "./_lib/rateLimit";
+import { parseBucket, parseOwnedPublicId } from "./_lib/validation";
 
-// O mesmo mapeamento de contas que usamos no upload
-const ACCOUNTS_CONFIG = {
-  usuarios: {
-    cloud_name: process.env.CLOUDINARY_NAME_USUARIOS,
-    api_key: process.env.CLOUDINARY_KEY_USUARIOS,
-    api_secret: process.env.CLOUDINARY_SECRET_USUARIOS,
-  },
-  times: {
-    cloud_name: process.env.CLOUDINARY_NAME_TIMES,
-    api_key: process.env.CLOUDINARY_KEY_TIMES,
-    api_secret: process.env.CLOUDINARY_SECRET_TIMES,
-  },
-  arenas: {
-    cloud_name: process.env.CLOUDINARY_NAME_ARENAS,
-    api_key: process.env.CLOUDINARY_KEY_ARENAS,
-    api_secret: process.env.CLOUDINARY_SECRET_ARENAS,
-  },
-};
+const MAX_EXCLUSOES_POR_HORA = 60;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Garantir que a requisição seja POST
-  if (req.method !== 'POST') return res.status(405).send('Método Não Permitido');
-
-  const { public_id, bucket } = req.body;
-
-  // 1. Validar se o bucket foi enviado e existe na config
-  const config = ACCOUNTS_CONFIG[bucket as keyof typeof ACCOUNTS_CONFIG];
-  
-  if (!config || !config.cloud_name) {
-    return res.status(400).json({ error: 'Bucket inválido ou não configurado para exclusão.' });
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
+    return res.status(405).json({ error: "Método não permitido." });
   }
 
-  // 2. Configurar o Cloudinary com a conta correta
-  cloudinary.config(config);
+  const user = await requireUser(req, res);
+  if (!user) return;
+
+  if (!(await dentroDoLimite(user.uid, "delete", MAX_EXCLUSOES_POR_HORA, 3600))) {
+    return res.status(429).json({ error: "Muitas exclusões em pouco tempo. Tente novamente mais tarde." });
+  }
+
+  const body: Record<string, unknown> =
+    typeof req.body === "object" && req.body !== null ? (req.body as Record<string, unknown>) : {};
+
+  const bucket = parseBucket(body.bucket);
+  if (!bucket) return res.status(400).json({ error: "Bucket inválido." });
+
+  // Só é possível apagar o que está DENTRO da pasta do próprio usuário (`<bucket>/<uid>/...`).
+  const publicId = parseOwnedPublicId(body.public_id, bucket, user.uid);
+  if (!publicId) return res.status(403).json({ error: "Você não pode apagar esta imagem." });
+
+  const account = getAccount(bucket);
+  if (!account) {
+    console.error(`[delete] bucket "${bucket}" sem credenciais no ambiente`);
+    return res.status(500).json({ error: "Servidor não configurado para este tipo de imagem." });
+  }
 
   try {
-    // 3. Deletar a imagem
-    // O public_id completo geralmente é algo como "usuarios/ID_USER/profile"
-    const result = await cloudinary.uploader.destroy(public_id, {
-      invalidate: true, // Limpa o cache da CDN para que a imagem suma na hora
+    const result = await cloudinary.uploader.destroy(publicId, {
+      ...account,
+      resource_type: "image",
+      invalidate: true, // limpa o cache da CDN: a imagem some na hora
     });
 
-    if (result.result === 'not found') {
-      return res.status(404).json({ message: 'Imagem não encontrada no Cloudinary.' });
-    }
-
-    return res.status(200).json({ success: true, result });
+    // "not found" = já não existe. Apagar é idempotente: o resultado desejado foi alcançado.
+    return res.status(200).json({ success: true, alreadyDeleted: result.result === "not found" });
   } catch (error) {
-    return res.status(500).json({ error: (error as any).message });
+    console.error("[delete] falha no Cloudinary:", error);
+    return res.status(502).json({ error: "Não foi possível apagar a imagem. Tente novamente." });
   }
 }
