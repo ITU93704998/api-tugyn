@@ -25,6 +25,8 @@ export interface AuthenticatedUser {
   uid: string;
   /** Quando o usuário digitou a senha pela última vez (segundos desde 1970). */
   authTime: number;
+  /** A conta tem a permissão `admin` (claim definida pelo script definir-admin.js). Só `true` de verdade vale. */
+  admin: boolean;
 }
 
 /**
@@ -57,7 +59,7 @@ export const requireUser = async (
     // checkRevoked: contas desativadas/apagadas ou sessões revogadas deixam de funcionar na hora.
     const decoded = await getAuth(app).verifyIdToken(token, true);
     if (!isSafeUid(decoded.uid)) throw new Error("uid inesperado");
-    return { uid: decoded.uid, authTime: typeof decoded.auth_time === "number" ? decoded.auth_time : 0 };
+    return { uid: decoded.uid, authTime: typeof decoded.auth_time === "number" ? decoded.auth_time : 0, admin: decoded.admin === true };
   } catch {
     res.status(401).json({ error: "Sessão inválida ou expirada." });
     return null;

@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
 import { requireUser } from "./_lib/auth";
-import { getAccount } from "./_lib/config";
+import { getAccount, isAdminOnlyBucket } from "./_lib/config";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { isAvatar, parseBucket, parseFolderName, parseImage } from "./_lib/validation";
 
@@ -28,11 +28,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const bucket = parseBucket(body.bucket);
   if (!bucket) return res.status(400).json({ error: "Bucket inválido." });
 
+  // Banners de anúncios: só administradores (claim `admin`). Quem não é recebe 403 antes de qualquer outra coisa.
+  if (isAdminOnlyBucket(bucket) && !user.admin) {
+    return res.status(403).json({ error: "Somente administradores enviam imagens de anúncios." });
+  }
+
   const folder = parseFolderName(body.folderName);
   if (!folder) return res.status(400).json({ error: "Nome de pasta inválido." });
 
   const image = parseImage(body.image);
-  if (image.ok === false) return res.status(image.status).json({ error: image.error });
+  if (!image.ok) return res.status(image.status).json({ error: image.error });
 
   const account = getAccount(bucket);
   if (!account) {
@@ -57,7 +62,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       allowed_formats: ["jpg", "jpeg", "png", "webp"],
       // Transformação de entrada: o que fica ARMAZENADO é no máximo 1080 px, em qualidade automática.
       transformation: [{ width: 1080, height: 1080, crop: "limit", quality: "auto" }],
-      tags: [`uid_${user.uid}`], // permite apagar tudo de um usuário (ex.: exclusão de conta)
+      // Imagens de usuário levam a tag do dono (permite apagar tudo dele na exclusão de conta). Banner de anúncio é da
+      // empresa: não leva essa tag, para não sumir caso a conta de quem o enviou seja apagada.
+      tags: isAdminOnlyBucket(bucket) ? ["anuncio"] : [`uid_${user.uid}`],
     });
 
     return res.status(200).json({ url: result.secure_url, public_id: result.public_id });

@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
 import { requireUser } from "./_lib/auth";
-import { getAccount } from "./_lib/config";
+import { getAccount, isAdminOnlyBucket } from "./_lib/config";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { parseBucket, parseOwnedPublicId } from "./_lib/validation";
 
@@ -25,6 +25,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const bucket = parseBucket(body.bucket);
   if (!bucket) return res.status(400).json({ error: "Bucket inválido." });
+
+  if (isAdminOnlyBucket(bucket) && !user.admin) {
+    return res.status(403).json({ error: "Somente administradores apagam imagens de anúncios." });
+  }
 
   // Só é possível apagar o que está DENTRO da pasta do próprio usuário (`<bucket>/<uid>/...`).
   const publicId = parseOwnedPublicId(body.public_id, bucket, user.uid);

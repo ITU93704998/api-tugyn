@@ -1,6 +1,17 @@
-export type Bucket = "usuarios" | "times" | "arenas";
+export type Bucket = "usuarios" | "times" | "arenas" | "anuncios";
 
-export const BUCKETS: readonly Bucket[] = ["usuarios", "times", "arenas"];
+export const BUCKETS: readonly Bucket[] = ["usuarios", "times", "arenas", "anuncios"];
+
+/**
+ * Buckets com imagens DE UM USUÁRIO (apagadas quando a conta dele é excluída). `anuncios` NÃO entra: os banners são da
+ * empresa (só administradores enviam) e precisam continuar existindo mesmo que a conta de quem os enviou seja apagada.
+ */
+export const USER_BUCKETS: readonly Bucket[] = ["usuarios", "times", "arenas"];
+
+/** Só administradores (claim `admin` no login do Firebase) enviam e apagam imagens destes buckets. */
+export const ADMIN_ONLY_BUCKETS: readonly Bucket[] = ["anuncios"];
+
+export const isAdminOnlyBucket = (bucket: Bucket): boolean => ADMIN_ONLY_BUCKETS.includes(bucket);
 
 export interface CloudinaryAccount {
   cloud_name: string;
@@ -31,8 +42,22 @@ export const getAccount = (bucket: Bucket): CloudinaryAccount | null => {
       api_key: process.env.CLOUDINARY_KEY_ARENAS,
       api_secret: process.env.CLOUDINARY_SECRET_ARENAS,
     },
+    anuncios: {
+      cloud_name: process.env.CLOUDINARY_NAME_ANUNCIOS,
+      api_key: process.env.CLOUDINARY_KEY_ANUNCIOS,
+      api_secret: process.env.CLOUDINARY_SECRET_ANUNCIOS,
+    },
   };
 
-  const { cloud_name, api_key, api_secret } = accounts[bucket];
-  return cloud_name && api_key && api_secret ? { cloud_name, api_key, api_secret } : null;
+  const complete = (account: Partial<CloudinaryAccount>): CloudinaryAccount | null => {
+    const { cloud_name, api_key, api_secret } = account;
+    return cloud_name && api_key && api_secret ? { cloud_name, api_key, api_secret } : null;
+  };
+
+  const own = complete(accounts[bucket]);
+  if (own) return own;
+  // Anúncios sem conta PRÓPRIA configurada (nenhuma das 3 variáveis): usa a conta de usuários (a pasta é outra: `anuncios/`).
+  // Configuração pela metade (só 1 ou 2 variáveis) é erro: devolve null em vez de misturar contas em silêncio.
+  const hasAnyOwn = Object.values(accounts[bucket]).some(Boolean);
+  return bucket === "anuncios" && !hasAnyOwn ? complete(accounts.usuarios) : null;
 };

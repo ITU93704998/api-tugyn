@@ -1,5 +1,5 @@
 import { v2 as cloudinary } from "cloudinary";
-import { BUCKETS, getAccount } from "./config";
+import { USER_BUCKETS, getAccount } from "./config";
 
 const MAX_PAGINAS = 20; // cada chamada apaga até 1000 imagens
 
@@ -27,7 +27,7 @@ const esgotar = async (chamar: (cursor?: string) => Promise<ResultadoApagar>): P
 export const apagarImagensDoUsuario = async (uid: string): Promise<string[]> => {
   const avisos: string[] = [];
 
-  for (const bucket of BUCKETS) {
+  for (const bucket of USER_BUCKETS) {
     const conta = getAccount(bucket);
     if (!conta) {
       avisos.push(`bucket_${bucket}_sem_credenciais`);
