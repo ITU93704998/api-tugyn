@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
 import { requireUser } from "./_lib/auth";
+import { handleCors } from "./_lib/cors";
 import { getAccount, isAdminOnlyBucket } from "./_lib/config";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { isAvatar, parseBucket, parseFolderName, parseImage } from "./_lib/validation";
@@ -8,6 +9,8 @@ import { isAvatar, parseBucket, parseFolderName, parseImage } from "./_lib/valid
 const MAX_UPLOADS_POR_HORA = 30;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (handleCors(req, res)) return; // painel de anúncios (navegador): consulta prévia e cabeçalhos de CORS
+
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Método não permitido." });
