@@ -31,7 +31,8 @@ export type PushRequest =
   | { action: "registrar"; token: string; platform: PushPlatform }
   | { action: "remover"; token: string }
   | { action: "notificar"; evento: "pedido_entrada"; turmaId: string }
-  | { action: "notificar"; evento: "pedido_aceito"; turmaId: string; userId: string };
+  | { action: "notificar"; evento: "pedido_aceito"; turmaId: string; userId: string }
+  | { action: "notificar"; evento: "partida_aberta"; turmaId: string };
 
 export type ParseResult = { ok: true; value: PushRequest } | { ok: false; error: string };
 
@@ -50,6 +51,7 @@ export const parsePushBody = (body: unknown): ParseResult => {
   if (b.action === "notificar") {
     if (!isSafeUid(b.turmaId)) return { ok: false, error: "Turma inválida." };
     if (b.evento === "pedido_entrada") return { ok: true, value: { action: "notificar", evento: "pedido_entrada", turmaId: b.turmaId } };
+    if (b.evento === "partida_aberta") return { ok: true, value: { action: "notificar", evento: "partida_aberta", turmaId: b.turmaId } };
     if (b.evento === "pedido_aceito") {
       if (!isSafeUid(b.userId)) return { ok: false, error: "Usuário inválido." };
       return { ok: true, value: { action: "notificar", evento: "pedido_aceito", turmaId: b.turmaId, userId: b.userId } };
@@ -70,6 +72,14 @@ export interface TurmaForPush {
   nome?: unknown;
   status?: unknown;
   ativo?: unknown;
+  /** Membros aprovados (uids). */
+  participantes?: unknown;
+}
+/** A partida do dia: `turmas/{id}/jogos/{AAAAMMDD}`. */
+export interface JogoForPush {
+  status?: unknown;
+  criadoPor?: unknown;
+  horario?: unknown;
 }
 export interface ParticipanteForPush {
   status?: unknown;
@@ -79,7 +89,7 @@ export interface ParticipanteForPush {
 export interface PushDraft {
   title: string;
   body: string;
-  data: { tipo: "pedido_entrada" | "pedido_aceito"; turmaId: string };
+  data: { tipo: "pedido_entrada" | "pedido_aceito" | "partida_aberta"; turmaId: string };
 }
 
 export type Authorization =
@@ -130,6 +140,57 @@ export const authorizeJoinApproved = (callerUid: string, turmaId: string, target
   };
 };
 
+/** Máximo de pessoas avisadas por partida aberta (a função da Vercel tem poucos segundos; turmas maiores avisam só as primeiras). */
+export const MAX_BROADCAST_USERS = 150;
+/** "Partida aberta" avisa UMA vez por turma e por dia, mesmo se o organizador cancelar e abrir de novo. */
+export const DEDUPE_PARTIDA_MS = 24 * 3600_000;
+export const QUERY_IN_LIMIT = 30;
+
+/** O dia de HOJE em Brasília (UTC−3, fixo) como o app grava: `id` = AAAAMMDD (documento da partida), `dia` = AAAA-MM-DD. Quem calcula é o servidor, nunca o app. */
+export const diaDeBrasilia = (nowMs: number): { id: string; dia: string } => {
+  const d = new Date(nowMs - 3 * 3600_000);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const y = d.getUTCFullYear();
+  const m = pad(d.getUTCMonth() + 1);
+  const day = pad(d.getUTCDate());
+  return { id: `${y}${m}${day}`, dia: `${y}-${m}-${day}` };
+};
+
+export const chunk = <T,>(items: readonly T[], size: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+};
+
+export type BroadcastAuthorization =
+  | { ok: true; recipientUids: string[]; dedupeKey: string; draft: PushDraft }
+  | { ok: false; status: number; error: string };
+
+/**
+ * O ORGANIZADOR abriu a partida de hoje: avisa os MEMBROS APROVADOS da turma (menos ele). Só vale se quem chama é o criador da turma e se a partida
+ * de HOJE (dia calculado pelo servidor) existe, está aberta e foi aberta por ele. Quem recebe vem sempre da lista de membros da turma no Firestore.
+ */
+export const authorizeGameOpened = (callerUid: string, turmaId: string, diaId: string, turma: TurmaForPush | null, jogo: JogoForPush | null): BroadcastAuthorization => {
+  if (!turma) return { ok: false, status: 404, error: "Turma não encontrada." };
+  if (!isActive(turma)) return { ok: false, status: 409, error: "Esta turma está encerrada." };
+  if (turma.creatorId !== callerUid) return { ok: false, status: 403, error: "Só o organizador da turma pode fazer isso." };
+  if (!jogo || jogo.status !== "aberta") return { ok: false, status: 409, error: "A partida de hoje não está aberta." };
+  if (jogo.criadoPor !== callerUid) return { ok: false, status: 409, error: "A partida de hoje não foi aberta por você." };
+  const membros = Array.isArray(turma.participantes) ? turma.participantes : [];
+  const recipientUids = [...new Set(membros.filter((uid): uid is string => isSafeUid(uid) && uid !== callerUid))].slice(0, MAX_BROADCAST_USERS);
+  const horario = sanitizeText(jogo.horario, 5, "");
+  return {
+    ok: true,
+    recipientUids,
+    dedupeKey: `partida_aberta_${turmaId}_${diaId}`,
+    draft: {
+      title: `Partida de hoje: ${sanitizeText(turma.nome, NAME_MAX, "sua turma")}`,
+      body: `O organizador abriu a partida de hoje${horario ? ` às ${horario}` : ""}. Toque para confirmar sua presença.`,
+      data: { tipo: "partida_aberta", turmaId },
+    },
+  };
+};
+
 export interface ExpoMessage {
   to: string;
   title: string;
@@ -152,41 +213,35 @@ export interface PushResult {
   error?: string;
 }
 
-/** Envia em lotes de 100. Nunca lança e nunca escreve o token em log. */
+/** Envia em lotes de 100, todos ao mesmo tempo (a função da Vercel tem poucos segundos). Mantém a ordem das mensagens. Nunca lança e nunca escreve o token em log. */
 export const sendExpoPush = async (messages: readonly ExpoMessage[], options: { fetchImpl?: typeof fetch; accessToken?: string } = {}): Promise<PushResult[]> => {
   const doFetch = options.fetchImpl ?? fetch;
-  const results: PushResult[] = [];
-  for (let start = 0; start < messages.length; start += EXPO_CHUNK_SIZE) {
-    const chunk = messages.slice(start, start + EXPO_CHUNK_SIZE);
-    const failAll = (error: string): void => {
-      for (const message of chunk) results.push({ token: message.to, ok: false, invalid: false, error });
-    };
+  const enviarLote = async (lote: readonly ExpoMessage[]): Promise<PushResult[]> => {
+    const falhou = (error: string): PushResult[] => lote.map((message) => ({ token: message.to, ok: false, invalid: false, error }));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), EXPO_TIMEOUT_MS);
     try {
       const response = await doFetch(EXPO_PUSH_URL, {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json", ...(options.accessToken ? { Authorization: `Bearer ${options.accessToken}` } : {}) },
-        body: JSON.stringify(chunk),
+        body: JSON.stringify(lote),
         signal: controller.signal,
       });
-      if (!response.ok) {
-        failAll(`http-${response.status}`);
-        continue;
-      }
+      if (!response.ok) return falhou(`http-${response.status}`);
       const json = (await response.json()) as { data?: unknown };
       const tickets: Array<{ status?: unknown; details?: { error?: unknown } } | undefined> = Array.isArray(json?.data) ? json.data : [];
-      chunk.forEach((message, index) => {
+      return lote.map((message, index) => {
         const ticket = tickets[index];
         const ok = ticket?.status === "ok";
         const code = typeof ticket?.details?.error === "string" ? ticket.details.error : "sem-resposta";
-        results.push({ token: message.to, ok, invalid: !ok && code === "DeviceNotRegistered", ...(ok ? {} : { error: code }) });
+        return { token: message.to, ok, invalid: !ok && code === "DeviceNotRegistered", ...(ok ? {} : { error: code }) };
       });
     } catch {
-      failAll("rede");
+      return falhou("rede");
     } finally {
       clearTimeout(timer);
     }
-  }
-  return results;
+  };
+  const partes = await Promise.all(chunk(messages, EXPO_CHUNK_SIZE).map(enviarLote));
+  return partes.flat();
 };
