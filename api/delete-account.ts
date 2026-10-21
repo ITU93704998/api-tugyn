@@ -16,7 +16,10 @@ export const config = { maxDuration: 60 };
  * Coleções fora do que foi analisado (notificações, convites, times...) que guardam o uid em algum
  * campo. Preencha quando souber, ex.: { collection: "notifications", field: "userId" }.
  */
-const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [];
+const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
+  { collection: "pushTokens", field: "uid" }, // tokens de notificação do usuário (api/push.ts)
+  { collection: "pushDedupe", field: "targetUid" }, // registros de "já avisei" (api/push.ts)
+];
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
