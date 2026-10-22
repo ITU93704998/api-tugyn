@@ -251,7 +251,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!(await dentroDoLimite(uid, "contratos-admin", 200, 3600))) return res.status(429).json({ error: "Muitas requisições. Tente novamente mais tarde." });
   } else if (ehPublica) {
     // quem pede para anunciar: poucas tentativas por hora, por IP (hash)
-    if (!(await dentroDoLimite(chaveDoIp(req), "contratos-solicitar", 5, 3600))) return res.status(429).json({ error: "Muitas tentativas. Tente novamente mais tarde." });
+    if (!(await dentroDoLimite(chaveDoIp(req), "contratos-solicitar", 20, 3600))) return res.status(429).json({ error: "Muitas tentativas. Tente novamente mais tarde." });
   } else {
     // limite por IP (hash): ver é leve; comprovante é pesado
     const limite = acao === "comprovante" || acao === "anuncio_imagem" ? 10 : acao === "configurar" || acao === "contrato_pdf" ? 60 : acao === "anuncio_enviar" ? 30 : 120;
@@ -267,7 +267,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    if (ehPublica) return await solicitar(db, body, res, Date.now());
+    if (ehPublica) return await solicitar(db, body, res, Date.now(), chaveDoIp(req));
     return ehCliente ? await cliente(db, acao as (typeof ACOES_CLIENTE)[number], body, res, chaveDoIp(req)) : await admin(db, acao as (typeof ACOES_ADMIN)[number], body, uid, res);
   } catch (error) {
     console.error("[contratos] falha:", error instanceof Error ? error.message : "erro desconhecido"); // sem token nem dados do cliente no log
