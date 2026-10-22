@@ -1,7 +1,7 @@
 import type { VercelResponse } from "@vercel/node";
 import { type DocumentReference, type Firestore, type Transaction } from "firebase-admin/firestore";
 import { parseConfig } from "./contratoCore";
-import { COLECAO, CONFIG_DOC, type ContratoDoc, TOKEN_FORMATO, hashToken, parseContrato } from "./contratos";
+import { COLECAO, CONFIG_DOC, type ClienteContrato, type ContratoDoc, TOKEN_FORMATO, gerarCodigo, gerarToken, hashToken, novoContrato, parseContrato } from "./contratos";
 
 /** Peças usadas pela rota de contratos e pelos tratadores da Fase 2. */
 export class Conflito extends Error {}
@@ -34,4 +34,21 @@ export const lerNaTransacao = async (tx: Transaction, ref: DocumentReference): P
   const doc = snapshot.exists ? parseContrato(snapshot.data()) : null;
   if (!doc) throw new NaoEncontrado();
   return doc;
+};
+
+/**
+ * Prepara um contrato NOVO (código único, token, documento) sem gravar. Usado pelo "Novo contrato" do painel e pela aprovação de uma
+ * solicitação: os dois produzem exatamente o mesmo contrato, na etapa "aguardando o cliente escolher".
+ */
+export const prepararContrato = async (db: Firestore, cliente: ClienteContrato, uid: string, agora: number) => {
+  const config = await lerConfig(db);
+  let codigo = gerarCodigo();
+  for (let tentativa = 0; tentativa < 5; tentativa++) {
+    const repetido = await db.collection(COLECAO).where("codigo", "==", codigo).limit(1).get();
+    if (repetido.empty) break;
+    codigo = gerarCodigo();
+  }
+  const token = gerarToken();
+  const doc = novoContrato(cliente, token, codigo, config, agora, uid);
+  return { ref: db.collection(COLECAO).doc(), codigo, token, doc };
 };

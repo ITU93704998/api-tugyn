@@ -10,11 +10,9 @@ import {
   chaveDoIp,
   comHistorico,
   contaDosComprovantes,
-  gerarCodigo,
   gerarToken,
   hashToken,
   limparTexto,
-  novoContrato,
   parseContrato,
   parseCriar,
   pedidoEPreco,
@@ -22,7 +20,8 @@ import {
   validarImagem,
   visaoPublica,
 } from "./_lib/contratos";
-import { Conflito, NaoEncontrado, buscarPorToken, lerConfig, lerNaTransacao, responder } from "./_lib/contratosComuns";
+import { Conflito, NaoEncontrado, buscarPorToken, lerConfig, lerNaTransacao, prepararContrato, responder } from "./_lib/contratosComuns";
+import { aprovarSolicitacao, excluirSolicitacao, solicitar } from "./_lib/solicitacoes";
 import { adminAprovar, adminModeloEnviar, adminModeloUrl, adminPedirAjustes, clienteEnviarAnuncio, clienteImagem, clientePdf, lerModelo } from "./_lib/contratosFase2";
 import { handleCors } from "./_lib/cors";
 import { dentroDoLimite } from "./_lib/rateLimit";
@@ -38,7 +37,9 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  */
 
 const ACOES_CLIENTE = ["ver", "configurar", "comprovante", "contrato_pdf", "anuncio_imagem", "anuncio_enviar"] as const;
-const ACOES_ADMIN = ["criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "aprovar", "pedir_ajustes"] as const;
+/** Sem login nem link: a página pública "quero anunciar". Só aceita a solicitação (e com limite por IP). */
+const ACOES_PUBLICAS = ["solicitar"] as const;
+const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "aprovar", "pedir_ajustes"] as const;
 const ID = /^[A-Za-z0-9]{10,40}$/;
 
 /** Ação da rota → ação do núcleo de etapas (sem `as`: se um nome mudar de um lado, o compilador acusa). */
@@ -140,18 +141,16 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
   if (acao === "criar") {
     const dados = parseCriar(body);
     if (!dados.ok) return responder(res, 400, { error: dados.error });
-    const config = await lerConfig(db);
-    let codigo = gerarCodigo();
-    for (let tentativa = 0; tentativa < 5; tentativa++) {
-      const repetido = await db.collection(COLECAO).where("codigo", "==", codigo).limit(1).get();
-      if (repetido.empty) break;
-      codigo = gerarCodigo();
-    }
-    const token = gerarToken();
-    const doc = novoContrato(dados.cliente, token, codigo, config, agora);
-    const ref = db.collection(COLECAO).doc();
-    await ref.create({ ...doc, criadoPor: uid });
+    const { ref, codigo, token, doc } = await prepararContrato(db, dados.cliente, uid, agora);
+    await ref.create(doc);
     return responder(res, 200, { id: ref.id, codigo, token, validoAte: doc.tokenExpiresAt });
+  }
+
+  // solicitações da página pública: têm o próprio id (de solicitação), não o de um contrato
+  if (acao === "solicitacao_aprovar" || acao === "solicitacao_excluir") {
+    const solicitacao = idValido(body.id);
+    if (!solicitacao) return responder(res, 400, { error: "Solicitação inválida." });
+    return acao === "solicitacao_aprovar" ? aprovarSolicitacao(db, solicitacao, uid, agora, res) : excluirSolicitacao(db, solicitacao, res);
   }
 
   // o contrato em PDF é único (não pertence a um contrato do cliente): não usa id
@@ -240,7 +239,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const acao = body.action;
   const ehCliente = (ACOES_CLIENTE as readonly unknown[]).includes(acao);
   const ehAdmin = (ACOES_ADMIN as readonly unknown[]).includes(acao);
-  if (!ehCliente && !ehAdmin) return res.status(400).json({ error: "Ação inválida." });
+  const ehPublica = (ACOES_PUBLICAS as readonly unknown[]).includes(acao);
+  if (!ehCliente && !ehAdmin && !ehPublica) return res.status(400).json({ error: "Ação inválida." });
 
   let uid = "";
   if (ehAdmin) {
@@ -249,6 +249,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!user.admin) return res.status(403).json({ error: "Somente administradores." });
     uid = user.uid;
     if (!(await dentroDoLimite(uid, "contratos-admin", 200, 3600))) return res.status(429).json({ error: "Muitas requisições. Tente novamente mais tarde." });
+  } else if (ehPublica) {
+    // quem pede para anunciar: poucas tentativas por hora, por IP (hash)
+    if (!(await dentroDoLimite(chaveDoIp(req), "contratos-solicitar", 5, 3600))) return res.status(429).json({ error: "Muitas tentativas. Tente novamente mais tarde." });
   } else {
     // limite por IP (hash): ver é leve; comprovante é pesado
     const limite = acao === "comprovante" || acao === "anuncio_imagem" ? 10 : acao === "configurar" || acao === "contrato_pdf" ? 60 : acao === "anuncio_enviar" ? 30 : 120;
@@ -264,6 +267,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    if (ehPublica) return await solicitar(db, body, res, Date.now());
     return ehCliente ? await cliente(db, acao as (typeof ACOES_CLIENTE)[number], body, res, chaveDoIp(req)) : await admin(db, acao as (typeof ACOES_ADMIN)[number], body, uid, res);
   } catch (error) {
     console.error("[contratos] falha:", error instanceof Error ? error.message : "erro desconhecido"); // sem token nem dados do cliente no log
