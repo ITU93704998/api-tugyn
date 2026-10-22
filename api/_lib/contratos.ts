@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { VercelRequest } from "@vercel/node";
+import { type AnuncioContrato, type ImagemAnuncio } from "./anuncioContrato";
 import { type Cidade, type ConfigContratos, type Escopo, type Modelo, type ResultadoSelecao, ROTULO_STATUS, STATUS, type Status, TELAS, type Tela } from "./contratoCore";
+import type { ContratoModelo } from "./contratoModelo";
 
 /**
  * Contratos de anúncio: a parte PURA do servidor (token do link, validações, o que o cliente pode ver). Nada aqui lê o Firestore:
@@ -100,6 +102,20 @@ export interface HistoricoItem {
   nota?: string;
 }
 
+/** O aceite do contrato (PDF): a versão e o hash do arquivo que o cliente abriu e com que concordou, e quando. `ipHash` é anônimo. */
+export interface AceiteContrato {
+  versao: number;
+  sha256: string;
+  nomeArquivo: string;
+  aceitoEm: number;
+  ipHash: string;
+  pdfAbertoEm: number;
+}
+
+export interface AnuncioEnviado extends AnuncioContrato {
+  enviadoEm: number;
+}
+
 export interface ContratoDoc {
   status: Status;
   codigo: string;
@@ -112,11 +128,24 @@ export interface ContratoDoc {
   preco: PrecoContrato | null;
   pagamento: PagamentoContrato;
   historico: HistoricoItem[];
+  /** Quem criou o contrato (uid do administrador): é o "dono" da pasta das imagens do cliente no Cloudinary (`anuncios/<uid>/contratos`). */
+  criadoPor: string;
+  /** O anúncio enviado (o último; reenviado quando você pede ajustes). */
+  anuncio: AnuncioEnviado | null;
+  /** Banner já enviado ao Cloudinary mas ainda não "enviado para análise". */
+  rascunhoImagem: ImagemAnuncio | null;
+  aceite: AceiteContrato | null;
+  /** O cliente abriu o PDF desta versão em tal momento (condição para aceitar). */
+  pdfSolicitado: { versao: number; em: number } | null;
+  /** O recado do seu pedido de ajustes. */
+  ajustes: { nota: string; em: number } | null;
+  campanhaId: string | null;
+  aprovadoEm: number | null;
 }
 
 export const pagamentoVazio = (): PagamentoContrato => ({ comprovante: null, declaradoEm: null, confirmadoEm: null, confirmadoPor: null, notaDoAdmin: null });
 
-export const novoContrato = (cliente: ClienteContrato, token: string, codigo: string, config: ConfigContratos, agora: number): ContratoDoc => ({
+export const novoContrato = (cliente: ClienteContrato, token: string, codigo: string, config: ConfigContratos, agora: number, criadoPor = ""): ContratoDoc => ({
   status: "aguardando_configuracao",
   codigo,
   tokenHash: hashToken(token),
@@ -128,6 +157,14 @@ export const novoContrato = (cliente: ClienteContrato, token: string, codigo: st
   preco: null,
   pagamento: pagamentoVazio(),
   historico: [{ em: agora, por: "admin", acao: "criou o contrato" }],
+  criadoPor,
+  anuncio: null,
+  rascunhoImagem: null,
+  aceite: null,
+  pdfSolicitado: null,
+  ajustes: null,
+  campanhaId: null,
+  aprovadoEm: null,
 });
 
 /** Junta ao histórico (guarda só os últimos `HISTORICO_MAX`). */
@@ -136,6 +173,19 @@ export const comHistorico = (historico: readonly HistoricoItem[], item: Historic
 const num = (value: unknown, padrao = 0): number => (typeof value === "number" && Number.isFinite(value) ? value : padrao);
 const numOuNull = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+const parseImagem = (raw: unknown): ImagemAnuncio | null =>
+  isRecord(raw) && typeof raw.url === "string" && /^https:\/\/[^\s]+$/.test(raw.url) && typeof raw.publicId === "string" && raw.publicId ? { url: raw.url, publicId: raw.publicId, largura: num(raw.largura), altura: num(raw.altura), bytes: num(raw.bytes) } : null;
+
+const textoOuNull = (v: unknown, max: number): string | null => (typeof v === "string" && v ? limparTexto(v, max) : null);
+
+const parseAnuncio = (raw: unknown): AnuncioEnviado | null =>
+  isRecord(raw) && typeof raw.anunciante === "string" && typeof raw.linkUrl === "string"
+    ? { anunciante: limparTexto(raw.anunciante, 60), titulo: textoOuNull(raw.titulo, 40), texto: textoOuNull(raw.texto, 100), botao: textoOuNull(raw.botao, 20), linkUrl: raw.linkUrl.slice(0, 500), textoAlternativo: textoOuNull(raw.textoAlternativo, 80), imagem: parseImagem(raw.imagem), enviadoEm: num(raw.enviadoEm) }
+    : null;
+
+const parseAceite = (raw: unknown): AceiteContrato | null =>
+  isRecord(raw) && num(raw.versao) >= 1 && typeof raw.sha256 === "string" ? { versao: num(raw.versao), sha256: raw.sha256, nomeArquivo: limparTexto(raw.nomeArquivo, 80), aceitoEm: num(raw.aceitoEm), ipHash: typeof raw.ipHash === "string" ? raw.ipHash.slice(0, 40) : "", pdfAbertoEm: num(raw.pdfAbertoEm) } : null;
 
 /** Lê o documento do Firestore com cuidado (o que está lá foi gravado por nós, mas nunca se lança por dado estranho). Null se não for um contrato. */
 export const parseContrato = (raw: unknown): ContratoDoc | null => {
@@ -173,6 +223,14 @@ export const parseContrato = (raw: unknown): ContratoDoc | null => {
     preco,
     pagamento: { comprovante: comp, declaradoEm: numOuNull(pg.declaradoEm), confirmadoEm: numOuNull(pg.confirmadoEm), confirmadoPor: typeof pg.confirmadoPor === "string" ? pg.confirmadoPor : null, notaDoAdmin: typeof pg.notaDoAdmin === "string" ? limparTexto(pg.notaDoAdmin, 300) : null },
     historico,
+    criadoPor: typeof raw.criadoPor === "string" ? raw.criadoPor.slice(0, 128) : "",
+    anuncio: parseAnuncio(raw.anuncio),
+    rascunhoImagem: parseImagem(raw.rascunhoImagem),
+    aceite: parseAceite(raw.aceite),
+    pdfSolicitado: isRecord(raw.pdfSolicitado) && num(raw.pdfSolicitado.versao) >= 1 ? { versao: num(raw.pdfSolicitado.versao), em: num(raw.pdfSolicitado.em) } : null,
+    ajustes: isRecord(raw.ajustes) && typeof raw.ajustes.nota === "string" ? { nota: limparTexto(raw.ajustes.nota, 300), em: num(raw.ajustes.em) } : null,
+    campanhaId: typeof raw.campanhaId === "string" && raw.campanhaId ? raw.campanhaId.slice(0, 128) : null,
+    aprovadoEm: numOuNull(raw.aprovadoEm),
   };
 };
 
@@ -189,7 +247,7 @@ export const pedidoEPreco = (resultado: Extract<ResultadoSelecao, { ok: true }>,
 export const temPrecos = (config: ConfigContratos): boolean => (["text", "banner"] as const).some((m) => (["cidade", "todas"] as const).some((e) => TELAS.some((t) => config.precos[m][e][t] !== null)));
 
 /** O que o CLIENTE pode ver: nunca o hash do token, o id da imagem do comprovante, o histórico interno, nem as observações do administrador. */
-export const visaoPublica = (c: ContratoDoc, config: ConfigContratos, agora: number) => {
+export const visaoPublica = (c: ContratoDoc, config: ConfigContratos, agora: number, modelo: ContratoModelo | null = null) => {
   const mostraPagamento = c.status === "aguardando_pagamento" || c.status === "comprovante_enviado" || c.status === "pago";
   return {
     codigo: c.codigo,
@@ -212,6 +270,20 @@ export const visaoPublica = (c: ContratoDoc, config: ConfigContratos, agora: num
           notaDoAdmin: c.pagamento.notaDoAdmin,
         }
       : null,
+    // o contrato em PDF: se existe, qual versão, se este cliente já concordou com ELA e se já a abriu (condição para aceitar)
+    contratoPdf: {
+      disponivel: modelo !== null,
+      versao: modelo ? modelo.versao : null,
+      nome: modelo ? modelo.nome : null,
+      aceiteVersao: c.aceite ? c.aceite.versao : null,
+      precisaAceite: modelo !== null && !(c.aceite && c.aceite.versao === modelo.versao),
+      aberto: modelo !== null && c.pdfSolicitado !== null && c.pdfSolicitado.versao === modelo.versao,
+    },
+    anuncio: c.anuncio
+      ? { anunciante: c.anuncio.anunciante, titulo: c.anuncio.titulo, texto: c.anuncio.texto, botao: c.anuncio.botao, linkUrl: c.anuncio.linkUrl, textoAlternativo: c.anuncio.textoAlternativo, imagem: c.anuncio.imagem ? { url: c.anuncio.imagem.url, largura: c.anuncio.imagem.largura, altura: c.anuncio.imagem.altura } : null, enviadoEm: c.anuncio.enviadoEm }
+      : null,
+    rascunhoImagem: c.rascunhoImagem ? { url: c.rascunhoImagem.url, largura: c.rascunhoImagem.largura, altura: c.rascunhoImagem.altura } : null,
+    ajustes: c.status === "ajustes_solicitados" && c.ajustes ? { nota: c.ajustes.nota, em: c.ajustes.em } : null,
   };
 };
 

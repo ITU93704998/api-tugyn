@@ -286,16 +286,23 @@ export const reaisParaCentavos = (entrada: string): Centavos | null => {
 };
 
 // ── Etapas do contrato ──
-export const STATUS = ["aguardando_configuracao", "aguardando_pagamento", "comprovante_enviado", "pago", "cancelado"] as const;
+/**
+ * Etapas do contrato. `pago` = pagamento confirmado, AGUARDANDO os dados do anúncio. Depois: `em_analise` (o cliente enviou o anúncio
+ * e o aceite do contrato), `ajustes_solicitados` (você pediu correções; o cliente reenvia) e `aprovado` (a campanha foi criada).
+ */
+export const STATUS = ["aguardando_configuracao", "aguardando_pagamento", "comprovante_enviado", "pago", "em_analise", "ajustes_solicitados", "aprovado", "cancelado"] as const;
 export type Status = (typeof STATUS)[number];
 export type Ator = "cliente" | "admin";
-export type Acao = "configurar" | "enviar_comprovante" | "confirmar_pagamento" | "pedir_novo_comprovante" | "cancelar" | "novo_link";
+export type Acao = "configurar" | "enviar_comprovante" | "confirmar_pagamento" | "pedir_novo_comprovante" | "enviar_anuncio" | "aprovar" | "pedir_ajustes" | "cancelar" | "novo_link";
 
 export const ROTULO_STATUS: Record<Status, string> = {
   aguardando_configuracao: "Aguardando o cliente escolher",
   aguardando_pagamento: "Aguardando pagamento",
   comprovante_enviado: "Comprovante enviado",
-  pago: "Pago",
+  pago: "Pago · aguardando o anúncio",
+  em_analise: "Anúncio em análise",
+  ajustes_solicitados: "Ajustes solicitados",
+  aprovado: "Aprovado",
   cancelado: "Cancelado",
 };
 
@@ -304,13 +311,18 @@ const TRANSICOES: Record<Ator, Partial<Record<Acao, { de: readonly Status[]; par
     // o cliente confirma o pedido (e pode refazer enquanto não enviou o comprovante)
     configurar: { de: ["aguardando_configuracao", "aguardando_pagamento"], para: "aguardando_pagamento" },
     enviar_comprovante: { de: ["aguardando_pagamento"], para: "comprovante_enviado" },
+    // depois de pago, o cliente envia o anúncio (e reenvia quando você pede ajustes)
+    enviar_anuncio: { de: ["pago", "ajustes_solicitados"], para: "em_analise" },
   },
   admin: {
     // o administrador pode confirmar mesmo sem comprovante (ex.: o PIX caiu na conta e o cliente não mandou a imagem)
     confirmar_pagamento: { de: ["aguardando_pagamento", "comprovante_enviado"], para: "pago" },
     pedir_novo_comprovante: { de: ["comprovante_enviado"], para: "aguardando_pagamento" },
-    cancelar: { de: ["aguardando_configuracao", "aguardando_pagamento", "comprovante_enviado", "pago"], para: "cancelado" },
-    novo_link: { de: ["aguardando_configuracao", "aguardando_pagamento", "comprovante_enviado", "pago"], para: "mesmo" },
+    aprovar: { de: ["em_analise"], para: "aprovado" },
+    pedir_ajustes: { de: ["em_analise"], para: "ajustes_solicitados" },
+    // um contrato APROVADO já virou campanha: para tirar do ar, pause ou arquive a campanha (não se cancela o contrato)
+    cancelar: { de: ["aguardando_configuracao", "aguardando_pagamento", "comprovante_enviado", "pago", "em_analise", "ajustes_solicitados"], para: "cancelado" },
+    novo_link: { de: ["aguardando_configuracao", "aguardando_pagamento", "comprovante_enviado", "pago", "em_analise", "ajustes_solicitados", "aprovado"], para: "mesmo" },
   },
 };
 
@@ -326,3 +338,27 @@ export const linkExpirado = (contrato: { status: Status; tokenExpiresAt: number 
 
 /** Depois do pagamento, o link vale SÓ até o fim do anúncio contratado (nem antes, nem depois). */
 export const validadeAposPagamento = (fimMs: number): number => fimMs;
+
+/** Etapas depois do pagamento e ANTES da aprovação: o cliente ainda pode precisar do link (enviar o anúncio, corrigir). */
+export const ETAPAS_DO_ANUNCIO: readonly Status[] = ["pago", "em_analise", "ajustes_solicitados"];
+
+/**
+ * Validade de um link NOVO. Antes do pagamento: a validade padrão. Depois do pagamento e antes da aprovação: o fim do período
+ * contratado, mas nunca menos que 7 dias (o cliente pode demorar a mandar o anúncio e o contrato mantém os dias: o início passa a ser
+ * a aprovação). Aprovado: só até o fim do anúncio. Devolve null quando não há o que abrir (anúncio aprovado que já terminou).
+ */
+export const validadeDoLinkNovo = (c: { status: Status; fimMs: number | null }, nowMs: number, validadeLinkDias: number): number | null => {
+  if (c.status === "aprovado") return c.fimMs !== null && c.fimMs > nowMs ? c.fimMs : null;
+  if (ETAPAS_DO_ANUNCIO.includes(c.status)) return Math.max(c.fimMs ?? 0, nowMs + 7 * DIA_MS);
+  return nowMs + validadeLinkDias * DIA_MS;
+};
+
+/**
+ * Datas do anúncio ao APROVAR. Se o início combinado já passou (o pagamento ou o envio atrasaram), o anúncio começa AGORA e mantém os
+ * dias contratados (o cliente não perde dias). Senão, vale o combinado.
+ */
+export const datasAoAprovar = (pedido: { inicioMs: number; dias: number }, nowMs: number): { inicioMs: number; fimMs: number; deslocado: boolean } => {
+  const deslocado = pedido.inicioMs < nowMs;
+  const inicioMs = deslocado ? nowMs : pedido.inicioMs;
+  return { inicioMs, fimMs: inicioMs + pedido.dias * DIA_MS, deslocado };
+};
