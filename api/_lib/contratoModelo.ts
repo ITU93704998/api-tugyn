@@ -55,7 +55,15 @@ export const validarPdf = (valor: unknown): PdfValido => {
   if (buffer.length === 0) return { ok: false, error: "O arquivo está vazio." };
   if (buffer.length > PDF_MAX_BYTES) return { ok: false, error: "O PDF passa de 3 MB. Comprima o arquivo e envie de novo." };
   if (buffer.subarray(0, 5).toString("ascii") !== "%PDF-") return { ok: false, error: "O arquivo não é um PDF válido." };
-  return { ok: true, buffer, bytes: buffer.length, sha256: createHash("sha256").update(buffer).digest("hex"), dataUri: valor };
+  return {
+  ok: true,
+  buffer,
+  bytes: buffer.length,
+  sha256: createHash("sha256")
+    .update(new Uint8Array(buffer))
+    .digest("hex"),
+  dataUri: valor,
+};
 };
 
 /** Nome para mostrar: só o nome do arquivo (sem pasta), sem caracteres de controle, até 80, sempre terminando em .pdf. */
