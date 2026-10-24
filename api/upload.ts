@@ -5,6 +5,7 @@ import { handleCors } from "./_lib/cors";
 import { getAccount, isAdminOnlyBucket } from "./_lib/config";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { isAvatar, parseBucket, parseFolderName, parseImage } from "./_lib/validation";
+import { verificarIntervaloDaImagem } from "./_lib/mediaCooldown";
 
 const MAX_UPLOADS_POR_HORA = 30;
 
@@ -38,6 +39,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const folder = parseFolderName(body.folderName);
   if (!folder) return res.status(400).json({ error: "Nome de pasta inválido." });
+
+  // Foto de perfil e banner de turma: valida o prazo antes de processar ou enviar ao Cloudinary.
+  let cooldown: Awaited<ReturnType<typeof verificarIntervaloDaImagem>> | null = null;
+  try {
+    if (bucket === "usuarios" && folder === "profile") {
+      cooldown = await verificarIntervaloDaImagem(user.uid, "fotoPerfil");
+    } else if ((bucket === "turmas" || bucket === "times") && folder === "banner") {
+      // Banners antigos no bucket times precisam atualizar o app para enviar o id da turma.
+      if (bucket === "times" && body.turmaId === undefined) {
+        return res.status(400).json({ error: "Atualize o app para trocar o banner da turma." });
+      }
+      // Sem turmaId só ocorre na escolha inicial do banner durante a criação da turma.
+      if (body.turmaId !== undefined) {
+        cooldown = await verificarIntervaloDaImagem(user.uid, "bannerTurma", body.turmaId);
+      }
+    }
+  } catch (error) {
+    console.error("[upload] falha ao validar prazo da imagem:", error);
+    return res.status(503).json({ error: "Não foi possível validar o prazo para trocar esta imagem." });
+  }
+  if (cooldown && !cooldown.allowed) {
+    if (cooldown.retryAfterSeconds) res.setHeader("Retry-After", String(cooldown.retryAfterSeconds));
+    return res.status(cooldown.status).json({ error: cooldown.error, retryAfterSeconds: cooldown.retryAfterSeconds });
+  }
 
   const image = parseImage(body.image);
   if (!image.ok) return res.status(image.status).json({ error: image.error });
