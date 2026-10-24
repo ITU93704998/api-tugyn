@@ -1,12 +1,12 @@
-export type Bucket = "usuarios" | "times" | "arenas" | "anuncios";
+export type Bucket = "usuarios" | "times" | "arenas" | "anuncios" | "turmas";
 
-export const BUCKETS: readonly Bucket[] = ["usuarios", "times", "arenas", "anuncios"];
+export const BUCKETS: readonly Bucket[] = ["usuarios", "times", "arenas", "anuncios", "turmas"];
 
 /**
  * Buckets com imagens DE UM USUÁRIO (apagadas quando a conta dele é excluída). `anuncios` NÃO entra: os banners são da
  * empresa (só administradores enviam) e precisam continuar existindo mesmo que a conta de quem os enviou seja apagada.
  */
-export const USER_BUCKETS: readonly Bucket[] = ["usuarios", "times", "arenas"];
+export const USER_BUCKETS: readonly Bucket[] = ["usuarios", "times", "arenas", "turmas"];
 
 /** Só administradores (claim `admin` no login do Firebase) enviam e apagam imagens destes buckets. */
 export const ADMIN_ONLY_BUCKETS: readonly Bucket[] = ["anuncios"];
@@ -43,6 +43,13 @@ export const getAccount = (bucket: Bucket): CloudinaryAccount | null => {
       api_secret: process.env.CLOUDINARY_SECRET_ARENAS,
     },
     anuncios: {
+      cloud_name: process.env.CLOUDINARY_NAME_ANUNCIOS,
+      api_key: process.env.CLOUDINARY_KEY_ANUNCIOS,
+      api_secret: process.env.CLOUDINARY_SECRET_ANUNCIOS,
+    },
+    // Banners de turma usam a conta dos anúncios, mas ficam em bucket próprio,
+    // com upload autenticado de usuário e exclusão automática junto à conta dele.
+    turmas: {
       cloud_name: process.env.CLOUDINARY_NAME_ANUNCIOS,
       api_key: process.env.CLOUDINARY_KEY_ANUNCIOS,
       api_secret: process.env.CLOUDINARY_SECRET_ANUNCIOS,
