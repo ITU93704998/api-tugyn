@@ -31,28 +31,17 @@ interface PaginaParams {
   lojaIos: string | null;
   lojaAndroid: string | null;
   plataforma: Plataforma;
-  /** URL absoluta do ícone do app (ex.: https://tugyn.app/icon.png). Opcional. */
-  iconUrl?: string | null;
-  /** URL absoluta desta mesma página (para og:url). Opcional. */
-  paginaUrl?: string | null;
 }
 
-export const renderizarPagina = ({
-  id,
-  lojaIos,
-  lojaAndroid,
-  plataforma,
-  iconUrl,
-  paginaUrl,
-}: PaginaParams): string => {
+export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma }: PaginaParams): string => {
   const abrir = `tugyn://turma/${encodeURIComponent(id)}`;
 
-  const lojas: { rotulo: string; url: string }[] = [];
+  const lojas: { rotulo: string; url: string; icone: string }[] = [];
   if (plataforma !== "android" && lojaIos) {
-    lojas.push({ rotulo: "Baixar na App Store", url: lojaIos });
+    lojas.push({ rotulo: "Baixar na App Store", url: lojaIos, icone: "" });
   }
   if (plataforma !== "ios" && lojaAndroid) {
-    lojas.push({ rotulo: "Baixar no Google Play", url: lojaAndroid });
+    lojas.push({ rotulo: "Baixar no Google Play", url: lojaAndroid, icone: "▶" });
   }
 
   const download = lojas.length
@@ -67,11 +56,6 @@ export const renderizarPagina = ({
        </div>`
     : `<p class="hint">Ainda não tem o app? Procure por <strong>Tugyn</strong> na App Store ou no Google Play.</p>`;
 
-  // Bloco de marca: se houver iconUrl usa <img>, senão cai no emoji ⚽
-  const marca = iconUrl
-    ? `<img class="mark-img" src="${esc(iconUrl)}" alt="Tugyn" width="56" height="56" />`
-    : `<div class="mark" aria-hidden="true">⚽</div>`;
-
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -83,13 +67,6 @@ export const renderizarPagina = ({
 <title>Convite para uma turma no Tugyn</title>
 <meta property="og:title" content="Convite para uma turma no Tugyn">
 <meta property="og:description" content="Toque para abrir o convite no app Tugyn.">
-<meta property="og:type" content="website">
-${paginaUrl ? `<meta property="og:url" content="${esc(paginaUrl)}">` : ""}
-${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
-<meta property="og:image:width" content="512">
-<meta property="og:image:height" content="512">
-<link rel="apple-touch-icon" href="${esc(iconUrl)}">
-<link rel="icon" type="image/png" href="${esc(iconUrl)}">` : ""}
 <style>
   :root {
     --bg: #F2F2F7;
@@ -116,6 +93,7 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
   }
 
   * { box-sizing: border-box; }
+
   html, body { height: 100%; }
 
   body {
@@ -147,7 +125,7 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
     text-align: center;
   }
 
-  /* Marca: emoji (fallback) ou imagem real */
+  /* Marca / ícone no topo */
   .mark {
     width: 56px;
     height: 56px;
@@ -160,21 +138,6 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
     color: var(--accent);
     font-size: 26px;
     line-height: 1;
-  }
-
-  /* Ícone real do app — estilo Apple (cantos contínuos) */
-  .mark-img {
-    display: inline-block;
-    width: 56px;
-    height: 56px;
-    border-radius: 14px;
-    margin-bottom: 16px;
-    object-fit: cover;
-    background: var(--surface);
-    box-shadow:
-      0 1px 2px rgba(0,0,0,0.08),
-      0 4px 12px rgba(0,0,0,0.06);
-    vertical-align: middle;
   }
 
   .eyebrow {
@@ -203,6 +166,7 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
     margin: 0 0 24px;
   }
 
+  /* Botão primário — preenchido, estilo Apple */
   .btn-primary {
     display: flex;
     align-items: center;
@@ -222,6 +186,7 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
   }
   .btn-primary:active { background: var(--accent-pressed); transform: scale(0.99); }
 
+  /* Divisor sutil entre CTA e fallback */
   .divider {
     height: 1px;
     background: var(--separator);
@@ -236,6 +201,7 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
   }
   .hint strong { color: var(--secondary); font-weight: 600; }
 
+  /* Links de loja — texto + seta (padrão iOS) */
   .store-links {
     display: flex;
     flex-direction: column;
@@ -269,7 +235,6 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
 </head>
 <body>
 <main>
-  ${marca}
   <p class="eyebrow">Tugyn</p>
   <h1>Você foi convidado<br>para uma turma</h1>
   <p>Toque no botão para abrir o convite no app.</p>

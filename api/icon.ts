@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Cache em memória — o ícone nunca muda durante o runtime
+
 let cached: Buffer | null = null;
 
 export default function handler(_req: any, res: any) {
