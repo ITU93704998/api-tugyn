@@ -31,9 +31,18 @@ interface PaginaParams {
   lojaIos: string | null;
   lojaAndroid: string | null;
   plataforma: Plataforma;
+  iconUrl?: string | null;
+  paginaUrl?: string | null;
 }
 
-export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma }: PaginaParams): string => {
+export const renderizarPagina = ({
+  id,
+  lojaIos,
+  lojaAndroid,
+  plataforma,
+  iconUrl,
+  paginaUrl,
+}: PaginaParams): string => {
   const abrir = `tugyn://turma/${encodeURIComponent(id)}`;
 
   const lojas: { rotulo: string; url: string; icone: string }[] = [];
@@ -56,6 +65,10 @@ export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma }: Pagin
        </div>`
     : `<p class="hint">Ainda não tem o app? Procure por <strong>Tugyn</strong> na App Store ou no Google Play.</p>`;
 
+  const marca = iconUrl
+    ? `<img class="mark-img" src="${esc(iconUrl)}" alt="Tugyn" width="56" height="56" />`
+    : `<div class="mark" aria-hidden="true">⚽</div>`;
+
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -67,6 +80,13 @@ export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma }: Pagin
 <title>Convite para uma turma no Tugyn</title>
 <meta property="og:title" content="Convite para uma turma no Tugyn">
 <meta property="og:description" content="Toque para abrir o convite no app Tugyn.">
+<meta property="og:type" content="website">
+${paginaUrl ? `<meta property="og:url" content="${esc(paginaUrl)}">` : ""}
+${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">
+<link rel="apple-touch-icon" href="${esc(iconUrl)}">
+<link rel="icon" type="image/png" href="${esc(iconUrl)}">` : ""}
 <style>
   :root {
     --bg: #F2F2F7;
@@ -138,6 +158,15 @@ export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma }: Pagin
     color: var(--accent);
     font-size: 26px;
     line-height: 1;
+  }
+
+  .mark-img {
+    display: inline-block;
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    border-radius: 16px;
+    margin-bottom: 16px;
   }
 
   .eyebrow {
@@ -235,6 +264,7 @@ export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma }: Pagin
 </head>
 <body>
 <main>
+  ${marca}
   <p class="eyebrow">Tugyn</p>
   <h1>Você foi convidado<br>para uma turma</h1>
   <p>Toque no botão para abrir o convite no app.</p>

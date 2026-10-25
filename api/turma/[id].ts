@@ -12,7 +12,7 @@ const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   // Sem scripts: a página é só HTML e CSS.
-  "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
@@ -34,10 +34,19 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
   const lojaIos = resolvePolicy(process.env, "ios").policy.storeUrl;
   const lojaAndroid = resolvePolicy(process.env, "android").policy.storeUrl;
   const plataforma = detectarPlataforma(req.headers["user-agent"]);
+  const host = req.headers.host;
+  const origin =
+    typeof host === "string" && /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host)
+      ? `https://${host}`
+      : null;
+  const iconUrl = origin ? new URL("/tugyn-icon.png", origin).toString() : null;
+  const paginaUrl = origin
+    ? new URL(`/api/turma/${encodeURIComponent(bruto)}`, origin).toString()
+    : null;
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   // O conteúdo muda conforme o aparelho (qual loja mostrar): a CDN guarda uma cópia por User-Agent.
   res.setHeader("Vary", "User-Agent");
   res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=3600");
-  return res.status(200).send(renderizarPagina({ id: bruto, lojaIos, lojaAndroid, plataforma }));
+  return res.status(200).send(renderizarPagina({ id: bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
 }
