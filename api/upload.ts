@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { createHmac } from "node:crypto";
 import { v2 as cloudinary } from "cloudinary";
 import { requireUser } from "./_lib/auth";
 import { handleCors } from "./_lib/cors";
@@ -7,7 +8,20 @@ import { dentroDoLimite } from "./_lib/rateLimit";
 import { isAvatar, parseBucket, parseFolderName, parseImage } from "./_lib/validation";
 import { verificarIntervaloDaImagem } from "./_lib/mediaCooldown";
 
-const MAX_UPLOADS_POR_HORA = 30;
+const MAX_UPLOADS_POR_USUARIO_HORA = 15;
+const MAX_UPLOADS_POR_IP_HORA = 80;
+
+/** O IP fica só como hash no limitador; o UID continua sendo a chave principal. */
+const chaveAnonimaDoIp = (req: VercelRequest): string => {
+  const forwarded = req.headers["x-forwarded-for"];
+  const real = req.headers["x-real-ip"];
+  const cadeia = typeof forwarded === "string" ? forwarded.split(",").map((item) => item.trim()).filter(Boolean) : [];
+  const primeiro = cadeia.length ? cadeia[cadeia.length - 1] : "";
+  const ip = primeiro || (typeof real === "string" ? real.trim() : "") || "desconhecido";
+  const secret = process.env.ADS_IP_SALT || process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (!secret) return "ip_sem_chave";
+  return "ip_" + createHmac("sha256", secret).update(ip).digest("hex").slice(0, 24);
+};
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return; // painel de anúncios (navegador): consulta prévia e cabeçalhos de CORS
@@ -17,22 +31,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Método não permitido." });
   }
 
-  // 1. Quem é o usuário: SEMPRE o uid do token. O `userId` do corpo é ignorado.
+  // O UID sempre vem do token validado; userId no corpo nunca é autoridade.
   const user = await requireUser(req, res);
   if (!user) return;
 
-  if (!(await dentroDoLimite(user.uid, "upload", MAX_UPLOADS_POR_HORA, 3600))) {
-    return res.status(429).json({ error: "Muitos envios em pouco tempo. Tente novamente mais tarde." });
-  }
-
-  // 2. Valida TUDO que veio do cliente.
   const body: Record<string, unknown> =
     typeof req.body === "object" && req.body !== null ? (req.body as Record<string, unknown>) : {};
 
   const bucket = parseBucket(body.bucket);
   if (!bucket) return res.status(400).json({ error: "Bucket inválido." });
 
-  // Banners de anúncios: só administradores (claim `admin`). Quem não é recebe 403 antes de qualquer outra coisa.
+  // Banners de anúncios: só administradores (claim admin). Quem não é recebe 403.
   if (isAdminOnlyBucket(bucket) && !user.admin) {
     return res.status(403).json({ error: "Somente administradores enviam imagens de anúncios." });
   }
@@ -40,20 +49,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const folder = parseFolderName(body.folderName);
   if (!folder) return res.status(400).json({ error: "Nome de pasta inválido." });
 
-  // Foto de perfil e banner de turma: valida o prazo antes de processar ou enviar ao Cloudinary.
+  // A conta de turmas é exclusiva para banners associados a uma turma existente.
+  // Não aceitar upload sem turmaId evita uploads órfãos antes da criação da turma.
+  if (bucket === "turmas" && folder !== "banner") {
+    return res.status(400).json({ error: "Este bucket aceita somente banners de turma." });
+  }
+  if (bucket === "turmas" || (bucket === "times" && folder === "banner")) {
+    if (typeof body.turmaId !== "string" || body.turmaId.length === 0) {
+      return res.status(400).json({ error: "Informe a turma para enviar o banner." });
+    }
+  }
+
+  const limiteUsuario = bucket === "anuncios" ? 80 : MAX_UPLOADS_POR_USUARIO_HORA;
+  if (!(await dentroDoLimite(user.uid, "upload", limiteUsuario, 3600))) {
+    return res.status(429).json({ error: "Muitos envios em pouco tempo. Tente novamente mais tarde." });
+  }
+  if (!(await dentroDoLimite(chaveAnonimaDoIp(req), "upload-ip", MAX_UPLOADS_POR_IP_HORA, 3600))) {
+    return res.status(429).json({ error: "Muitos envios nesta rede. Tente novamente mais tarde." });
+  }
+
+  // Foto e banner: verifica prazo e propriedade no servidor antes de gastar no Cloudinary.
   let cooldown: Awaited<ReturnType<typeof verificarIntervaloDaImagem>> | null = null;
   try {
     if (bucket === "usuarios" && folder === "profile") {
       cooldown = await verificarIntervaloDaImagem(user.uid, "fotoPerfil");
     } else if ((bucket === "turmas" || bucket === "times") && folder === "banner") {
-      // Banners antigos no bucket times precisam atualizar o app para enviar o id da turma.
-      if (bucket === "times" && body.turmaId === undefined) {
-        return res.status(400).json({ error: "Atualize o app para trocar o banner da turma." });
-      }
-      // Sem turmaId só ocorre na escolha inicial do banner durante a criação da turma.
-      if (body.turmaId !== undefined) {
-        cooldown = await verificarIntervaloDaImagem(user.uid, "bannerTurma", body.turmaId);
-      }
+      cooldown = await verificarIntervaloDaImagem(user.uid, "bannerTurma", body.turmaId);
     }
   } catch (error) {
     console.error("[upload] falha ao validar prazo da imagem:", error);
@@ -69,7 +90,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const account = getAccount(bucket);
   if (!account) {
-    console.error(`[upload] bucket "${bucket}" sem credenciais no ambiente`);
+    console.error("[upload] bucket \"" + bucket + "\" sem credenciais no ambiente");
     return res.status(500).json({ error: "Servidor não configurado para este tipo de imagem." });
   }
 
@@ -78,9 +99,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const result = await cloudinary.uploader.upload(body.image as string, {
       ...account, // credenciais por chamada (sem cloudinary.config global)
-      folder: `${bucket}/${user.uid}/${folder}`,
-      // Avatar: id fixo, a foto nova substitui a anterior DO PRÓPRIO usuário (não sobra imagem velha).
-      // Qualquer outra imagem (banner, logo...): id único, nunca sobrescreve nada.
+      folder: bucket + "/" + user.uid + "/" + folder,
+      // Avatar: id fixo, a foto nova substitui a anterior do próprio usuário.
+      // Outras imagens: id único, nunca sobrescreve nada.
       public_id: avatar ? "profile" : undefined,
       overwrite: avatar,
       invalidate: avatar,
@@ -88,11 +109,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       use_filename: false,
       resource_type: "image",
       allowed_formats: ["jpg", "jpeg", "png", "webp"],
-      // Transformação de entrada: o que fica ARMAZENADO é no máximo 1080 px, em qualidade automática.
       transformation: [{ width: 1080, height: 1080, crop: "limit", quality: "auto" }],
-      // Imagens de usuário levam a tag do dono (permite apagar tudo dele na exclusão de conta). Banner de anúncio é da
-      // empresa: não leva essa tag, para não sumir caso a conta de quem o enviou seja apagada.
-      tags: isAdminOnlyBucket(bucket) ? ["anuncio"] : [`uid_${user.uid}`],
+      tags: isAdminOnlyBucket(bucket) ? ["anuncio"] : ["uid_" + user.uid],
     });
 
     return res.status(200).json({ url: result.secure_url, public_id: result.public_id });
