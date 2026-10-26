@@ -16,6 +16,9 @@ import { getFirebaseApp } from "./auth";
  */
 const bloquear = (): boolean => process.env.APP_CHECK_ENFORCE === "true";
 
+/** `code` deixa o app diferenciar esta recusa de um login expirado (os dois são 401). */
+const RECUSA = { code: "app_check_failed", error: "Requisição não verificada. Atualize o app e tente novamente." };
+
 const lerToken = (req: VercelRequest): string | null => {
   const bruto = req.headers["x-firebase-appcheck"];
   const token = Array.isArray(bruto) ? bruto[0] : bruto;
@@ -32,7 +35,7 @@ export const verificarAppCheck = async (
   if (!token) {
     console.log(JSON.stringify({ evt: "app_check_missing", rota, bloqueado: bloquear() }));
     if (!bloquear()) return true;
-    res.status(401).json({ error: "Requisição não verificada. Atualize o app e tente novamente." });
+    res.status(401).json(RECUSA);
     return false;
   }
 
@@ -49,7 +52,7 @@ export const verificarAppCheck = async (
       }),
     );
     if (!bloquear()) return true;
-    res.status(401).json({ error: "Requisição não verificada. Atualize o app e tente novamente." });
+    res.status(401).json(RECUSA);
     return false;
   }
 };
