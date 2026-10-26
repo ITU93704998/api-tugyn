@@ -3,7 +3,8 @@
  *
  * Por que existe: um link `tugyn://turma/<id>` colado no WhatsApp/Instagram não é clicável. Um link
  * https é; esta página então oferece "Abrir no Tugyn" (esquema do app) e "Baixar o app" (loja).
- * Estática e sem dados do usuário: não lê o Firestore nem mostra o nome da turma (qualquer pessoa pode abrir).
+ * Prévia do link (WhatsApp etc.): usa só a cópia pública `turmaPreviews/<id>` (a mesma que o app mostra
+ * para quem abre o convite). Sem ela, a página fica genérica.
  */
 export type Plataforma = "ios" | "android" | "outra";
 
@@ -26,6 +27,68 @@ const esc = (texto: string): string =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
+/** Campos da prévia pública que aparecem no link (já limpos). */
+export interface PreviaTurma {
+  nome: string;
+  arenaNome: string;
+  dias: string;
+  horario: string;
+  /** Banner recortado em 1200x630 (formato de prévia grande), ou "" sem banner. */
+  imagem: string;
+}
+
+const limpar = (valor: unknown, max: number): string =>
+  typeof valor === "string"
+    ? valor.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max).trim()
+    : "";
+
+const DIAS_CURTOS: Record<string, string> = {
+  sunday: "Dom", monday: "Seg", tuesday: "Ter", wednesday: "Qua",
+  thursday: "Qui", friday: "Sex", saturday: "Sáb",
+};
+
+/**
+ * Banner do Cloudinary recortado em 1200x630 (o WhatsApp mostra a prévia grande nesse formato).
+ * Só aceita URLs do próprio Cloudinary; qualquer outra coisa vira "" (a página usa o ícone).
+ */
+export const imagemDaPrevia = (url: unknown): string => {
+  const bruto = limpar(url, 500);
+  const m = /^https:\/\/res\.cloudinary\.com\/([a-z0-9_-]+)\/image\/upload\/([A-Za-z0-9_\-./,]+)$/i.exec(bruto);
+  if (!m) return "";
+  const partes = m[2].split("/");
+  const corte = "c_fill,g_auto,w_1200,h_630,q_auto,f_jpg";
+  const versao = partes.findIndex((p) => /^v\d+$/.test(p));
+  if (versao >= 0) partes.splice(versao, 0, corte);
+  else if (/^[a-z]{1,3}_/.test(partes[0])) return "";
+  else partes.unshift(corte);
+  return `https://res.cloudinary.com/${m[1]}/image/upload/${partes.join("/")}`;
+};
+
+/** Converte o documento `turmaPreviews/<id>` (dado de usuário) na prévia; null se não servir. */
+export const previaDoDocumento = (dados: unknown): PreviaTurma | null => {
+  if (!dados || typeof dados !== "object") return null;
+  const d = dados as Record<string, unknown>;
+  const nome = limpar(d.nome, 80);
+  if (!nome) return null;
+  const dias = Array.isArray(d.diasSemana)
+    ? d.diasSemana
+        .slice(0, 7)
+        .map((dia) => {
+          const texto = limpar(dia, 20);
+          return DIAS_CURTOS[texto.toLowerCase()] ?? texto;
+        })
+        .filter(Boolean)
+        .join(", ")
+    : "";
+  return {
+    nome,
+    arenaNome: limpar(d.arenaNome, 80),
+    dias,
+    horario: limpar(d.horario, 20),
+    imagem: imagemDaPrevia(d.bannerUrl),
+  };
+};
+
 interface PaginaParams {
   id: string;
   lojaIos: string | null;
@@ -33,6 +96,7 @@ interface PaginaParams {
   plataforma: Plataforma;
   iconUrl?: string | null;
   paginaUrl?: string | null;
+  previa?: PreviaTurma | null;
 }
 
 export const renderizarPagina = ({
@@ -42,8 +106,29 @@ export const renderizarPagina = ({
   plataforma,
   iconUrl,
   paginaUrl,
+  previa,
 }: PaginaParams): string => {
   const abrir = `tugyn://turma/${encodeURIComponent(id)}`;
+
+  const titulo = previa ? `${previa.nome} · Tugyn` : "Convite para uma turma no Tugyn";
+  const detalhes = previa
+    ? [previa.arenaNome, previa.dias, previa.horario].filter(Boolean).join(" · ")
+    : "";
+  const descricao = detalhes
+    ? `${detalhes}. Toque para entrar na turma pelo app Tugyn.`
+    : "Toque para abrir o convite no app Tugyn.";
+
+  // Banner em formato grande quando existe; senão, o ícone (prévia pequena).
+  const imagemMeta = previa?.imagem
+    ? `<meta property="og:image" content="${esc(previa.imagem)}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">`
+    : iconUrl
+      ? `<meta property="og:image" content="${esc(iconUrl)}">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">`
+      : "";
 
   const lojas: { rotulo: string; url: string; icone: string }[] = [];
   if (plataforma !== "android" && lojaIos) {
@@ -77,15 +162,16 @@ export const renderizarPagina = ({
 <meta name="robots" content="noindex">
 <meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
-<title>Convite para uma turma no Tugyn</title>
-<meta property="og:title" content="Convite para uma turma no Tugyn">
-<meta property="og:description" content="Toque para abrir o convite no app Tugyn.">
+<title>${esc(titulo)}</title>
+<meta name="description" content="${esc(descricao)}">
+<meta property="og:title" content="${esc(titulo)}">
+<meta property="og:description" content="${esc(descricao)}">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="Tugyn">
+<meta property="og:locale" content="pt_BR">
 ${paginaUrl ? `<meta property="og:url" content="${esc(paginaUrl)}">` : ""}
-${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
-<meta property="og:image:width" content="512">
-<meta property="og:image:height" content="512">
-<link rel="apple-touch-icon" href="${esc(iconUrl)}">
+${imagemMeta}
+${iconUrl ? `<link rel="apple-touch-icon" href="${esc(iconUrl)}">
 <link rel="icon" type="image/png" href="${esc(iconUrl)}">` : ""}
 <style>
   :root {
@@ -266,8 +352,11 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
 <main>
   ${marca}
   <p class="eyebrow">Tugyn</p>
-  <h1>Você foi convidado<br>para uma turma</h1>
-  <p>Toque no botão para abrir o convite no app.</p>
+  ${previa
+    ? `<h1>Você foi convidado para<br>${esc(previa.nome)}</h1>
+  <p>${detalhes ? `${esc(detalhes)}<br>` : ""}Toque no botão para abrir o convite no app.</p>`
+    : `<h1>Você foi convidado<br>para uma turma</h1>
+  <p>Toque no botão para abrir o convite no app.</p>`}
 
   <a class="btn-primary" href="${esc(abrir)}">Abrir no Tugyn</a>
 
