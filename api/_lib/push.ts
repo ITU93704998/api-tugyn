@@ -32,7 +32,8 @@ export type PushRequest =
   | { action: "remover"; token: string }
   | { action: "notificar"; evento: "pedido_entrada"; turmaId: string }
   | { action: "notificar"; evento: "pedido_aceito"; turmaId: string; userId: string }
-  | { action: "notificar"; evento: "partida_aberta"; turmaId: string };
+  | { action: "notificar"; evento: "partida_aberta"; turmaId: string }
+  | { action: "notificar"; evento: "presenca_confirmada"; turmaId: string };
 
 export type ParseResult = { ok: true; value: PushRequest } | { ok: false; error: string };
 
@@ -52,6 +53,7 @@ export const parsePushBody = (body: unknown): ParseResult => {
     if (!isSafeUid(b.turmaId)) return { ok: false, error: "Turma inválida." };
     if (b.evento === "pedido_entrada") return { ok: true, value: { action: "notificar", evento: "pedido_entrada", turmaId: b.turmaId } };
     if (b.evento === "partida_aberta") return { ok: true, value: { action: "notificar", evento: "partida_aberta", turmaId: b.turmaId } };
+    if (b.evento === "presenca_confirmada") return { ok: true, value: { action: "notificar", evento: "presenca_confirmada", turmaId: b.turmaId } };
     if (b.evento === "pedido_aceito") {
       if (!isSafeUid(b.userId)) return { ok: false, error: "Usuário inválido." };
       return { ok: true, value: { action: "notificar", evento: "pedido_aceito", turmaId: b.turmaId, userId: b.userId } };
@@ -79,6 +81,7 @@ export interface TurmaForPush {
 export interface JogoForPush {
   status?: unknown;
   criadoPor?: unknown;
+  confirmados?: unknown;
   horario?: unknown;
 }
 export interface ParticipanteForPush {
@@ -89,7 +92,7 @@ export interface ParticipanteForPush {
 export interface PushDraft {
   title: string;
   body: string;
-  data: { tipo: "pedido_entrada" | "pedido_aceito" | "partida_aberta"; turmaId: string };
+  data: { tipo: "pedido_entrada" | "pedido_aceito" | "partida_aberta" | "presenca_confirmada"; turmaId: string };
 }
 
 export type Authorization =
@@ -167,7 +170,7 @@ export type BroadcastAuthorization =
   | { ok: false; status: number; error: string };
 
 /**
- * O ORGANIZADOR abriu a partida de hoje: avisa os MEMBROS APROVADOS da turma (menos ele). Só vale se quem chama é o criador da turma e se a partida
+ * O ORGANIZADOR abriu a partida de hoje: avisa os MEMBROS APROVADOS da turma (sem o organizador). Só vale se quem chama é o criador da turma e se a partida
  * de HOJE (dia calculado pelo servidor) existe, está aberta e foi aberta por ele. Quem recebe vem sempre da lista de membros da turma no Firestore.
  */
 export const authorizeGameOpened = (callerUid: string, turmaId: string, diaId: string, turma: TurmaForPush | null, jogo: JogoForPush | null): BroadcastAuthorization => {
@@ -187,6 +190,30 @@ export const authorizeGameOpened = (callerUid: string, turmaId: string, diaId: s
       title: `Partida de hoje: ${sanitizeText(turma.nome, NAME_MAX, "sua turma")}`,
       body: `O organizador abriu a partida de hoje${horario ? ` às ${horario}` : ""}. Toque para confirmar sua presença.`,
       data: { tipo: "partida_aberta", turmaId },
+    },
+  };
+};
+
+/** A confirmacao ja deve existir na partida de hoje; o destino vem sempre da turma. */
+export const authorizeAttendanceConfirmed = (callerUid: string, turmaId: string, diaId: string, turma: TurmaForPush | null, jogo: JogoForPush | null): Authorization => {
+  if (!turma) return fail(404, "Turma nao encontrada.");
+  if (!isActive(turma)) return fail(409, "Esta turma esta encerrada.");
+  if (!isSafeUid(turma.creatorId)) return fail(409, "Turma sem organizador.");
+  if (turma.creatorId === callerUid) return fail(400, "O organizador nao precisa avisar a propria presenca.");
+  if (!Array.isArray(turma.participantes) || !turma.participantes.includes(callerUid)) return fail(403, "Voce nao participa desta turma.");
+  if (!jogo || jogo.status !== "aberta") return fail(409, "A partida de hoje nao esta aberta.");
+  const confirmados = jogo.confirmados;
+  if (typeof confirmados !== "object" || confirmados === null || Array.isArray(confirmados) || !Object.prototype.hasOwnProperty.call(confirmados, callerUid)) return fail(409, "Presenca nao confirmada.");
+  const presenca = (confirmados as Record<string, unknown>)[callerUid];
+  if (typeof presenca !== "object" || presenca === null || Array.isArray(presenca)) return fail(409, "Presenca invalida.");
+  return {
+    ok: true,
+    recipientUid: turma.creatorId,
+    dedupeKey: `presenca_confirmada_${turmaId}_${diaId}_${callerUid}`,
+    draft: {
+      title: "Presença confirmada",
+      body: `${sanitizeText((presenca as { nome?: unknown }).nome, NAME_MAX, "Um jogador")} confirmou presença na partida de hoje da turma ${sanitizeText(turma.nome, NAME_MAX, "sua turma")}.`,
+      data: { tipo: "presenca_confirmada", turmaId },
     },
   };
 };

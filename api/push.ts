@@ -11,6 +11,7 @@ import {
   type Authorization,
   type PushDraft,
   authorizeGameOpened,
+  authorizeAttendanceConfirmed,
   authorizeJoinApproved,
   authorizeJoinRequest,
   buildMessages,
@@ -29,6 +30,7 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  *  - notificar   { evento: "pedido_entrada", turmaId }                   o solicitante avisa o organizador
  *  - notificar   { evento: "pedido_aceito", turmaId, userId }            o organizador avisa quem entrou
  *  - notificar   { evento: "partida_aberta", turmaId }                   o organizador abriu a partida de hoje: avisa os membros da turma
+ *  - notificar   { evento: "presenca_confirmada", turmaId }             avisa o organizador apos confirmar presenca
  * Uma rota só (o plano gratuito da Vercel limita o número de funções). O uid vem SEMPRE do login; o destinatário vem SEMPRE do Firestore.
  */
 const TOKENS = "pushTokens";
@@ -144,6 +146,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // notificar
     const turmaSnap = await db.doc(`turmas/${request.turmaId}`).get();
     const turma = turmaSnap.exists ? (turmaSnap.data() ?? null) : null;
+
+    if (request.evento === "presenca_confirmada") {
+      const { id: diaId } = diaDeBrasilia(Date.now());
+      const jogoSnap = await db.doc(`turmas/${request.turmaId}/jogos/${diaId}`).get();
+      const auth = authorizeAttendanceConfirmed(user.uid, request.turmaId, diaId, turma, jogoSnap.exists ? (jogoSnap.data() ?? null) : null);
+      if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+      const resultado = await enviarAviso(db, { evento: "presenca_confirmada", turmaId: request.turmaId, dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_PARTIDA_MS, recipientUids: [auth.recipientUid], dedupeUid: user.uid, draft: auth.draft });
+      return res.status(200).json(resultado);
+    }
 
     if (request.evento === "partida_aberta") {
       // O "hoje" é o do SERVIDOR (Brasília): o app não escolhe o dia. A partida de hoje tem que existir, estar aberta e ter sido aberta por quem chama.
