@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { createHash } from "node:crypto";
 import { FieldValue, type Firestore, getFirestore } from "firebase-admin/firestore";
 import { dayKey, parseAdEvents, statDocId, type AdEvent } from "./_lib/adEvents";
+import { verificarAppCheck } from "./_lib/appCheck";
 import { getFirebaseApp } from "./_lib/auth";
 import { dentroDoLimite } from "./_lib/rateLimit";
 
@@ -43,6 +44,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Método não permitido." });
   }
+
+  if (!(await verificarAppCheck(req, res, "ad-events"))) return;
 
   const parsed = parseAdEvents(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });

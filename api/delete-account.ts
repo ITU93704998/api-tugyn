@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { excluirConta, StepError } from "./_lib/accountDeletion";
+import { verificarAppCheck } from "./_lib/appCheck";
 import { getFirebaseApp, requireUser } from "./_lib/auth";
 import { apagarImagensDoUsuario } from "./_lib/cloudinaryCleanup";
 import { dentroDoLimite } from "./_lib/rateLimit";
@@ -29,6 +30,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const user = await requireUser(req, res);
   if (!user) return;
+  if (!(await verificarAppCheck(req, res, "delete-account"))) return;
 
   if (Date.now() / 1000 - user.authTime > MAX_IDADE_DO_LOGIN_SEGUNDOS) {
     return res.status(403).json({

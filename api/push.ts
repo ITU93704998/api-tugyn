@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { type DocumentReference, type Firestore, getFirestore } from "firebase-admin/firestore";
+import { verificarAppCheck } from "./_lib/appCheck";
 import { getFirebaseApp, requireUser } from "./_lib/auth";
 import {
   DEDUPE_MS,
@@ -111,6 +112,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const user = await requireUser(req, res);
   if (!user) return; // requireUser já respondeu (401/500)
+  if (!(await verificarAppCheck(req, res, "push"))) return;
 
   const parsed = parsePushBody(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });

@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
+import { verificarAppCheck } from "./_lib/appCheck";
 import { requireUser } from "./_lib/auth";
 import { handleCors } from "./_lib/cors";
 import { getAccount, isAdminOnlyBucket } from "./_lib/config";
@@ -18,6 +19,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const user = await requireUser(req, res);
   if (!user) return;
+  // Administradores usam o painel (navegador, sem App Check); o app manda o token.
+  if (!user.admin && !(await verificarAppCheck(req, res, "delete"))) return;
 
   if (!(await dentroDoLimite(user.uid, "delete", MAX_EXCLUSOES_POR_HORA, 3600))) {
     return res.status(429).json({ error: "Muitas exclusões em pouco tempo. Tente novamente mais tarde." });
