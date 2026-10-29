@@ -21,7 +21,24 @@ export interface Estatisticas {
   turmas: number;
   /** Só as ativas: é o número que o card mostra. */
   turmasAtivas: number;
+  /** Soma da temporada atual (`participantes/{uid}.temporadas[chave]`, gravado pelo app ao enviar a partida). */
+  temporada: { chave: string; gols: number; assistencias: number; jogos: number };
 }
+
+/** Meses de cada temporada: o MESMO valor do app (`MESES_POR_TEMPORADA` em `partidasFiltro.ts`). */
+export const MESES_POR_TEMPORADA = 2;
+
+/**
+ * Campo da temporada que contém `data` ("t2026_5" = 5ª temporada de 2026), no fuso de Brasília. Mesma regra do app
+ * (`campoDaTemporada` em `partidasFiltro.ts`): mudou lá, mude aqui.
+ */
+export const campoDaTemporada = (data: Date = new Date()): string => {
+  const partes = new Intl.DateTimeFormat("en-US", { timeZone: "America/Sao_Paulo", year: "numeric", month: "numeric" })
+    .formatToParts(data);
+  const ano = Number(partes.find((p) => p.type === "year")?.value);
+  const mes = Number(partes.find((p) => p.type === "month")?.value) - 1;
+  return `t${ano}_${Math.floor(mes / MESES_POR_TEMPORADA) + 1}`;
+};
 
 type Dados = Record<string, unknown> | null | undefined;
 
@@ -36,8 +53,17 @@ export const turmaAtiva = (turma: Dados): boolean => turma?.status !== "encerrad
  * Soma os números do jogador. `turmas`: as turmas em que ele está; `participantes`: o documento dele em cada uma (mesma ordem;
  * null se não existir). Participante que não é "aprovado" (pedido pendente) não conta.
  */
-export const somarEstatisticas = (turmas: Dados[], participantes: Dados[]): Estatisticas => {
-  const total: Estatisticas = { gols: 0, assistencias: 0, jogos: 0, vitorias: 0, turmas: 0, turmasAtivas: 0 };
+export const somarEstatisticas = (turmas: Dados[], participantes: Dados[], agora: Date = new Date()): Estatisticas => {
+  const chave = campoDaTemporada(agora);
+  const total: Estatisticas = {
+    gols: 0,
+    assistencias: 0,
+    jogos: 0,
+    vitorias: 0,
+    turmas: 0,
+    turmasAtivas: 0,
+    temporada: { chave, gols: 0, assistencias: 0, jogos: 0 },
+  };
   turmas.forEach((turma, i) => {
     const p = participantes[i];
     if (!p || p.status !== "aprovado") return;
@@ -47,6 +73,11 @@ export const somarEstatisticas = (turmas: Dados[], participantes: Dados[]): Esta
     total.assistencias += numero(p.assistencias);
     total.jogos += numero(p.jogos);
     total.vitorias += numero(p.vitorias);
+    const temporadas = p.temporadas as Record<string, Dados> | undefined;
+    const t = temporadas && typeof temporadas === "object" ? temporadas[chave] : null;
+    total.temporada.gols += numero(t?.gols);
+    total.temporada.assistencias += numero(t?.assistencias);
+    total.temporada.jogos += numero(t?.jogos);
   });
   return total;
 };

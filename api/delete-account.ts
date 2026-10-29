@@ -20,6 +20,8 @@ export const config = { maxDuration: 60 };
 const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
   { collection: "pushTokens", field: "uid" }, // tokens de notificação do usuário (api/push.ts)
   { collection: "pushDedupe", field: "targetUid" }, // registros de "já avisei" (api/push.ts)
+  { collection: "desafios", field: "desafianteId" }, // desafios que ele criou (api/desafios.ts)
+  { collection: "desafios", field: "desafiadoId" }, // desafios que ele recebeu
 ];
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
