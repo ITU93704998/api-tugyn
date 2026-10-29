@@ -92,7 +92,10 @@ export interface ParticipanteForPush {
 export interface PushDraft {
   title: string;
   body: string;
-  data: { tipo: "pedido_entrada" | "pedido_aceito" | "partida_aberta" | "presenca_confirmada"; turmaId: string };
+  data: {
+    tipo: "pedido_entrada" | "pedido_aceito" | "partida_aberta" | "presenca_confirmada" | "organizacao_transferida";
+    turmaId: string;
+  };
 }
 
 export type Authorization =
