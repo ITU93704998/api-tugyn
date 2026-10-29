@@ -100,9 +100,11 @@ const CITY_PATTERN = /^[a-z0-9]+([-_][a-z0-9]+)*$/;
 
 /**
  * Forma ÚNICA de comparar ids de cidade. O app grava `users/{uid}.location.cityId` com sublinhado (ex.: "palmas_to"); a entrada
- * com hífen ("palmas-to") é aceita e tratada como a mesma cidade. Use dos dois lados ao comparar.
+ * com hífen ("palmas-to") é aceita e tratada como a mesma cidade, assim como ids antigos com apóstrofo ou acento ("pau_d'arco_to"
+ * = "pau_d_arco_to"). Use dos dois lados ao comparar.
  */
-export const canonicalCity = (value: string): string => value.trim().toLowerCase().replace(/-/g, "_");
+export const canonicalCity = (value: string): string =>
+  value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 /** https obrigatório, sem usuário/senha, sem espaços nem caracteres de controle. Barra `javascript:`, `http:`, `data:` etc. */
 const HTTPS_URL = /^https:\/\/[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:\d{1,5})?([/?#][^\s\u0000-\u001f\u007f]*)?$/;
 
