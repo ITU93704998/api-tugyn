@@ -96,6 +96,8 @@ export interface PushDraft {
     tipo: "pedido_entrada" | "pedido_aceito" | "partida_aberta" | "presenca_confirmada" | "organizacao_transferida" | "desafio";
     /** Vazio nos avisos de desafio (o toque abre a aba Desafios). */
     turmaId: string;
+    /** Só nos avisos de desafio: o toque abre a aba destacando este desafio. */
+    desafioId?: string;
   };
 }
 

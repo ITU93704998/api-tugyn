@@ -25,8 +25,10 @@ export const DIAS_MINIMOS_TEMPORADA_ATUAL = 7;
 export const DIAS_APURACAO = 3;
 export const MINUTOS_ANTES_DA_PARTIDA = 30;
 export const HORAS_APURACAO_DIA = 12;
-export const MAX_PARTIDAS_DO_DIA = 30;
+export const MAX_PARTIDAS_DO_DIA = 100;
 const DIA_MS = 24 * 3600_000;
+/** Desafio aceito que ninguém apurou continua ocupando vaga até este tempo depois de o resultado ser liberado. */
+const FOLGA_VAGA_ACEITO_MS = 7 * DIA_MS;
 /** Brasília (UTC−3, sem horário de verão desde 2019): o mesmo fuso que `diaDeBrasilia` usa. */
 const FUSO_MS = 3 * 3600_000;
 const MESES_CURTOS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
@@ -150,10 +152,14 @@ export const partidaEhDoDia = (p: PartidaSalva, dia: string): boolean => {
   return diaDeBrasiliaDe(Number.isFinite(dataMs) ? dataMs : p.salvadoEmMs) === dia;
 };
 
-/** Soma gols/assistências/jogos do atleta só nas partidas daquele dia (cada partida em que ele aparece = 1 jogo). */
-export const somarDoDia = (partidas: PartidaSalva[], dia: string, uid: string): Numeros => {
+/**
+ * Soma gols/assistências/jogos do atleta em TODAS as partidas da turma daquele dia (cada partida em que ele aparece = 1 jogo).
+ * `corteMs`: partidas enviadas pela primeira vez a partir dele não entram (o mesmo corte para qualquer hora de apuração).
+ */
+export const somarDoDia = (partidas: PartidaSalva[], dia: string, uid: string, corteMs = Number.POSITIVE_INFINITY): Numeros => {
   const total = { gols: 0, assistencias: 0, jogos: 0, pontos: 0 };
   for (const p of partidas) {
+    if (p.salvadoEmMs >= corteMs) continue;
     if (!partidaEhDoDia(p, dia) || !Array.isArray(p.jogadores)) continue;
     const meus = (p.jogadores as Dados[]).filter((j) => j?.participanteId === uid);
     if (meus.length === 0) continue;
@@ -245,6 +251,22 @@ export const atletaDe = (uid: string, perfil: Dados): Atleta => ({
   foto: typeof perfil?.profileImage === "string" && perfil.profileImage.startsWith("https://") ? perfil.profileImage.slice(0, 500) : "",
 });
 
+// ─── Vagas (limite de desafios ativos) ────────────────────────────────────────
+//
+// `desafiosVagas/{uid}` = { uid, ativos: { [desafioId]: venceEmMs } }. Lido e gravado na MESMA transação que cria o desafio:
+// duas criações ao mesmo tempo não passam do limite. Cada vaga tem validade: convite que ninguém respondeu deixa de contar no
+// prazo para aceitar, mesmo que ninguém abra o app (a expiração do documento vem depois, pela rotina diária).
+
+/** Vagas ainda válidas (a vaga vence em `venceEm`). */
+export const vagasValidas = (ativos: unknown, agoraMs: number): Record<string, number> => {
+  const validas: Record<string, number> = {};
+  if (typeof ativos !== "object" || ativos === null) return validas;
+  for (const [id, venceEm] of Object.entries(ativos as Record<string, unknown>)) {
+    if (typeof venceEm === "number" && venceEm > agoraMs && isDesafioId(id)) validas[id] = venceEm;
+  }
+  return validas;
+};
+
 export interface ContextoCriacao {
   uid: string;
   desafiadoId: string;
@@ -274,7 +296,7 @@ export type Criacao = { ok: true; id: string; dados: Record<string, unknown>; dr
 const periodoDoDesafio = (
   c: ContextoCriacao,
 ):
-  | { ok: true; chave: string; campos: Record<string, unknown>; descricao: string }
+  | { ok: true; chave: string; campos: Record<string, unknown>; descricao: string; prazoParaAceitarMs: number }
   | Negado => {
   const temporadaAtual = temporadaInfo(c.agoraMs);
   if (c.tipo === "dia") {
@@ -286,6 +308,7 @@ const periodoDoDesafio = (
     return {
       ok: true,
       chave: partida.chave,
+      prazoParaAceitarMs: partida.partidaMs,
       descricao: `na partida de hoje (${partida.horario})`,
       campos: {
         tipo: "dia",
@@ -305,6 +328,7 @@ const periodoDoDesafio = (
   return {
     ok: true,
     chave: temporada.chave,
+    prazoParaAceitarMs: temporada.fimMs,
     descricao: `temporada ${temporada.rotulo}`,
     campos: {
       tipo: "temporada",
@@ -319,9 +343,14 @@ const periodoDoDesafio = (
 /** Pode criar? Devolve o documento (sem os carimbos de data do servidor) e o aviso para o desafiado. */
 export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
   if (c.uid === c.desafiadoId) return negar(409, "mesmo_atleta", "Você não pode desafiar a si mesmo.");
+  // O id junta os uids com "__": uid com "__" poderia gerar o mesmo id para duplas diferentes (os do Firebase nunca têm).
+  if (c.uid.includes("__") || c.desafiadoId.includes("__")) return negar(409, "atleta_invalido", "Não é possível desafiar este atleta.");
+  if (c.perfilDesafiante?.status === "suspended") return negar(403, "conta_suspensa", "Sua conta está suspensa e não pode desafiar.");
   if (!c.perfilDesafiado || c.perfilDesafiado.status === "suspended") {
     return negar(404, "atleta_nao_encontrado", "Este atleta não está disponível.");
   }
+  // Política: perfil privado não recebe desafios (o app já esconde o botão; aqui vale para qualquer cliente).
+  if (c.perfilDesafiado.isPublic === false) return negar(403, "perfil_privado", "Este atleta tem o perfil privado e não recebe desafios.");
   if (c.bloqueio) return negar(403, "bloqueado", "Não é possível desafiar este atleta.");
   if (!c.turma) {
     return negar(409, "sem_turma_em_comum", "Vocês dois precisam estar nesta turma, e ela precisa estar ativa.");
@@ -357,6 +386,8 @@ export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
       ...periodo.campos,
       turmas: [c.turma],
       status: "pendente",
+      // Quando a rotina diária deve olhar este desafio: no pendente, o fim do prazo para aceitar (para expirar).
+      apurarEm: new Date(periodo.prazoParaAceitarMs),
     },
     draft: {
       title: "Você foi desafiado!",
@@ -366,7 +397,9 @@ export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
   };
 };
 
+/** Timestamp lido do Firestore ou Date dos dados ainda não gravados (a vaga é calculada na criação). */
 const millis = (valor: unknown): number => {
+  if (valor instanceof Date) return valor.getTime();
   const t = valor as { toMillis?: () => number } | undefined;
   return typeof t?.toMillis === "function" ? t.toMillis() : 0;
 };
@@ -456,17 +489,38 @@ export type Apuracao =
   | { ok: true; acao: "nada" }
   | Negado;
 
-/** Quando o resultado pode sair: `HORAS_APURACAO_DIA` depois do fim do dia, ou `DIAS_APURACAO` depois do fim da temporada. */
+/**
+ * Quando o resultado pode sair: `HORAS_APURACAO_DIA` depois do fim do dia, ou `DIAS_APURACAO` depois do fim da temporada.
+ * No desafio do dia é também o CORTE: partidas enviadas depois disso não entram (o resultado não muda conforme a hora em que
+ * a apuração rodou).
+ */
 export const apuracaoLiberadaEm = (desafio: Dados): number =>
   fimDe(desafio) + (ehDoDia(desafio) ? HORAS_APURACAO_DIA * 3600_000 : DIAS_APURACAO * DIA_MS);
 
+/** Até quando a vaga do desafio conta no limite de ativos (pendente: prazo para aceitar; aceito: resultado + folga). */
+export const vagaVenceEm = (desafio: Dados, status: "pendente" | "aceito"): number =>
+  status === "pendente" ? prazoParaAceitar(desafio) : apuracaoLiberadaEm(desafio) + FOLGA_VAGA_ACEITO_MS;
+
+/** Ao aceitar: o que ainda precisa valer (o convite pode ter sido criado antes de um bloqueio ou de alguém sair da turma). */
+export const motivoParaNaoAceitar = (c: { bloqueio: boolean; turma: Dados; perfilDesafiante: Dados; desafio: Dados }): string | null => {
+  if (c.bloqueio) return "Não é possível aceitar este desafio.";
+  if (!c.perfilDesafiante || c.perfilDesafiante.status === "suspended") return "Quem desafiou você não está mais disponível.";
+  const membros = listaDe(c.turma?.participantes);
+  if (!turmaAtiva(c.turma) || !c.turma) return "A turma deste desafio foi encerrada.";
+  if (!membros.includes(String(c.desafio?.desafianteId)) || !membros.includes(String(c.desafio?.desafiadoId))) {
+    return "Vocês não estão mais juntos na turma deste desafio.";
+  }
+  return null;
+};
+
 /**
  * O que fazer com o desafio agora: aceito e com a apuração liberada → finalizar; pendente depois do prazo para aceitar →
- * expirar; qualquer outro caso → nada (pedir cedo não é erro: o app pergunta ao abrir a tela).
+ * expirar; qualquer outro caso → nada (pedir cedo não é erro: o app pergunta ao abrir a tela). `uid` null = rotina do
+ * servidor (não precisa participar).
  */
-export const decidirApuracao = (uid: string, desafio: Dados, agoraMs: number): Apuracao => {
+export const decidirApuracao = (uid: string | null, desafio: Dados, agoraMs: number): Apuracao => {
   if (!desafio) return negar(404, "desafio_nao_encontrado", "Desafio não encontrado.");
-  if (!listaDe(desafio.participantes).includes(uid)) return negar(403, "nao_participante", "Você não participa deste desafio.");
+  if (uid !== null && !listaDe(desafio.participantes).includes(uid)) return negar(403, "nao_participante", "Você não participa deste desafio.");
   if (desafio.status === "pendente" && agoraMs >= prazoParaAceitar(desafio)) return { ok: true, acao: "expirar" };
   if (desafio.status === "aceito" && agoraMs >= apuracaoLiberadaEm(desafio)) return { ok: true, acao: "finalizar" };
   return { ok: true, acao: "nada" };

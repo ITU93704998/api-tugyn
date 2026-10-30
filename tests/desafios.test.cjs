@@ -174,6 +174,55 @@ test('desafio do dia: soma só as partidas daquele dia', () => {
   assert.deepEqual(d.somarDoDia(partidas, '2026-11-10', 'c'), { gols: 0, assistencias: 0, jogos: 0, pontos: 0 });
 });
 
+test('criação: conta suspensa, perfil privado e uid com "__"', () => {
+  assert.equal(d.autorizarCriacao({ ...base, perfilDesafiante: { status: 'suspended' } }).code, 'conta_suspensa');
+  assert.equal(d.autorizarCriacao({ ...base, perfilDesafiado: { name: 'Beto', isPublic: false } }).code, 'perfil_privado');
+  assert.equal(d.autorizarCriacao({ ...base, perfilDesafiado: { name: 'Beto', isPublic: true } }).ok, true);
+  assert.equal(d.autorizarCriacao({ ...base, desafiadoId: 'x__y' }).code, 'atleta_invalido');
+  // a rotina diária acha o convite pelo prazo para aceitar
+  assert.equal(d.autorizarCriacao(base).dados.apurarEm.getTime(), Date.parse('2027-01-01T03:00:00Z'));
+});
+
+test('vagas: só as válidas contam e a validade depende do status', () => {
+  const ativos = { 't2026_6__a__b': AGORA + 1, 't2026_6__a__c': AGORA, '../x': AGORA + 9, 't2026_6__a__d': 'x' };
+  assert.deepEqual(d.vagasValidas(ativos, AGORA), { 't2026_6__a__b': AGORA + 1 });
+  assert.deepEqual(d.vagasValidas(null, AGORA), {});
+  // calculada com os dados da criação (Date) e com os lidos do Firestore (Timestamp)
+  const criado = d.autorizarCriacao(base).dados;
+  const fim = Date.parse('2027-01-01T03:00:00Z');
+  assert.equal(d.vagaVenceEm(criado, 'pendente'), fim);
+  assert.equal(d.vagaVenceEm(desafio(), 'pendente'), fim);
+  assert.equal(d.vagaVenceEm(desafio(), 'aceito'), fim + 3 * DIA + 7 * DIA);
+});
+
+test('aceitar: revalida bloqueio, conta de quem desafiou e turma', () => {
+  const turma = { status: 'ativa', participantes: ['a', 'b'] };
+  const c = { bloqueio: false, turma, perfilDesafiante: { name: 'Ana' }, desafio: desafio() };
+  assert.equal(d.motivoParaNaoAceitar(c), null);
+  assert.ok(d.motivoParaNaoAceitar({ ...c, bloqueio: true }));
+  assert.ok(d.motivoParaNaoAceitar({ ...c, perfilDesafiante: { status: 'suspended' } }));
+  assert.ok(d.motivoParaNaoAceitar({ ...c, perfilDesafiante: null }));
+  assert.ok(d.motivoParaNaoAceitar({ ...c, turma: { ...turma, status: 'encerrada' } }));
+  assert.ok(d.motivoParaNaoAceitar({ ...c, turma: { status: 'ativa', participantes: ['a'] } }));
+  assert.ok(d.motivoParaNaoAceitar({ ...c, turma: null }));
+});
+
+test('rotina do servidor apura sem ser participante', () => {
+  const fim = Date.parse('2027-01-01T03:00:00Z');
+  assert.equal(d.decidirApuracao(null, desafio({ status: 'aceito' }), fim + 3 * DIA).acao, 'finalizar');
+  assert.equal(d.decidirApuracao(null, desafio(), fim).acao, 'expirar');
+});
+
+test('desafio do dia: partidas enviadas depois do corte não entram', () => {
+  const corte = Date.parse('2026-11-11T15:00:00Z');
+  const partidas = [
+    { data: '2026-11-11T00:30:00.000Z', salvadoEmMs: corte - 1, jogadores: [{ participanteId: 'a', gols_partida: 1 }] },
+    { data: '2026-11-11T01:30:00.000Z', salvadoEmMs: corte, jogadores: [{ participanteId: 'a', gols_partida: 5 }] },
+  ];
+  assert.equal(d.somarDoDia(partidas, '2026-11-10', 'a', corte).gols, 1);
+  assert.equal(d.somarDoDia(partidas, '2026-11-10', 'a').gols, 6);
+});
+
 test('soma só a temporada do desafio e decide o vencedor', () => {
   const docs = [
     { temporadas: { t2026_6: { gols: 2, assistencias: 1, jogos: 3 }, t2026_5: { gols: 9 } } },

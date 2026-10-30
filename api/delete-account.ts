@@ -24,7 +24,31 @@ const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
   { collection: "desafios", field: "desafianteId" }, // desafios que ele criou (api/desafios.ts)
   { collection: "desafios", field: "desafiadoId" }, // desafios que ele recebeu
   { collection: "avaliacoes", field: "avaliadoId" }, // avaliações que ele recebeu (o resumo some junto com o perfil)
+  { collection: "desafiosVagas", field: "uid" }, // vagas de desafio dele (api/desafios.ts)
 ];
+
+/** Desafios em aberto dele, lidos ANTES da exclusão (o documento de vagas some junto): `{ desafioId: adversário }`. */
+const desafiosEmAberto = async (db: Firestore, uid: string): Promise<Record<string, string>> => {
+  const snap = await db.doc(`desafiosVagas/${uid}`).get();
+  const ativos = snap.get("ativos");
+  const pares: Record<string, string> = {};
+  if (!ativos || typeof ativos !== "object") return pares;
+  for (const id of Object.keys(ativos as Record<string, unknown>)) {
+    const [, a, b] = id.split("__");
+    const outro = a === uid ? b : b === uid ? a : null;
+    if (outro && /^[A-Za-z0-9_-]{1,128}$/.test(outro)) pares[id] = outro;
+  }
+  return pares;
+};
+
+/** Os desafios dele foram apagados: a vaga que cada um ocupava no adversário é liberada. */
+const liberarVagasDosAdversarios = async (db: Firestore, pares: Record<string, string>): Promise<void> => {
+  const porAdversario = new Map<string, string[]>();
+  for (const [id, outro] of Object.entries(pares)) porAdversario.set(outro, [...(porAdversario.get(outro) ?? []), id]);
+  for (const [outro, ids] of porAdversario) {
+    await db.doc(`desafiosVagas/${outro}`).set({ ativos: Object.fromEntries(ids.map((id) => [id, FieldValue.delete()])) }, { merge: true });
+  }
+};
 
 /**
  * Avaliações que ele DEU (api/avaliacoes.ts): cada uma sai do resumo do avaliado e é apagada. Roda depois que a conta já
@@ -84,6 +108,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const app = getFirebaseApp();
+    const desafios = await desafiosEmAberto(getFirestore(app), user.uid).catch(() => ({}));
     const outcome = await excluirConta(
       {
         db: getFirestore(app),
@@ -115,6 +140,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       await removerAvaliacoesDadas(getFirestore(app), user.uid);
     } catch (erro) {
       console.error(JSON.stringify({ evt: "account_delete_warning", step: "avaliacoes_dadas", message: (erro as Error)?.message ?? String(erro) }));
+    }
+    try {
+      await liberarVagasDosAdversarios(getFirestore(app), desafios);
+    } catch (erro) {
+      console.error(JSON.stringify({ evt: "account_delete_warning", step: "vagas_desafios", message: (erro as Error)?.message ?? String(erro) }));
     }
 
     console.log(JSON.stringify({ evt: "account_deleted", ...outcome.report }));
