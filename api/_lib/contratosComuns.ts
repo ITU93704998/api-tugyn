@@ -1,5 +1,6 @@
 import type { VercelResponse } from "@vercel/node";
 import { type DocumentReference, type Firestore, type Transaction } from "firebase-admin/firestore";
+import { readContacts } from "./contatos";
 import { parseConfig } from "./contratoCore";
 import { COLECAO, CONFIG_DOC, type ClienteContrato, type ContratoDoc, TOKEN_FORMATO, gerarCodigo, gerarToken, hashToken, novoContrato, parseContrato } from "./contratos";
 
@@ -17,7 +18,10 @@ export const responder = (res: VercelResponse, status: number, body: Record<stri
 
 export const lerConfig = async (db: Firestore) => {
   const snapshot = await db.doc(CONFIG_DOC).get();
-  return parseConfig(snapshot.exists ? snapshot.data() : null);
+  const config = parseConfig(snapshot.exists ? snapshot.data() : null);
+  const { contacts } = await readContacts(db);
+  config.contato.email = contacts.commercialEmail;
+  return config;
 };
 
 export const buscarPorToken = async (db: Firestore, token: unknown) => {

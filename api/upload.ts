@@ -1,13 +1,14 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { createHmac } from "node:crypto";
 import { v2 as cloudinary } from "cloudinary";
+import { getFirestore } from "firebase-admin/firestore";
 import { verificarAppCheck } from "./_lib/appCheck";
-import { requireUser } from "./_lib/auth";
+import { getFirebaseApp, requireUser } from "./_lib/auth";
 import { handleCors } from "./_lib/cors";
 import { getAccount, isAdminOnlyBucket } from "./_lib/config";
+import { confirmarFotoDePerfil, registrarEnvio, reservarTrocaDeImagem } from "./_lib/midiaReservasJob";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { isAvatar, parseBucket, parseFolderName, parseImage } from "./_lib/validation";
-import { verificarIntervaloDaImagem } from "./_lib/mediaCooldown";
 
 const MAX_UPLOADS_POR_USUARIO_HORA = 15;
 const MAX_UPLOADS_POR_IP_HORA = 80;
@@ -33,13 +34,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   // O UID sempre vem do token validado; userId no corpo nunca é autoridade.
-  const user = await requireUser(req, res);
+  const user = await requireUser(req, res, "upload");
   if (!user) return;
   // Administradores usam o painel (navegador, sem App Check); o app manda o token.
   if (!user.admin && !(await verificarAppCheck(req, res, "upload"))) return;
 
   const body: Record<string, unknown> =
     typeof req.body === "object" && req.body !== null ? (req.body as Record<string, unknown>) : {};
+
+  // Etapa 3 da troca da foto de perfil (ver `_lib/midiaReservas.ts`): grava a referência e o prazo no servidor.
+  if (body.action === "confirmar") {
+    if (!(await dentroDoLimite(user.uid, "upload-confirmar", MAX_UPLOADS_POR_USUARIO_HORA, 3600))) {
+      return res.status(429).json({ error: "Muitas tentativas em pouco tempo. Tente novamente mais tarde." });
+    }
+    try {
+      const confirmacao = await confirmarFotoDePerfil(getFirestore(getFirebaseApp()), user.uid, body.reservaId);
+      if (!confirmacao.ok) {
+        if (confirmacao.retryAfterSeconds) res.setHeader("Retry-After", String(confirmacao.retryAfterSeconds));
+        return res.status(confirmacao.status).json({ error: confirmacao.error, retryAfterSeconds: confirmacao.retryAfterSeconds });
+      }
+      return res.status(200).json({ url: confirmacao.url, public_id: confirmacao.publicId, promovida: confirmacao.promovida });
+    } catch (error) {
+      console.error("[upload] falha ao confirmar a foto:", error);
+      return res.status(503).json({ error: "Não foi possível salvar a foto agora. Tente novamente." });
+    }
+  }
 
   const bucket = parseBucket(body.bucket);
   if (!bucket) return res.status(400).json({ error: "Bucket inválido." });
@@ -71,23 +90,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(429).json({ error: "Muitos envios nesta rede. Tente novamente mais tarde." });
   }
 
-  // Foto e banner: verifica prazo e propriedade no servidor antes de gastar no Cloudinary.
-  let cooldown: Awaited<ReturnType<typeof verificarIntervaloDaImagem>> | null = null;
-  try {
-    if (bucket === "usuarios" && folder === "profile") {
-      cooldown = await verificarIntervaloDaImagem(user.uid, "fotoPerfil");
-    } else if ((bucket === "turmas" || bucket === "times") && folder === "banner") {
-      cooldown = await verificarIntervaloDaImagem(user.uid, "bannerTurma", body.turmaId);
-    }
-  } catch (error) {
-    console.error("[upload] falha ao validar prazo da imagem:", error);
-    return res.status(503).json({ error: "Não foi possível validar o prazo para trocar esta imagem." });
-  }
-  if (cooldown && !cooldown.allowed) {
-    if (cooldown.retryAfterSeconds) res.setHeader("Retry-After", String(cooldown.retryAfterSeconds));
-    return res.status(cooldown.status).json({ error: cooldown.error, retryAfterSeconds: cooldown.retryAfterSeconds });
-  }
-
   const image = parseImage(body.image);
   if (!image.ok) return res.status(image.status).json({ error: image.error });
 
@@ -97,18 +99,38 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json({ error: "Servidor não configurado para este tipo de imagem." });
   }
 
-  const avatar = isAvatar(bucket, folder);
+  const pasta = bucket + "/" + user.uid + "/" + folder;
+  const tipo = isAvatar(bucket, folder)
+    ? "fotoPerfil"
+    : (bucket === "turmas" || bucket === "times") && folder === "banner"
+      ? "bannerTurma"
+      : null;
+
+  // Foto e banner: RESERVA a troca no servidor (prazo, propriedade e uma troca por vez) antes de gastar no Cloudinary.
+  let reserva: { reservaId: string; nome: string } | null = null;
+  if (tipo) {
+    let feita: Awaited<ReturnType<typeof reservarTrocaDeImagem>>;
+    try {
+      feita = await reservarTrocaDeImagem(getFirestore(getFirebaseApp()), { uid: user.uid, tipo, turmaId: body.turmaId, bucket, pasta });
+    } catch (error) {
+      console.error("[upload] falha ao reservar a troca da imagem:", error);
+      return res.status(503).json({ error: "Não foi possível validar o prazo para trocar esta imagem." });
+    }
+    if (!feita.ok) {
+      if (feita.retryAfterSeconds) res.setHeader("Retry-After", String(feita.retryAfterSeconds));
+      return res.status(feita.status).json({ error: feita.error, retryAfterSeconds: feita.retryAfterSeconds });
+    }
+    reserva = feita;
+  }
 
   try {
     const result = await cloudinary.uploader.upload(body.image as string, {
       ...account, // credenciais por chamada (sem cloudinary.config global)
-      folder: bucket + "/" + user.uid + "/" + folder,
-      // Avatar: id fixo, a foto nova substitui a anterior do próprio usuário.
-      // Outras imagens: id único, nunca sobrescreve nada.
-      public_id: avatar ? "profile" : undefined,
-      overwrite: avatar,
-      invalidate: avatar,
-      unique_filename: !avatar,
+      folder: pasta,
+      // Sempre um id NOVO: nada publicado é sobrescrito ou invalidado antes da confirmação. Foto/banner: o id reservado.
+      public_id: reserva?.nome,
+      overwrite: false,
+      unique_filename: !reserva,
       use_filename: false,
       resource_type: "image",
       allowed_formats: ["jpg", "jpeg", "png", "webp"],
@@ -116,8 +138,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       tags: isAdminOnlyBucket(bucket) ? ["anuncio"] : ["uid_" + user.uid],
     });
 
-    return res.status(200).json({ url: result.secure_url, public_id: result.public_id });
+    if (reserva) await registrarEnvio(getFirestore(getFirebaseApp()), reserva.reservaId, result.secure_url);
+    return res.status(200).json({
+      url: result.secure_url,
+      public_id: result.public_id,
+      ...(reserva ? { reserva_id: reserva.reservaId } : {}),
+    });
   } catch (error) {
+    // A reserva vence já: a rotina diária apaga o que possa ter chegado ao Cloudinary e libera o alvo.
+    if (reserva) await registrarEnvio(getFirestore(getFirebaseApp()), reserva.reservaId, null);
     console.error("[upload] falha no Cloudinary:", error); // detalhe só no log do servidor
     return res.status(502).json({ error: "Não foi possível enviar a imagem. Tente novamente." });
   }

@@ -3,7 +3,7 @@
  * O app NÃO envia nada sobre a pessoa (sem uid, aparelho ou localização): só "anúncio X, lugar Y, N impressões, M cliques".
  */
 
-export const AD_PLACEMENTS = ["home", "partidas", "listaJogadores", "turmas", "turmaDetalhe"] as const;
+export const AD_PLACEMENTS = ["home", "partidas", "listaJogadores", "turmas", "turmaDetalhe", "desafios"] as const;
 export type AdPlacement = (typeof AD_PLACEMENTS)[number];
 
 export interface AdEvent {

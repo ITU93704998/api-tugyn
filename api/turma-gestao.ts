@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
 import { type DocumentReference, FieldValue, type Firestore, getFirestore } from "firebase-admin/firestore";
@@ -7,7 +8,8 @@ import { getAccount } from "./_lib/config";
 import { DEDUPE_MS } from "./_lib/push";
 import { enviarAviso } from "./_lib/pushEnvio";
 import { dentroDoLimite } from "./_lib/rateLimit";
-import { jogadoresParaRecalcular, somarEstatisticas } from "./_lib/estatisticas";
+import { jogadoresParaRecalcular } from "./_lib/estatisticas";
+import { processarPendencias, recalcularDaPartida, recalcularUsuario } from "./_lib/recalculos";
 import { autorizarExclusao, autorizarTransferencia, bannerParaApagar, parseGestaoBody } from "./_lib/turmaGestao";
 
 /**
@@ -26,8 +28,6 @@ export const config = { maxDuration: 60 };
 const LIMITE_POR_HORA = 20;
 /** Recálculo do resumo: um por partida enviada (e reenvios), mais a abertura do próprio perfil. */
 const LIMITE_ESTATISTICAS_POR_HORA = 60;
-/** Quantos jogadores são recalculados ao mesmo tempo (cada um = 1 consulta + 1 leitura por turma + 1 escrita). */
-const RECALCULOS_SIMULTANEOS = 8;
 /** Uma transação/lote do Firestore aceita até 500 escritas: sobra margem para a turma e a prévia. */
 const ESCRITAS_POR_LOTE = 450;
 
@@ -132,58 +132,47 @@ const excluir = async (db: Firestore, uid: string, turmaId: string) => {
 };
 
 /**
- * Refaz o resumo geral de um usuário a partir das turmas em que ele está hoje (o mesmo que o próprio perfil soma) e grava em
- * `users/{uid}.estatisticas`. Conta não encontrada (excluída) é ignorada: não cria documento.
+ * Recalcula quem o organizador pediu (só membros) e limpa as pendências atendidas. Quem falhar continua pendente em
+ * `recalculosPendentes/{turmaId}` (gravado pelo app junto com a partida) e a rotina do servidor tenta de novo.
  */
-const recalcularUsuario = async (db: Firestore, uid: string): Promise<void> => {
-  const turmas = await db
-    .collection("turmas")
-    .where("participantes", "array-contains", uid)
-    .select("status", "ativo")
-    .get();
-  const participantes = turmas.empty
-    ? []
-    : await db.getAll(...turmas.docs.map((t) => db.doc(`turmas/${t.id}/participantes/${uid}`)));
-  const total = somarEstatisticas(
-    turmas.docs.map((t) => t.data()),
-    participantes.map((p) => (p.exists ? p.data() : null)),
-  );
-  try {
-    await db.doc(`users/${uid}`).update({ estatisticas: { ...total, atualizadoEm: FieldValue.serverTimestamp() } });
-  } catch (erro) {
-    if ((erro as { code?: unknown })?.code === 5) return; // NOT_FOUND: conta excluída
-    throw erro;
-  }
-};
-
-/** Recalcula vários, alguns por vez. Falha de um não impede os outros; devolve quantos falharam. */
-const recalcularVarios = async (db: Firestore, uids: string[]): Promise<number> => {
-  let falhas = 0;
-  for (let i = 0; i < uids.length; i += RECALCULOS_SIMULTANEOS) {
-    const resultados = await Promise.allSettled(uids.slice(i, i + RECALCULOS_SIMULTANEOS).map((uid) => recalcularUsuario(db, uid)));
-    falhas += resultados.filter((r) => r.status === "rejected").length;
-  }
-  return falhas;
-};
-
 const estatisticasDaPartida = async (db: Firestore, uid: string, turmaId: string, pedidos: string[]) => {
   const turmaSnap = await db.doc(`turmas/${turmaId}`).get();
   const auth = jogadoresParaRecalcular(uid, turmaSnap.exists ? (turmaSnap.data() ?? null) : null, pedidos);
   if (!auth.ok) return auth;
-  const falhas = await recalcularVarios(db, auth.jogadores);
-  if (falhas > 0) {
-    console.warn(JSON.stringify({ evt: "estatisticas_parcial", turmaId, falhas, total: auth.jogadores.length }));
+  const falhos = await recalcularDaPartida(db, turmaId, auth.jogadores);
+  if (falhos.length > 0) {
+    console.warn(JSON.stringify({ evt: "estatisticas_parcial", turmaId, falhas: falhos.length, total: auth.jogadores.length }));
   }
-  return { ok: true as const };
+  return { ok: true as const, falhos };
+};
+
+/** Só o scheduler do servidor (`Authorization: Bearer <CRON_SECRET>`), nunca um login de usuário. */
+const ehRotinaAutorizada = (req: VercelRequest): boolean => {
+  const segredo = process.env.CRON_SECRET;
+  if (!segredo || segredo.length < 16) return false;
+  const esperado = new Uint8Array(Buffer.from(`Bearer ${segredo}`));
+  const atual = new Uint8Array(Buffer.from(typeof req.headers.authorization === "string" ? req.headers.authorization : ""));
+  return atual.length === esperado.length && timingSafeEqual(atual, esperado);
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // GET protegido: processa os recálculos pendentes (para um scheduler mais frequente que o cron diário de desafios).
+  if (req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store");
+    if (!ehRotinaAutorizada(req)) return res.status(401).json({ error: "Não autorizado." });
+    try {
+      return res.status(200).json({ ok: true, ...(await processarPendencias(getFirestore(getFirebaseApp()))) });
+    } catch {
+      console.error(JSON.stringify({ evt: "estatisticas_pendencias_falhou" }));
+      return res.status(503).json({ error: "Não foi possível processar agora." });
+    }
+  }
   if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
+    res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "Método não permitido." });
   }
 
-  const user = await requireUser(req, res);
+  const user = await requireUser(req, res, "turma-gestao");
   if (!user) return;
   if (!(await verificarAppCheck(req, res, "turma-gestao"))) return;
 
@@ -221,6 +210,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           : await excluir(db, user.uid, request.turmaId);
     if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
 
+    // Sucesso parcial: diz QUEM ficou para depois (a pendência durável continua gravada e a rotina do servidor tenta de novo).
+    const falhos = "falhos" in resultado && Array.isArray(resultado.falhos) ? (resultado.falhos as string[]) : [];
+    if (falhos.length > 0) return res.status(202).json({ success: false, pendentes: falhos });
     if (request.action !== "estatisticas") {
       console.log(JSON.stringify({ evt: `turma_${request.action}`, turmaId: request.turmaId }));
     }

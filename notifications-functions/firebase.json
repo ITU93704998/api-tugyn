@@ -1,0 +1,14 @@
+{
+  "functions": [{
+    "source": ".",
+    "codebase": "turma-notifications",
+    "runtime": "nodejs22",
+    "predeploy": ["npm --prefix \"$RESOURCE_DIR\" test", "npm --prefix \"$RESOURCE_DIR\" run build"],
+    "ignore": ["node_modules", ".git", "tests", "README.md", "tsconfig.json", ".secret.local", "*-debug.log"]
+  }],
+  "emulators": {
+    "firestore": { "host": "127.0.0.1", "port": 8797 },
+    "functions": { "host": "127.0.0.1", "port": 5007 },
+    "ui": { "enabled": false }
+  }
+}

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { isSafeUid } from "./validation";
 
 /**
@@ -27,9 +27,32 @@ export const isValidPushToken = (value: unknown): value is string => typeof valu
 /** Id do documento do token: o próprio token embaralhado (o token em si nunca vai para o caminho nem para o log). */
 export const tokenDocId = (token: string): string => createHash("sha256").update(token).digest("hex").slice(0, 40);
 
+/**
+ * Chave de revogação: o servidor a gera no cadastro do aparelho e só guarda o hash. Com ela o app tira o aparelho do servidor depois do
+ * logout feito sem internet (não há mais login para autenticar). Um novo cadastro troca a chave, então um pedido velho não apaga o novo dono.
+ */
+const REVOGACAO = /^[a-f0-9]{64}$/;
+export const isValidRevogacao = (value: unknown): value is string => typeof value === "string" && REVOGACAO.test(value);
+export const novaRevogacao = (): { revogacao: string; revogacaoHash: string } => {
+  const revogacao = randomBytes(32).toString("hex");
+  return { revogacao, revogacaoHash: hashRevogacao(revogacao) };
+};
+export const hashRevogacao = (revogacao: string): string => createHash("sha256").update(revogacao).digest("hex");
+/** Compara em tempo constante a chave recebida com o hash guardado. */
+export const revogacaoConfere = (revogacao: string, hashGuardado: unknown): boolean => {
+  if (typeof hashGuardado !== "string" || !REVOGACAO.test(hashGuardado)) return false;
+  return timingSafeEqual(new Uint8Array(Buffer.from(hashRevogacao(revogacao), "hex")), new Uint8Array(Buffer.from(hashGuardado, "hex")));
+};
+/** Token não renovado há mais que isso não recebe avisos (o app renova a cada 7 dias de uso): limita um cadastro esquecido. */
+export const TOKEN_LEASE_MS = 30 * 24 * 3600_000;
+/** O documento do token some sozinho (política de TTL em `expiresAt`) bem depois do lease. */
+export const TOKEN_TTL_MS = 60 * 24 * 3600_000;
+export const tokenNoPrazo = (updatedAt: unknown, nowMs: number): boolean => typeof updatedAt !== "number" || nowMs - updatedAt < TOKEN_LEASE_MS;
+
 export type PushRequest =
   | { action: "registrar"; token: string; platform: PushPlatform }
   | { action: "remover"; token: string }
+  | { action: "revogar"; token: string; revogacao: string }
   | { action: "notificar"; evento: "pedido_entrada"; turmaId: string }
   | { action: "notificar"; evento: "pedido_aceito"; turmaId: string; userId: string }
   | { action: "notificar"; evento: "partida_aberta"; turmaId: string }
@@ -48,6 +71,11 @@ export const parsePushBody = (body: unknown): ParseResult => {
   if (b.action === "remover") {
     if (!isValidPushToken(b.token)) return { ok: false, error: "Token inválido." };
     return { ok: true, value: { action: "remover", token: b.token } };
+  }
+  if (b.action === "revogar") {
+    if (!isValidPushToken(b.token)) return { ok: false, error: "Token inválido." };
+    if (!isValidRevogacao(b.revogacao)) return { ok: false, error: "Chave inválida." };
+    return { ok: true, value: { action: "revogar", token: b.token, revogacao: b.revogacao } };
   }
   if (b.action === "notificar") {
     if (!isSafeUid(b.turmaId)) return { ok: false, error: "Turma inválida." };
@@ -98,6 +126,8 @@ export interface PushDraft {
     turmaId: string;
     /** Só nos avisos de desafio: o toque abre a aba destacando este desafio. */
     desafioId?: string;
+    /** Identificador da ocorrência na outbox (não é uma chave idempotente do Expo). */
+    notificationId?: string;
   };
 }
 
@@ -242,15 +272,23 @@ export interface PushResult {
   ok: boolean;
   /** O serviço disse que o aparelho não existe mais (app desinstalado, token trocado): o token deve ser apagado. */
   invalid: boolean;
+  /** Rejeição explícita transitória: pode tentar novamente. */
+  retryable?: boolean;
+  /** Não sabemos se o serviço aceitou: nunca reenviar automaticamente. */
+  uncertain?: boolean;
   /** Só o CÓDIGO do erro (ex.: "InvalidCredentials", "DeviceNotRegistered"), para diagnóstico. Nunca texto livre: ele pode conter o token. */
   error?: string;
+  /** Id do ticket aceito: o recibo (entrega à Apple/Google) é consultado depois com ele. */
+  ticketId?: string;
 }
+
+const TICKET_ID = /^[A-Za-z0-9-]{1,64}$/;
 
 /** Envia em lotes de 100, todos ao mesmo tempo (a função da Vercel tem poucos segundos). Mantém a ordem das mensagens. Nunca lança e nunca escreve o token em log. */
 export const sendExpoPush = async (messages: readonly ExpoMessage[], options: { fetchImpl?: typeof fetch; accessToken?: string } = {}): Promise<PushResult[]> => {
   const doFetch = options.fetchImpl ?? fetch;
   const enviarLote = async (lote: readonly ExpoMessage[]): Promise<PushResult[]> => {
-    const falhou = (error: string): PushResult[] => lote.map((message) => ({ token: message.to, ok: false, invalid: false, error }));
+    const falhou = (error: string, flags: { retryable?: boolean; uncertain?: boolean } = {}): PushResult[] => lote.map((message) => ({ token: message.to, ok: false, invalid: false, error, ...flags }));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), EXPO_TIMEOUT_MS);
     try {
@@ -260,21 +298,64 @@ export const sendExpoPush = async (messages: readonly ExpoMessage[], options: { 
         body: JSON.stringify(lote),
         signal: controller.signal,
       });
-      if (!response.ok) return falhou(`http-${response.status}`);
+      if (!response.ok) return falhou(`http-${response.status}`, { retryable: response.status === 429 || response.status >= 500 });
       const json = (await response.json()) as { data?: unknown };
-      const tickets: Array<{ status?: unknown; details?: { error?: unknown } } | undefined> = Array.isArray(json?.data) ? json.data : [];
+      const tickets: Array<{ status?: unknown; id?: unknown; details?: { error?: unknown } } | undefined> = Array.isArray(json?.data) ? json.data : [];
       return lote.map((message, index) => {
         const ticket = tickets[index];
-        const ok = ticket?.status === "ok";
+        if (!ticket || (ticket.status !== "ok" && ticket.status !== "error")) return { token: message.to, ok: false, invalid: false, uncertain: true, error: "sem-resposta" };
+        const ok = ticket.status === "ok";
         const code = typeof ticket?.details?.error === "string" ? ticket.details.error : "sem-resposta";
-        return { token: message.to, ok, invalid: !ok && code === "DeviceNotRegistered", ...(ok ? {} : { error: code }) };
+        const ticketId = ok && typeof ticket.id === "string" && TICKET_ID.test(ticket.id) ? { ticketId: ticket.id } : {};
+        return { token: message.to, ok, invalid: !ok && code === "DeviceNotRegistered", ...(ok ? ticketId : { error: code, retryable: code === "MessageRateExceeded" }) };
       });
     } catch {
-      return falhou("rede");
+      return falhou("rede", { uncertain: true });
     } finally {
       clearTimeout(timer);
     }
   };
   const partes = await Promise.all(chunk(messages, EXPO_CHUNK_SIZE).map(enviarLote));
   return partes.flat();
+};
+
+export const EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts";
+/** Máximo de ids por consulta de recibos aceito pelo Expo. */
+export const EXPO_RECEIPTS_MAX = 1000;
+export interface ReceiptResult {
+  ok: boolean;
+  /** Só o código (ex.: "DeviceNotRegistered", "InvalidCredentials"), nunca a mensagem livre. */
+  error?: string;
+}
+
+/**
+ * Consulta os recibos (o que a Apple/Google responderam ao Expo). Um id ausente na resposta ainda não tem recibo pronto.
+ * Devolve null em falha de transporte (consultar de novo depois). Nunca lança.
+ */
+export const fetchExpoReceipts = async (ids: readonly string[], options: { fetchImpl?: typeof fetch; accessToken?: string } = {}): Promise<Map<string, ReceiptResult> | null> => {
+  const doFetch = options.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EXPO_TIMEOUT_MS);
+  try {
+    const response = await doFetch(EXPO_RECEIPTS_URL, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", ...(options.accessToken ? { Authorization: `Bearer ${options.accessToken}` } : {}) },
+      body: JSON.stringify({ ids: ids.slice(0, EXPO_RECEIPTS_MAX) }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const json = (await response.json()) as { data?: unknown };
+    if (typeof json?.data !== "object" || json.data === null) return null;
+    const recibos = new Map<string, ReceiptResult>();
+    for (const id of ids) {
+      const recibo = (json.data as Record<string, { status?: unknown; details?: { error?: unknown } } | undefined>)[id];
+      if (recibo?.status === "ok") recibos.set(id, { ok: true });
+      else if (recibo?.status === "error") recibos.set(id, { ok: false, error: typeof recibo.details?.error === "string" ? recibo.details.error : "sem-codigo" });
+    }
+    return recibos;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 };

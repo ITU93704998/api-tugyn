@@ -1,14 +1,12 @@
-import { getFirestore } from "firebase-admin/firestore";
-import { getFirebaseApp } from "./auth";
-import { isSafeUid } from "./validation";
-
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-type CheckResult =
-  | { allowed: true }
-  | { allowed: false; status: 400 | 403 | 404 | 429 | 503; error: string; retryAfterSeconds?: number };
+export type TipoDeImagem = "fotoPerfil" | "bannerTurma";
 
-const timestampMillis = (value: unknown): number | null => {
+export type CheckResult =
+  | { allowed: true }
+  | { allowed: false; status: 400 | 403 | 404 | 409 | 429 | 503; error: string; retryAfterSeconds?: number };
+
+export const timestampMillis = (value: unknown): number | null => {
   if (value instanceof Date) return value.getTime();
   if (typeof value === "object" && value !== null && "toMillis" in value && typeof value.toMillis === "function") {
     const millis = value.toMillis();
@@ -17,7 +15,7 @@ const timestampMillis = (value: unknown): number | null => {
   return null;
 };
 
-const cooldownResult = (value: unknown, label: string, now = Date.now()): CheckResult => {
+const cooldownResult = (value: unknown, label: string, now: number): CheckResult => {
   if (value === undefined || value === null) return { allowed: true };
   const changedAt = timestampMillis(value);
   if (changedAt === null) {
@@ -34,27 +32,21 @@ const cooldownResult = (value: unknown, label: string, now = Date.now()): CheckR
   };
 };
 
-/** Confere no Firestore antes de gastar uma chamada do Cloudinary. As regras do Firestore
- * repetem a mesma verificação no salvamento, protegendo contra alterações diretas pelo app. */
-export const verificarIntervaloDaImagem = async (
+/**
+ * Prazo e propriedade da troca, a partir do documento-alvo (`users/{uid}` ou `turmas/{id}`, null se não existe). Pura: a API
+ * chama DENTRO da transação que reserva a troca (`_lib/midiaReservas.ts`). As regras do Firestore repetem o prazo quando o
+ * app grava a referência, protegendo contra alterações diretas.
+ */
+export const checarIntervalo = (
   uid: string,
-  tipo: "fotoPerfil" | "bannerTurma",
-  turmaId?: unknown,
-): Promise<CheckResult> => {
-  const db = getFirestore(getFirebaseApp());
-
-  if (tipo === "fotoPerfil") {
-    const profile = await db.collection("users").doc(uid).get();
-    return cooldownResult(profile.data()?.profileImageChangedAt, "A foto de perfil");
-  }
-
-  if (!isSafeUid(turmaId)) {
-    return { allowed: false, status: 400, error: "Identificador da turma inválido." };
-  }
-  const turma = await db.collection("turmas").doc(turmaId).get();
-  if (!turma.exists) return { allowed: false, status: 404, error: "Turma não encontrada." };
-  if (turma.get("creatorId") !== uid) {
+  tipo: TipoDeImagem,
+  alvo: Record<string, unknown> | null,
+  now = Date.now(),
+): CheckResult => {
+  if (tipo === "fotoPerfil") return cooldownResult(alvo?.profileImageChangedAt, "A foto de perfil", now);
+  if (!alvo) return { allowed: false, status: 404, error: "Turma não encontrada." };
+  if (alvo.creatorId !== uid) {
     return { allowed: false, status: 403, error: "Somente o organizador pode trocar o banner." };
   }
-  return cooldownResult(turma.get("bannerChangedAt"), "O banner desta turma");
+  return cooldownResult(alvo.bannerChangedAt, "O banner desta turma", now);
 };

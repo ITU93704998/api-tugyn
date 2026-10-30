@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { handleContacts } from "./_lib/contatos";
 import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from "./_lib/version";
 
 /**
@@ -10,6 +11,7 @@ import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from ".
  *   APP_STORE_URL[_IOS|_ANDROID]      APP_UPDATE_MESSAGE (opcional)
  */
 export default function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.query?.resource === "contatos") return handleContacts(req, res);
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
     return res.status(405).json({ error: "Método não permitido." });

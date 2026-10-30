@@ -9,7 +9,7 @@ export type Modelo = (typeof MODELOS)[number];
 export const ESCOPOS = ["cidade", "todas"] as const;
 export type Escopo = (typeof ESCOPOS)[number];
 /** Os mesmos ids dos espaços do app (`AD_PLACEMENTS` em adCore.ts; um teste confere). */
-export const TELAS = ["home", "partidas", "listaJogadores", "turmas", "turmaDetalhe"] as const;
+export const TELAS = ["home", "partidas", "listaJogadores", "turmas", "turmaDetalhe", "desafios"] as const;
 export type Tela = (typeof TELAS)[number];
 
 /** Todo dinheiro é INTEIRO em centavos (sem erro de arredondamento). */
@@ -60,7 +60,7 @@ export const LIMITES = {
 const HORA_MS = 3_600_000;
 export const DIA_MS = 24 * HORA_MS;
 
-const semPrecosPorTela = (): PrecosPorTela => ({ home: null, partidas: null, listaJogadores: null, turmas: null, turmaDetalhe: null });
+const semPrecosPorTela = (): PrecosPorTela => ({ home: null, partidas: null, listaJogadores: null, turmas: null, turmaDetalhe: null, desafios: null });
 const semPrecosDoModelo = (): PrecosDoModelo => ({ cidade: semPrecosPorTela(), todas: semPrecosPorTela() });
 
 export const configPadrao = (): ConfigContratos => ({

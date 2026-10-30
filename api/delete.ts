@@ -17,7 +17,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Método não permitido." });
   }
 
-  const user = await requireUser(req, res);
+  const user = await requireUser(req, res, "apagar-midia");
   if (!user) return;
   // Administradores usam o painel (navegador, sem App Check); o app manda o token.
   if (!user.admin && !(await verificarAppCheck(req, res, "delete"))) return;

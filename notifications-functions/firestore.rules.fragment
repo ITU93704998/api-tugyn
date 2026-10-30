@@ -1,0 +1,6 @@
+// Merge only if necessary into the project's existing rules. Do not replace the ruleset.
+// Admin SDK bypasses client rules; triggers and server workers keep working.
+match /turmaPushEvents/{eventId} {
+  allow read, write: if false;
+}
+// A broad allow in another overlapping match still grants access and must be reviewed.

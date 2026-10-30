@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { type Firestore, getFirestore } from "firebase-admin/firestore";
 import { verificarAppCheck } from "./_lib/appCheck";
@@ -11,17 +12,21 @@ import {
   authorizeAttendanceConfirmed,
   authorizeJoinApproved,
   authorizeJoinRequest,
+  TOKEN_TTL_MS,
   diaDeBrasilia,
+  novaRevogacao,
   parsePushBody,
+  revogacaoConfere,
   tokenDocId,
 } from "./_lib/push";
-import { enviarAviso } from "./_lib/pushEnvio";
+import { consultarRecibos, recuperarAvisosPendentes, enviarAviso } from "./_lib/pushEnvio";
 import { dentroDoLimite } from "./_lib/rateLimit";
 
 /**
  * POST /api/push   (corpo: { action, ... }, cabeçalho: Authorization: Bearer <login do Firebase>)
  *  - registrar   { token, platform }          guarda o token do aparelho para o usuário LOGADO (um token pertence a um usuário só)
  *  - remover     { token }                    apaga o token (sair da conta, desligar os avisos)
+ *  - revogar     { token, revogacao }         SEM login: apaga o token com a chave recebida no cadastro (logout feito sem internet)
  *  - notificar   { evento: "pedido_entrada", turmaId }                   o solicitante avisa o organizador
  *  - notificar   { evento: "pedido_aceito", turmaId, userId }            o organizador avisa quem entrou
  *  - notificar   { evento: "partida_aberta", turmaId }                   o organizador abriu a partida de hoje: avisa os membros da turma
@@ -30,18 +35,33 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  */
 const TOKENS = "pushTokens";
 
-const registrar = async (db: Firestore, uid: string, token: string, platform: string): Promise<void> => {
+const registrar = async (db: Firestore, uid: string, token: string, platform: string): Promise<string> => {
   const ref = db.doc(`${TOKENS}/${tokenDocId(token)}`);
   const now = Date.now();
   const existing = await ref.get();
+  const { revogacao, revogacaoHash } = novaRevogacao();
   // Se o token era de OUTRA pessoa (aparelho que trocou de conta), passa a ser desta: o aviso nunca vai para quem saiu.
-  await ref.set({ uid, token, platform, updatedAt: now, createdAt: existing.exists && existing.get("uid") === uid ? (existing.get("createdAt") as number) ?? now : now });
+  // A chave de revogação é trocada a cada cadastro: um pedido de revogação antigo (da conta anterior) não apaga este.
+  await ref.set({
+    uid, token, platform, revogacaoHash, updatedAt: now, expiresAt: new Date(now + TOKEN_TTL_MS),
+    createdAt: existing.exists && existing.get("uid") === uid ? (existing.get("createdAt") as number) ?? now : now,
+  });
 
   const mine = await db.collection(TOKENS).where("uid", "==", uid).get();
   if (mine.size > MAX_TOKENS_PER_USER) {
     const oldest = [...mine.docs].sort((a, b) => Number(a.get("updatedAt") ?? 0) - Number(b.get("updatedAt") ?? 0)).slice(0, mine.size - MAX_TOKENS_PER_USER);
     for (const doc of oldest) if (doc.id !== ref.id) await doc.ref.delete();
   }
+  return revogacao;
+};
+
+/** Sem login (o app já saiu da conta): apaga o token só se a chave confere com a do cadastro atual. Nunca diz se apagou. */
+const revogar = async (db: Firestore, token: string, revogacao: string): Promise<void> => {
+  const ref = db.doc(`${TOKENS}/${tokenDocId(token)}`);
+  await db.runTransaction(async (tx) => {
+    const snapshot = await tx.get(ref);
+    if (snapshot.exists && revogacaoConfere(revogacao, snapshot.get("revogacaoHash"))) tx.delete(ref);
+  });
 };
 
 const remover = async (db: Firestore, uid: string, token: string): Promise<void> => {
@@ -50,19 +70,56 @@ const remover = async (db: Firestore, uid: string, token: string): Promise<void>
   if (snapshot.exists && snapshot.get("uid") === uid) await ref.delete(); // ninguém apaga o token de outra pessoa
 };
 
+export const config = { maxDuration: 60 };
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Apenas o scheduler/operador do servidor pode recuperar a outbox. Nunca aceita destinatários pelo GET.
+  if (req.method === "GET") {
+    res.setHeader("Cache-Control", "no-store");
+    const secret = process.env.CRON_SECRET;
+    const expected = new Uint8Array(Buffer.from("Bearer " + (secret ?? "")));
+    const received = new Uint8Array(Buffer.from(typeof req.headers.authorization === "string" ? req.headers.authorization : ""));
+    if (!secret || secret.length < 16 || received.length !== expected.length || !timingSafeEqual(received, expected)) return res.status(401).json({ error: "Não autorizado." });
+    try {
+      const db = getFirestore(getFirebaseApp());
+      const counts = await recuperarAvisosPendentes(db);
+      console.log(JSON.stringify({ evt: "push_outbox_recovery", ...counts }));
+      const recibos = await consultarRecibos(db);
+      return res.status(200).json({ ok: true, ...counts, recibos });
+    } catch {
+      console.error(JSON.stringify({ evt: "push_outbox_recovery_failed" }));
+      return res.status(503).json({ error: "Não foi possível recuperar os avisos." });
+    }
+  }
   if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
+    res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "Método não permitido." });
   }
 
-  const user = await requireUser(req, res);
+  // Revogar depois de um logout sem internet: não há mais login. Quem autoriza é a chave entregue no cadastro do aparelho.
+  if ((req.body as { action?: unknown } | null)?.action === "revogar") {
+    if (!(await verificarAppCheck(req, res, "push"))) return;
+    const parsedRevogar = parsePushBody(req.body);
+    if (!parsedRevogar.ok || parsedRevogar.value.action !== "revogar") return res.status(400).json({ error: parsedRevogar.ok ? "Ação inválida." : parsedRevogar.error });
+    const { token, revogacao } = parsedRevogar.value;
+    if (!(await dentroDoLimite(tokenDocId(token), "push-revogar", 10, 3600))) return res.status(429).json({ error: "Muitas requisições. Tente novamente mais tarde." });
+    try {
+      await revogar(getFirestore(getFirebaseApp()), token, revogacao);
+      return res.status(200).json({ ok: true });
+    } catch {
+      console.error(JSON.stringify({ evt: "push_revogar_falhou" })); // sem token no log
+      return res.status(503).json({ error: "Não foi possível agora. Tente novamente." });
+    }
+  }
+
+  const user = await requireUser(req, res, "push");
   if (!user) return; // requireUser já respondeu (401/500)
   if (!(await verificarAppCheck(req, res, "push"))) return;
 
   const parsed = parsePushBody(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });
   const request = parsed.value;
+  if (request.action === "revogar") return res.status(400).json({ error: "Ação inválida." });
 
   const limit = request.action === "notificar" ? 30 : 20;
   if (!(await dentroDoLimite(user.uid, `push-${request.action}`, limit, 3600))) {
@@ -79,8 +136,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     if (request.action === "registrar") {
-      await registrar(db, user.uid, request.token, request.platform);
-      return res.status(200).json({ ok: true });
+      const revogacao = await registrar(db, user.uid, request.token, request.platform);
+      return res.status(200).json({ ok: true, revogacao });
     }
     if (request.action === "remover") {
       await remover(db, user.uid, request.token);

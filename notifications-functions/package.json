@@ -1,0 +1,22 @@
+{
+  "name": "tugyn-turma-notifications",
+  "version": "1.0.0",
+  "private": true,
+  "main": "lib/notifications-functions/src/index.js",
+  "engines": { "node": "22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "gcp-build": "node scripts/verify-build.cjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test tests/*.test.cjs",
+    "test:emulator": "node tests/emulator.cjs"
+  },
+  "dependencies": {
+    "firebase-admin": "14.5.0",
+    "firebase-functions": "7.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "5.9.3"
+  }
+}

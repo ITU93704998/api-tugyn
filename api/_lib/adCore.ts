@@ -16,6 +16,7 @@ export const AD_PLACEMENTS = [
   { id: "listaJogadores", label: "Lista de jogadores" },
   { id: "turmas", label: "Lista de turmas" },
   { id: "turmaDetalhe", label: "Detalhe da turma" },
+  { id: "desafios", label: "Desafios" },
 ] as const;
 export type AdPlacement = (typeof AD_PLACEMENTS)[number]["id"];
 

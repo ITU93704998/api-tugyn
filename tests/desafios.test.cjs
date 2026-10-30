@@ -174,6 +174,25 @@ test('desafio do dia: soma só as partidas daquele dia', () => {
   assert.deepEqual(d.somarDoDia(partidas, '2026-11-10', 'c'), { gols: 0, assistencias: 0, jogos: 0, pontos: 0 });
 });
 
+test('desafio do dia: o diaDoJogo gravado decide (não a data nem o envio)', () => {
+  // jogo das 23:30 de Brasília do dia 10, enviado às 09:00 do dia 11 (antes do corte): é do dia 10
+  const atrasada = { diaDoJogo: '2026-11-10', data: '2026-11-11T02:30:00.000Z', salvadoEmMs: Date.parse('2026-11-11T12:00:00Z'), jogadores: [{ participanteId: 'a', gols_partida: 2 }] };
+  assert.equal(d.partidaEhDoDia(atrasada, '2026-11-10'), true);
+  assert.equal(d.partidaEhDoDia(atrasada, '2026-11-11'), false);
+  // diaDoJogo vence a `data` (aparelho com fuso diferente gravou outro dia na data)
+  assert.equal(d.partidaEhDoDia({ diaDoJogo: '2026-11-10', data: '2026-11-12T12:00:00.000Z', salvadoEmMs: 0 }, '2026-11-10'), true);
+  // diaDoJogo inválido: cai para a data
+  assert.equal(d.partidaEhDoDia({ diaDoJogo: '10/11/2026', data: '2026-11-10T15:00:00.000Z', salvadoEmMs: 0 }, '2026-11-10'), true);
+  assert.equal(d.somarDoDia([atrasada], '2026-11-10', 'a', Date.parse('2026-11-11T15:00:00Z')).gols, 2);
+});
+
+test('criação e aceite: conta em exclusão (excluindoEm) não desafia nem é desafiada', () => {
+  const excluindo = { name: 'X', excluindoEm: { seconds: 1 } };
+  assert.equal(d.autorizarCriacao({ ...base, perfilDesafiante: excluindo }).code, 'conta_indisponivel');
+  assert.equal(d.autorizarCriacao({ ...base, perfilDesafiante: null }).code, 'conta_indisponivel');
+  assert.equal(d.autorizarCriacao({ ...base, perfilDesafiado: excluindo }).code, 'atleta_nao_encontrado');
+});
+
 test('criação: conta suspensa, perfil privado e uid com "__"', () => {
   assert.equal(d.autorizarCriacao({ ...base, perfilDesafiante: { status: 'suspended' } }).code, 'conta_suspensa');
   assert.equal(d.autorizarCriacao({ ...base, perfilDesafiado: { name: 'Beto', isPublic: false } }).code, 'perfil_privado');

@@ -244,7 +244,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   let uid = "";
   if (ehAdmin) {
-    const user = await requireUser(req, res);
+    const user = await requireUser(req, res, "contratos-admin");
     if (!user) return; // requireUser já respondeu (401/500)
     if (!user.admin) return res.status(403).json({ error: "Somente administradores." });
     uid = user.uid;

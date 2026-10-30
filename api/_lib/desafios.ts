@@ -1,5 +1,6 @@
 import { MESES_POR_TEMPORADA } from "./estatisticas";
 import { sanitizeText, type PushDraft } from "./push";
+import { contaSuspensa, perfilDisponivel } from "./suspensao";
 import { isSafeUid } from "./validation";
 
 /**
@@ -25,8 +26,15 @@ export const DIAS_MINIMOS_TEMPORADA_ATUAL = 7;
 export const DIAS_APURACAO = 3;
 export const MINUTOS_ANTES_DA_PARTIDA = 30;
 export const HORAS_APURACAO_DIA = 12;
+/** Tamanho da página de partidas lida na apuração do desafio do dia. */
 export const MAX_PARTIDAS_DO_DIA = 100;
+/** Páginas lidas no máximo. Se ainda houver partidas depois disso, o desafio NÃO fecha: fica para reconciliação. */
+export const MAX_PAGINAS_DO_DIA = 5;
 const DIA_MS = 24 * 3600_000;
+/** Desafio em reconciliação volta para a fila da rotina diária depois deste tempo. */
+export const RECONCILIAR_DEPOIS_MS = DIA_MS;
+/** A rotina roda 1x por dia: um vencido espera no máximo ~1 dia. Atraso acima disto = a fila está acumulando. */
+export const ATRASO_ALERTA_MS = 2 * DIA_MS;
 /** Desafio aceito que ninguém apurou continua ocupando vaga até este tempo depois de o resultado ser liberado. */
 const FOLGA_VAGA_ACEITO_MS = 7 * DIA_MS;
 /** Brasília (UTC−3, sem horário de verão desde 2019): o mesmo fuso que `diaDeBrasilia` usa. */
@@ -139,15 +147,21 @@ export const partidaDeHoje = (turma: Dados, agoraMs: number): DiaInfo | null => 
 };
 
 export interface PartidaSalva {
-  /** `data` da partida (ISO, horário em que ela foi criada no aparelho). */
+  /** `diaDoJogo` ("AAAA-MM-DD", Brasília), fixado no 1º envio e validado pelas regras: é o dia canônico do jogo. */
+  diaDoJogo?: unknown;
+  /** `data` da partida (ISO, horário em que ela foi criada no aparelho). Só para partidas antigas, sem `diaDoJogo`. */
   data?: unknown;
   /** `salvadoEm` em ms (primeiro envio à turma). */
   salvadoEmMs: number;
   jogadores?: unknown;
 }
 
-/** A partida é daquele dia? Pela `data` dela (em Brasília); sem data válida, pelo primeiro envio. */
+/**
+ * A partida é daquele dia? Pelo `diaDoJogo` gravado (o mesmo dia que Partidas, Presença e o ranking usam); partida antiga
+ * sem ele: pela `data` (em Brasília) e, sem data válida, pelo primeiro envio.
+ */
 export const partidaEhDoDia = (p: PartidaSalva, dia: string): boolean => {
+  if (typeof p.diaDoJogo === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.diaDoJogo)) return p.diaDoJogo === dia;
   const dataMs = typeof p.data === "string" ? Date.parse(p.data) : NaN;
   return diaDeBrasiliaDe(Number.isFinite(dataMs) ? dataMs : p.salvadoEmMs) === dia;
 };
@@ -345,8 +359,10 @@ export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
   if (c.uid === c.desafiadoId) return negar(409, "mesmo_atleta", "Você não pode desafiar a si mesmo.");
   // O id junta os uids com "__": uid com "__" poderia gerar o mesmo id para duplas diferentes (os do Firebase nunca têm).
   if (c.uid.includes("__") || c.desafiadoId.includes("__")) return negar(409, "atleta_invalido", "Não é possível desafiar este atleta.");
-  if (c.perfilDesafiante?.status === "suspended") return negar(403, "conta_suspensa", "Sua conta está suspensa e não pode desafiar.");
-  if (!c.perfilDesafiado || c.perfilDesafiado.status === "suspended") {
+  if (contaSuspensa(c.perfilDesafiante)) return negar(403, "conta_suspensa", "Sua conta está suspensa e não pode desafiar.");
+  // Sem perfil ou excluindo a conta: a exclusão já vai liberar os desafios dele, nada novo pode entrar.
+  if (!perfilDisponivel(c.perfilDesafiante)) return negar(403, "conta_indisponivel", "Sua conta não pode desafiar agora.");
+  if (!c.perfilDesafiado || !perfilDisponivel(c.perfilDesafiado)) {
     return negar(404, "atleta_nao_encontrado", "Este atleta não está disponível.");
   }
   // Política: perfil privado não recebe desafios (o app já esconde o botão; aqui vale para qualquer cliente).
@@ -504,7 +520,7 @@ export const vagaVenceEm = (desafio: Dados, status: "pendente" | "aceito"): numb
 /** Ao aceitar: o que ainda precisa valer (o convite pode ter sido criado antes de um bloqueio ou de alguém sair da turma). */
 export const motivoParaNaoAceitar = (c: { bloqueio: boolean; turma: Dados; perfilDesafiante: Dados; desafio: Dados }): string | null => {
   if (c.bloqueio) return "Não é possível aceitar este desafio.";
-  if (!c.perfilDesafiante || c.perfilDesafiante.status === "suspended") return "Quem desafiou você não está mais disponível.";
+  if (!perfilDisponivel(c.perfilDesafiante)) return "Quem desafiou você não está mais disponível.";
   const membros = listaDe(c.turma?.participantes);
   if (!turmaAtiva(c.turma) || !c.turma) return "A turma deste desafio foi encerrada.";
   if (!membros.includes(String(c.desafio?.desafianteId)) || !membros.includes(String(c.desafio?.desafiadoId))) {
@@ -533,3 +549,73 @@ export const avisoDeResultado = (vencedorNome: string | null, desafio: Dados): P
     : `O desafio ${descricaoDe(desafio)} terminou empatado. Toque para ver o placar.`,
   data: { tipo: "desafio", turmaId: "" },
 });
+
+/**
+ * Lê uma consulta em páginas (`buscar` recebe o último item lido e o limite). Cada página pede 1 item a mais para saber se
+ * existe a próxima. `completo: false` = ainda havia itens depois de `maxPaginas` (quem chama não pode tratar como o total).
+ */
+export const lerEmPaginas = async <T>(
+  buscar: (depoisDe: T | null, limite: number) => Promise<T[]>,
+  tamanho: number,
+  maxPaginas: number,
+): Promise<{ itens: T[]; completo: boolean }> => {
+  const itens: T[] = [];
+  let ultimo: T | null = null;
+  for (let pagina = 0; pagina < maxPaginas; pagina++) {
+    const lidos = await buscar(ultimo, tamanho + 1);
+    const desta = lidos.slice(0, tamanho);
+    itens.push(...desta);
+    if (lidos.length <= tamanho) return { itens, completo: true };
+    ultimo = desta[desta.length - 1];
+  }
+  return { itens, completo: false };
+};
+
+/**
+ * Percorre uma fila em lotes com cursor até ela acabar ou o prazo (`prazoMs`, relógio absoluto) chegar. `restantes: true` =
+ * parou pelo prazo (pode haver itens não processados: a próxima rodada continua). `processar` não deve lançar.
+ */
+export const percorrerComPrazo = async <T>(c: {
+  buscar: (depoisDe: T | null, limite: number) => Promise<T[]>;
+  lote: number;
+  prazoMs: number;
+  processar: (item: T) => Promise<void>;
+  agora?: () => number;
+}): Promise<{ processados: number; restantes: boolean }> => {
+  const agora = c.agora ?? Date.now;
+  let cursor: T | null = null;
+  let processados = 0;
+  for (;;) {
+    if (agora() >= c.prazoMs) return { processados, restantes: true };
+    const lote = await c.buscar(cursor, c.lote);
+    for (const item of lote) {
+      if (agora() >= c.prazoMs) return { processados, restantes: true };
+      await c.processar(item);
+      processados += 1;
+    }
+    if (lote.length < c.lote) return { processados, restantes: false };
+    cursor = lote[lote.length - 1];
+  }
+};
+
+export interface ResumoDaRotina {
+  falhou: number;
+  reconciliar: number;
+  /** A apuração parou pelo prazo com desafios vencidos ainda na fila. */
+  apuracaoIncompleta: boolean;
+  avisosIncompletos: boolean;
+  /** Maior atraso entre `apurarEm` e a hora da rotina (o mais antigo da fila). */
+  atrasoMaxMs: number;
+  /** Etapas da rotina que lançaram erro (recibos, pendências, exclusões, mídia...). */
+  etapasComFalha: string[];
+}
+
+/** O que impede a rotina de ser um sucesso completo (vazio = tudo certo). Vai no log e define a resposta não-2xx. */
+export const problemasDaRotina = (r: ResumoDaRotina): string[] => [
+  ...(r.falhou > 0 ? [`apuracoes_falharam:${r.falhou}`] : []),
+  ...(r.reconciliar > 0 ? [`reconciliacao_pendente:${r.reconciliar}`] : []),
+  ...(r.apuracaoIncompleta ? ["fila_de_apuracao_restante"] : []),
+  ...(r.avisosIncompletos ? ["fila_de_avisos_restante"] : []),
+  ...(r.atrasoMaxMs > ATRASO_ALERTA_MS ? [`atraso_max_h:${Math.round(r.atrasoMaxMs / 3600_000)}`] : []),
+  ...r.etapasComFalha.map((e) => `etapa_falhou:${e}`),
+];

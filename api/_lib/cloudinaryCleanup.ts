@@ -19,10 +19,13 @@ const esgotar = async (chamar: (cursor?: string) => Promise<ResultadoApagar>): P
   throw new Error("Cloudinary: ainda há imagens depois do limite de páginas");
 };
 
+/** Contas com imagens de usuários que estão sem credenciais no ambiente (a rotina diária alerta; a exclusão fica pendente). */
+export const bucketsSemCredenciais = (): string[] => USER_BUCKETS.filter((bucket) => !getAccount(bucket));
+
 /**
  * Apaga todas as imagens do usuário nas contas do Cloudinary: as marcadas com a tag `uid_<uid>` (todas
  * as novas) e as que estiverem na pasta `<bucket>/<uid>/` (as antigas, anteriores à tag).
- * Buckets sem credenciais no ambiente são ignorados.
+ * Buckets sem credenciais no ambiente NÃO são apagados: voltam em `avisos` e quem chama mantém a etapa pendente.
  */
 export const apagarImagensDoUsuario = async (uid: string): Promise<string[]> => {
   const avisos: string[] = [];

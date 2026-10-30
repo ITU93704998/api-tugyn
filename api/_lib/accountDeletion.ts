@@ -54,6 +54,8 @@ export interface DeletionDeps {
   apagarImagens: (uid: string) => Promise<void>;
   /** Apaga a conta do Firebase Auth (ignora "usuário não existe"). */
   apagarContaAuth: (uid: string) => Promise<void>;
+  /** Chamado depois da checagem de organizador e ANTES de qualquer remoção (grava a lápide/job da exclusão). */
+  aoIniciar?: (uid: string) => Promise<void>;
 }
 
 /** Erro com o nome da etapa que falhou (vai para o log do servidor, nunca para o cliente). */
@@ -281,6 +283,16 @@ export const excluirConta = async (
       turmas: comOutros.map((t) => ({ id: t.id, nome: t.nome, membros: t.outros })),
     };
   }
+
+  if (deps.aoIniciar) await etapa("job", () => deps.aoIniciar!(uid));
+
+  // Marcador de exclusão ANTES de apagar qualquer coisa: avaliações e desafios leem o perfil dentro da transação e recusam
+  // a conta marcada, então nada novo aponta para ela depois da limpeza (nem resumo órfão em `restrito/perfil`).
+  // Fica no perfil, que some no fim; se a exclusão parar no meio, o marcador continua e a pessoa só pode tentar de novo.
+  await etapa("marcador", async () => {
+    const perfil = db.doc(`users/${uid}`);
+    if ((await perfil.get()).exists) await perfil.update({ excluindoEm: FieldValue.serverTimestamp() });
+  });
 
   const relatorio: DeletionReport = {
     turmasExcluidas: 0,

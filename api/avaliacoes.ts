@@ -12,11 +12,13 @@ import {
   type Resumo,
 } from "./_lib/avaliacoes";
 import { dentroDoLimite } from "./_lib/rateLimit";
+import { perfilDisponivel } from "./_lib/suspensao";
 
 /**
  * POST /api/avaliacoes   (corpo: { avaliadoId, turmaId, notas: { convivencia, comprometimento, fairPlay } })
  * Cria ou edita a avaliação que o usuário dá a um colega de turma. Pelo servidor porque o avaliado NÃO pode ver quem
- * avaliou (o app não grava nada em `avaliacoes` nem no resumo `users/{uid}.avaliacao`). Regras em `_lib/avaliacoes.ts`.
+ * avaliou (o app não grava nada em `avaliacoes` nem no resumo `users/{uid}/restrito/perfil.avaliacao`). Regras em `_lib/avaliacoes.ts`.
+ * O resumo fica na parte RESTRITA do perfil: com o perfil privado, as regras do Firestore só deixam o dono ler.
  */
 
 const COLECAO = "avaliacoes";
@@ -35,21 +37,29 @@ const somarNoResumo =(delta: Resumo) => ({
   },
 });
 
-const avaliar = async (db: Firestore, uid: string, pedido: AvaliacaoRequest): Promise<Resultado> => {
+/** Exportada para o teste de concorrência no emulador (`tests-emulador/`). */
+export const avaliar = async (db: Firestore, uid: string, pedido: AvaliacaoRequest): Promise<Resultado> => {
   const { avaliadoId, turmaId, notas } = pedido;
   const ref = db.doc(`${COLECAO}/${idDaAvaliacao(uid, avaliadoId)}`);
   const perfilRef = db.doc(`users/${avaliadoId}`);
 
-  // Fora da transação: turma, perfil e bloqueios (não mudam a conta; a transação só cuida da avaliação e do resumo).
-  const [turma, perfil, bloqueioA, bloqueioB] = await Promise.all([
-    db.doc(`turmas/${turmaId}`).get(),
-    perfilRef.get(),
-    db.doc(`users/${uid}/blocked/${avaliadoId}`).get(),
-    db.doc(`users/${avaliadoId}/blocked/${uid}`).get(),
-  ]);
-
+  // TUDO o que decide é lido DENTRO da transação (turma, perfil, bloqueios e a avaliação anterior): uma saída da turma, um
+  // bloqueio ou o início da exclusão da conta (`excluindoEm` no perfil) ao mesmo tempo faz a transação reler e decidir de
+  // novo. Como o perfil fica travado pela leitura, a exclusão só apaga a conta DEPOIS desta gravação: o resumo nunca fica
+  // órfão (documento parcial sem perfil).
   return db.runTransaction(async (tx): Promise<Resultado> => {
-    const anterior = await tx.get(ref);
+    const [anterior, turma, perfil, bloqueioA, bloqueioB, avaliador] = await tx.getAll(
+      ref,
+      db.doc(`turmas/${turmaId}`),
+      perfilRef,
+      db.doc(`users/${uid}/blocked/${avaliadoId}`),
+      db.doc(`users/${avaliadoId}/blocked/${uid}`),
+      db.doc(`users/${uid}`),
+    );
+    // Quem avalia está excluindo a conta: a exclusão já vai apagar as avaliações que ele deu, nada novo pode entrar.
+    if (!perfilDisponivel(avaliador.exists ? (avaliador.data() ?? null) : null)) {
+      return { ok: false, status: 403, code: "conta_indisponivel", error: "Sua conta não pode avaliar agora." };
+    }
     const agoraMs = Date.now();
     const auth = autorizarAvaliacao({
       uid,
@@ -69,7 +79,7 @@ const avaliar = async (db: Firestore, uid: string, pedido: AvaliacaoRequest): Pr
       ...(anterior.exists ? {} : { criadoEm: FieldValue.serverTimestamp() }),
       atualizadoEm: FieldValue.serverTimestamp(),
     }, { merge: true });
-    tx.set(perfilRef, somarNoResumo(deltaDoResumo(notas, auth.anteriores)), { merge: true });
+    tx.set(db.doc(`users/${avaliadoId}/restrito/perfil`), somarNoResumo(deltaDoResumo(notas, auth.anteriores)), { merge: true });
     return { ok: true, proximaEm: agoraMs + DIAS_ENTRE_ENVIOS * DIA_MS };
   });
 };
@@ -80,7 +90,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Método não permitido." });
   }
 
-  const user = await requireUser(req, res);
+  const user = await requireUser(req, res, "avaliar");
   if (!user) return;
   if (!(await verificarAppCheck(req, res, "avaliacoes"))) return;
 

@@ -1,3 +1,4 @@
+import { perfilDisponivel } from "./suspensao";
 import { isSafeUid } from "./validation";
 
 /**
@@ -9,7 +10,8 @@ import { isSafeUid } from "./validation";
  *    é aceito `DIAS_ENTRE_ENVIOS` dias depois do anterior: ninguém fica mudando a nota toda hora.
  *  - Três critérios de 1 a 5 estrelas (convivência, comprometimento, fair play). A nota final é a média dos três.
  *  - ANÔNIMA: o documento `avaliacoes/{avaliador}__{avaliado}` só é lido por quem avaliou. O avaliado só vê o resumo em
- *    `users/{uid}.avaliacao` (somas e quantidade, sem nomes nem datas), que só o servidor grava.
+ *    `users/{uid}/restrito/perfil.avaliacao` (somas e quantidade, sem nomes nem datas), que só o servidor grava. Perfil
+ *    privado: as regras do Firestore só deixam o dono ler esse documento.
  */
 
 export const DIAS_ENTRE_ENVIOS = 7;
@@ -79,7 +81,8 @@ export type Autorizacao = { ok: true; anteriores: Notas | null } | Negado;
 
 export const autorizarAvaliacao = (c: ContextoAvaliacao): Autorizacao => {
   if (c.uid === c.avaliadoId) return negar(409, "mesmo_atleta", "Você não pode avaliar a si mesmo.");
-  if (!c.perfilAvaliado || c.perfilAvaliado.status === "suspended") {
+  // Sem perfil, suspenso ou excluindo a conta (`excluindoEm`): o resumo não pode nascer para quem está saindo.
+  if (!perfilDisponivel(c.perfilAvaliado)) {
     return negar(404, "atleta_nao_encontrado", "Este atleta não está disponível.");
   }
   if (c.bloqueio) return negar(403, "bloqueado", "Não é possível avaliar este atleta.");
