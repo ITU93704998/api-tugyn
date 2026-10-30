@@ -1,9 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+import { FieldValue, type Firestore, getFirestore } from "firebase-admin/firestore";
 import { excluirConta, StepError } from "./_lib/accountDeletion";
 import { verificarAppCheck } from "./_lib/appCheck";
 import { getFirebaseApp, requireUser } from "./_lib/auth";
+import { deltaDeRemocao, notasDe } from "./_lib/avaliacoes";
 import { apagarImagensDoUsuario } from "./_lib/cloudinaryCleanup";
 import { dentroDoLimite } from "./_lib/rateLimit";
 
@@ -22,7 +23,38 @@ const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
   { collection: "pushDedupe", field: "targetUid" }, // registros de "já avisei" (api/push.ts)
   { collection: "desafios", field: "desafianteId" }, // desafios que ele criou (api/desafios.ts)
   { collection: "desafios", field: "desafiadoId" }, // desafios que ele recebeu
+  { collection: "avaliacoes", field: "avaliadoId" }, // avaliações que ele recebeu (o resumo some junto com o perfil)
 ];
+
+/**
+ * Avaliações que ele DEU (api/avaliacoes.ts): cada uma sai do resumo do avaliado e é apagada. Roda depois que a conta já
+ * foi excluída (se a exclusão parar no meio, nada some antes da hora). Falha aqui só vai para o log.
+ */
+const removerAvaliacoesDadas = async (db: Firestore, uid: string): Promise<void> => {
+  const snap = await db.collection("avaliacoes").where("avaliadorId", "==", uid).get();
+  for (const docSnap of snap.docs) {
+    await db.runTransaction(async (tx) => {
+      const atual = await tx.get(docSnap.ref);
+      if (!atual.exists) return;
+      const notas = notasDe(atual.data());
+      const avaliadoId = atual.get("avaliadoId");
+      if (notas && typeof avaliadoId === "string" && avaliadoId) {
+        const perfilRef = db.doc(`users/${avaliadoId}`);
+        const perfil = await tx.get(perfilRef);
+        if (perfil.exists) {
+          const d = deltaDeRemocao(notas);
+          tx.update(perfilRef, {
+            "avaliacao.convivencia": FieldValue.increment(d.convivencia),
+            "avaliacao.comprometimento": FieldValue.increment(d.comprometimento),
+            "avaliacao.fairPlay": FieldValue.increment(d.fairPlay),
+            "avaliacao.total": FieldValue.increment(d.total),
+          });
+        }
+      }
+      tx.delete(docSnap.ref);
+    });
+  }
+};
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") {
@@ -77,6 +109,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         turmas: outcome.turmas,
         error: "Você organiza turmas com outros participantes.",
       });
+    }
+
+    try {
+      await removerAvaliacoesDadas(getFirestore(app), user.uid);
+    } catch (erro) {
+      console.error(JSON.stringify({ evt: "account_delete_warning", step: "avaliacoes_dadas", message: (erro as Error)?.message ?? String(erro) }));
     }
 
     console.log(JSON.stringify({ evt: "account_deleted", ...outcome.report }));

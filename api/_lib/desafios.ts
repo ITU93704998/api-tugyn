@@ -13,12 +13,19 @@ import { isSafeUid } from "./validation";
  *  - Pontos = 3 por gol + 1 por assistência (mesma regra do ranking da temporada). Empate nos pontos: mais gols vence;
  *    empate também nos gols = empate.
  *  - O resultado sai `DIAS_APURACAO` dias depois do fim da temporada (partidas enviadas com atraso ainda entram).
+ *
+ * Desafio da PARTIDA DO DIA (`tipo: "dia"`): só no dia de jogo da turma escolhida, até `MINUTOS_ANTES_DA_PARTIDA` antes do
+ * horário dela. Vale só para as partidas da turma daquele dia (data da partida = o dia, em Brasília). Precisa ser aceito antes
+ * do horário da partida; o resultado sai `HORAS_APURACAO_DIA` horas depois do fim do dia (dá tempo de o organizador enviar).
  */
 
 export const MAX_DESAFIOS_ATIVOS = 10;
 export const MAX_APURAR_POR_PEDIDO = 10;
 export const DIAS_MINIMOS_TEMPORADA_ATUAL = 7;
 export const DIAS_APURACAO = 3;
+export const MINUTOS_ANTES_DA_PARTIDA = 30;
+export const HORAS_APURACAO_DIA = 12;
+export const MAX_PARTIDAS_DO_DIA = 30;
 const DIA_MS = 24 * 3600_000;
 /** Brasília (UTC−3, sem horário de verão desde 2019): o mesmo fuso que `diaDeBrasilia` usa. */
 const FUSO_MS = 3 * 3600_000;
@@ -50,21 +57,126 @@ export const temporadaInfo = (agoraMs: number, deslocamento = 0): TemporadaInfo 
   };
 };
 
-/** Id fixo por temporada e dupla (em ordem): o mesmo par não tem dois desafios na mesma temporada. */
+/**
+ * Id fixo por período e dupla (em ordem): o mesmo par não tem dois desafios na mesma temporada (`t2026_6`) nem no mesmo
+ * dia (`d20261029`).
+ */
 export const idDoDesafio = (chave: string, a: string, b: string): string => {
   const [x, y] = [a, b].sort();
   return `${chave}__${x}__${y}`;
 };
 
+// ─── Partida do dia ───────────────────────────────────────────────────────────
+
+const pad = (n: number): string => String(n).padStart(2, "0");
+
+/** "2026-10-29": o dia em Brasília (o mesmo `diaDeHoje` do app). */
+export const diaDeBrasiliaDe = (ms: number): string => {
+  const d = new Date(ms - FUSO_MS);
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+};
+
+/** Meia-noite (início) do dia "AAAA-MM-DD" de Brasília, em ms reais. */
+export const inicioDoDia = (dia: string): number => {
+  const [a, m, d] = dia.split("-").map(Number);
+  return Date.UTC(a, m - 1, d) + FUSO_MS;
+};
+
+/** `diasSemana` da turma ("monday", "segunda-feira", "seg"...) → dias 0 (domingo) a 6 (o mesmo do app). */
+const DIAS: Record<string, number> = {
+  sunday: 0, sun: 0, domingo: 0, dom: 0,
+  monday: 1, mon: 1, segunda: 1, "segunda-feira": 1, "segunda feira": 1, seg: 1,
+  tuesday: 2, tue: 2, terca: 2, "terca-feira": 2, "terca feira": 2, ter: 2,
+  wednesday: 3, wed: 3, quarta: 3, "quarta-feira": 3, "quarta feira": 3, qua: 3,
+  thursday: 4, thu: 4, quinta: 4, "quinta-feira": 4, "quinta feira": 4, qui: 4,
+  friday: 5, fri: 5, sexta: 5, "sexta-feira": 5, "sexta feira": 5, sex: 5,
+  saturday: 6, sat: 6, sabado: 6, sab: 6,
+};
+const diasDaTurma = (valor: unknown): Set<number> => {
+  const dias = new Set<number>();
+  if (!Array.isArray(valor)) return dias;
+  for (const item of valor) {
+    if (typeof item !== "string") continue;
+    const chave = item.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+    if (DIAS[chave] !== undefined) dias.add(DIAS[chave]);
+  }
+  return dias;
+};
+
+export interface DiaInfo {
+  /** "d20261029": a parte do id do desafio. */
+  chave: string;
+  /** "2026-10-29" */
+  dia: string;
+  /** "29/10 às 21:00" */
+  rotulo: string;
+  horario: string;
+  /** Horário da partida (o desafio precisa ser aceito antes dele). */
+  partidaMs: number;
+  /** Fim do dia em Brasília. */
+  fimMs: number;
+}
+
+/** A partida de HOJE da turma (dia de jogo e horário válido), ou null. */
+export const partidaDeHoje = (turma: Dados, agoraMs: number): DiaInfo | null => {
+  const m = typeof turma?.horario === "string" ? /^(\d{1,2}):(\d{2})$/.exec(turma.horario.trim()) : null;
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+  const local = new Date(agoraMs - FUSO_MS);
+  if (!diasDaTurma(turma?.diasSemana).has(local.getUTCDay())) return null;
+  const dia = diaDeBrasiliaDe(agoraMs);
+  const inicio = inicioDoDia(dia);
+  const horario = `${pad(Number(m[1]))}:${m[2]}`;
+  return {
+    chave: `d${dia.replace(/-/g, "")}`,
+    dia,
+    rotulo: `${dia.slice(8, 10)}/${dia.slice(5, 7)} às ${horario}`,
+    horario,
+    partidaMs: inicio + (Number(m[1]) * 60 + Number(m[2])) * 60_000,
+    fimMs: inicio + DIA_MS,
+  };
+};
+
+export interface PartidaSalva {
+  /** `data` da partida (ISO, horário em que ela foi criada no aparelho). */
+  data?: unknown;
+  /** `salvadoEm` em ms (primeiro envio à turma). */
+  salvadoEmMs: number;
+  jogadores?: unknown;
+}
+
+/** A partida é daquele dia? Pela `data` dela (em Brasília); sem data válida, pelo primeiro envio. */
+export const partidaEhDoDia = (p: PartidaSalva, dia: string): boolean => {
+  const dataMs = typeof p.data === "string" ? Date.parse(p.data) : NaN;
+  return diaDeBrasiliaDe(Number.isFinite(dataMs) ? dataMs : p.salvadoEmMs) === dia;
+};
+
+/** Soma gols/assistências/jogos do atleta só nas partidas daquele dia (cada partida em que ele aparece = 1 jogo). */
+export const somarDoDia = (partidas: PartidaSalva[], dia: string, uid: string): Numeros => {
+  const total = { gols: 0, assistencias: 0, jogos: 0, pontos: 0 };
+  for (const p of partidas) {
+    if (!partidaEhDoDia(p, dia) || !Array.isArray(p.jogadores)) continue;
+    const meus = (p.jogadores as Dados[]).filter((j) => j?.participanteId === uid);
+    if (meus.length === 0) continue;
+    total.jogos += 1;
+    for (const j of meus) {
+      total.gols += Math.min(99, numero(j?.gols_partida));
+      total.assistencias += Math.min(99, numero(j?.assistencias));
+    }
+  }
+  total.pontos = total.gols * 3 + total.assistencias;
+  return total;
+};
+
 // ─── Corpo da requisição ──────────────────────────────────────────────────────
 
 export type DesafioRequest =
-  | { action: "criar"; desafiadoId: string; turmaId: string; temporada: "atual" | "proxima" }
+  | { action: "criar"; tipo: "temporada"; desafiadoId: string; turmaId: string; temporada: "atual" | "proxima" }
+  | { action: "criar"; tipo: "dia"; desafiadoId: string; turmaId: string }
   | { action: "responder"; desafioId: string; aceitar: boolean }
   | { action: "cancelar"; desafioId: string }
   | { action: "apurar"; desafioIds: string[] };
 
-const ID_DESAFIO = /^t\d{4}_[1-6]__[A-Za-z0-9_-]{1,128}__[A-Za-z0-9_-]{1,128}$/;
+const ID_DESAFIO = /^(t\d{4}_[1-6]|d\d{8})__[A-Za-z0-9_-]{1,128}__[A-Za-z0-9_-]{1,128}$/;
 export const isDesafioId = (valor: unknown): valor is string => typeof valor === "string" && valor.length <= 280 && ID_DESAFIO.test(valor);
 const ID_TURMA = /^[A-Za-z0-9_-]{1,128}$/;
 export const isTurmaId = (valor: unknown): valor is string => typeof valor === "string" && ID_TURMA.test(valor);
@@ -75,8 +187,10 @@ export const parseDesafioBody = (body: unknown): { ok: true; value: DesafioReque
   if (b.action === "criar") {
     if (!isSafeUid(b.desafiadoId)) return { ok: false, error: "Atleta inválido." };
     if (!isTurmaId(b.turmaId)) return { ok: false, error: "Turma inválida." };
+    if (b.tipo === "dia") return { ok: true, value: { action: "criar", tipo: "dia", desafiadoId: b.desafiadoId, turmaId: b.turmaId } };
+    if (b.tipo !== undefined && b.tipo !== "temporada") return { ok: false, error: "Tipo de desafio inválido." };
     if (b.temporada !== "atual" && b.temporada !== "proxima") return { ok: false, error: "Temporada inválida." };
-    return { ok: true, value: { action: "criar", desafiadoId: b.desafiadoId, turmaId: b.turmaId, temporada: b.temporada } };
+    return { ok: true, value: { action: "criar", tipo: "temporada", desafiadoId: b.desafiadoId, turmaId: b.turmaId, temporada: b.temporada } };
   }
   if (b.action === "responder") {
     if (!isDesafioId(b.desafioId)) return { ok: false, error: "Desafio inválido." };
@@ -134,7 +248,12 @@ export const atletaDe = (uid: string, perfil: Dados): Atleta => ({
 export interface ContextoCriacao {
   uid: string;
   desafiadoId: string;
-  temporada: "atual" | "proxima";
+  /** "temporada" (padrão) ou "dia" (só a partida de hoje da turma). */
+  tipo?: "temporada" | "dia";
+  /** Só no desafio de temporada. */
+  temporada?: "atual" | "proxima";
+  /** Documento da turma como está no banco (dia e horário de jogo, para o desafio do dia). */
+  turmaDados?: Dados;
   agoraMs: number;
   perfilDesafiante: Dados;
   perfilDesafiado: Dados;
@@ -149,7 +268,53 @@ export interface ContextoCriacao {
   existente: Dados;
 }
 
-export type Criacao = { ok: true; id: string; temporada: TemporadaInfo; dados: Record<string, unknown>; draft: PushDraft } | Negado;
+export type Criacao = { ok: true; id: string; dados: Record<string, unknown>; draft: PushDraft } | Negado;
+
+/** O período do desafio: temporada (atual com folga mínima, ou a próxima) ou a partida de hoje (até 30 min antes). */
+const periodoDoDesafio = (
+  c: ContextoCriacao,
+):
+  | { ok: true; chave: string; campos: Record<string, unknown>; descricao: string }
+  | Negado => {
+  const temporadaAtual = temporadaInfo(c.agoraMs);
+  if (c.tipo === "dia") {
+    const partida = partidaDeHoje(c.turmaDados, c.agoraMs);
+    if (!partida) return negar(409, "sem_partida_hoje", "Esta turma não tem partida hoje.");
+    if (c.agoraMs > partida.partidaMs - MINUTOS_ANTES_DA_PARTIDA * 60_000) {
+      return negar(409, "partida_muito_proxima", `Só dá para desafiar até ${MINUTOS_ANTES_DA_PARTIDA} minutos antes da partida.`);
+    }
+    return {
+      ok: true,
+      chave: partida.chave,
+      descricao: `na partida de hoje (${partida.horario})`,
+      campos: {
+        tipo: "dia",
+        dia: partida.dia,
+        // A chave da temporada fica gravada também (para filtros e para a tela), mas o resultado usa só o dia.
+        temporada: temporadaAtual.chave,
+        temporadaRotulo: `Partida de ${partida.rotulo}`,
+        inicioEm: new Date(partida.partidaMs),
+        fimEm: new Date(partida.fimMs),
+      },
+    };
+  }
+  const temporada = temporadaInfo(c.agoraMs, c.temporada === "proxima" ? 1 : 0);
+  if (c.temporada !== "proxima" && temporada.fimMs - c.agoraMs < DIAS_MINIMOS_TEMPORADA_ATUAL * DIA_MS) {
+    return negar(409, "temporada_acabando", `A temporada atual termina em menos de ${DIAS_MINIMOS_TEMPORADA_ATUAL} dias. Desafie para a próxima.`);
+  }
+  return {
+    ok: true,
+    chave: temporada.chave,
+    descricao: `temporada ${temporada.rotulo}`,
+    campos: {
+      tipo: "temporada",
+      temporada: temporada.chave,
+      temporadaRotulo: temporada.rotulo,
+      inicioEm: new Date(temporada.inicioMs),
+      fimEm: new Date(temporada.fimMs),
+    },
+  };
+};
 
 /** Pode criar? Devolve o documento (sem os carimbos de data do servidor) e o aviso para o desafiado. */
 export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
@@ -162,15 +327,14 @@ export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
     return negar(409, "sem_turma_em_comum", "Vocês dois precisam estar nesta turma, e ela precisa estar ativa.");
   }
 
-  const temporada = temporadaInfo(c.agoraMs, c.temporada === "atual" ? 0 : 1);
-  if (c.temporada === "atual" && temporada.fimMs - c.agoraMs < DIAS_MINIMOS_TEMPORADA_ATUAL * DIA_MS) {
-    return negar(409, "temporada_acabando", `A temporada atual termina em menos de ${DIAS_MINIMOS_TEMPORADA_ATUAL} dias. Desafie para a próxima.`);
-  }
+  const periodo = periodoDoDesafio(c);
+  if (!periodo.ok) return periodo;
+  const nesse = c.tipo === "dia" ? "hoje" : "nesta temporada";
 
   if (c.existente) {
     const status = c.existente.status;
-    if (status === "recusado") return negar(409, "ja_recusado", "Este atleta já recusou um desafio seu nesta temporada.");
-    if (status !== "cancelado") return negar(409, "ja_existe", "Vocês já têm um desafio nesta temporada.");
+    if (status === "recusado") return negar(409, "ja_recusado", `Este atleta já recusou um desafio seu ${nesse}.`);
+    if (status !== "cancelado") return negar(409, "ja_existe", `Vocês já têm um desafio ${nesse}.`);
   }
   if (c.ativosDesafiante >= MAX_DESAFIOS_ATIVOS) {
     return negar(409, "limite_desafiante", `Você já tem ${MAX_DESAFIOS_ATIVOS} desafios ativos. Termine ou cancele algum antes.`);
@@ -183,49 +347,63 @@ export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
   const desafiado = atletaDe(c.desafiadoId, c.perfilDesafiado);
   return {
     ok: true,
-    id: idDoDesafio(temporada.chave, c.uid, c.desafiadoId),
-    temporada,
+    id: idDoDesafio(periodo.chave, c.uid, c.desafiadoId),
     dados: {
       participantes: [c.uid, c.desafiadoId],
       desafianteId: c.uid,
       desafiadoId: c.desafiadoId,
       desafiante: { nome: desafiante.nome, foto: desafiante.foto },
       desafiado: { nome: desafiado.nome, foto: desafiado.foto },
-      temporada: temporada.chave,
-      temporadaRotulo: temporada.rotulo,
-      inicioEm: new Date(temporada.inicioMs),
-      fimEm: new Date(temporada.fimMs),
+      ...periodo.campos,
       turmas: [c.turma],
       status: "pendente",
     },
     draft: {
       title: "Você foi desafiado!",
-      body: `${sanitizeText(desafiante.nome, NOME_MAX, "Um atleta")} desafiou você na turma ${sanitizeText(c.turma.nome, NOME_MAX, "de vocês")}, temporada ${temporada.rotulo}. Toque para responder.`,
+      body: `${sanitizeText(desafiante.nome, NOME_MAX, "Um atleta")} desafiou você na turma ${sanitizeText(c.turma.nome, NOME_MAX, "de vocês")}, ${periodo.descricao}. Toque para responder.`,
       data: { tipo: "desafio", turmaId: "" },
     },
   };
 };
 
-const fimDe = (desafio: Dados): number => {
-  const fim = desafio?.fimEm as { toMillis?: () => number } | undefined;
-  return typeof fim?.toMillis === "function" ? fim.toMillis() : 0;
+const millis = (valor: unknown): number => {
+  const t = valor as { toMillis?: () => number } | undefined;
+  return typeof t?.toMillis === "function" ? t.toMillis() : 0;
+};
+const fimDe = (desafio: Dados): number => millis(desafio?.fimEm);
+
+export const ehDoDia = (desafio: Dados): boolean => desafio?.tipo === "dia";
+
+/** Até quando o desafio pode ser aceito: o horário da partida (do dia) ou o fim da temporada. */
+export const prazoParaAceitar = (desafio: Dados): number => (ehDoDia(desafio) ? millis(desafio?.inicioEm) : fimDe(desafio));
+
+/** "da temporada Nov–Dez 2026" / "da partida de 29/10" (textos dos avisos). */
+const descricaoDe = (desafio: Dados): string => {
+  if (ehDoDia(desafio) && typeof desafio?.dia === "string" && /^\d{4}-\d{2}-\d{2}$/.test(desafio.dia)) {
+    return `da partida de ${desafio.dia.slice(8, 10)}/${desafio.dia.slice(5, 7)}`;
+  }
+  return `da temporada ${sanitizeText(desafio?.temporadaRotulo, 20, "")}`;
 };
 
 export type Resposta = { ok: true; draft: PushDraft | null } | Negado;
 
-/** Só o desafiado responde, só enquanto está pendente e a temporada não acabou. */
+/** Só o desafiado responde, só enquanto está pendente e antes do prazo (horário da partida do dia / fim da temporada). */
 export const autorizarResposta = (uid: string, desafio: Dados, aceitar: boolean, agoraMs: number): Resposta => {
   if (!desafio) return negar(404, "desafio_nao_encontrado", "Desafio não encontrado.");
   if (desafio.desafiadoId !== uid) return negar(403, "nao_desafiado", "Só quem foi desafiado pode responder.");
   if (desafio.status !== "pendente") return negar(409, "nao_pendente", "Este desafio já foi respondido.");
-  if (agoraMs >= fimDe(desafio)) return negar(409, "temporada_encerrada", "A temporada deste desafio já terminou.");
+  if (agoraMs >= prazoParaAceitar(desafio)) {
+    return ehDoDia(desafio)
+      ? negar(409, "partida_comecou", "A partida deste desafio já começou.")
+      : negar(409, "temporada_encerrada", "A temporada deste desafio já terminou.");
+  }
   if (!aceitar) return { ok: true, draft: null };
   const nome = sanitizeText((desafio.desafiado as Dados)?.nome, NOME_MAX, "O atleta");
   return {
     ok: true,
     draft: {
       title: "Desafio aceito!",
-      body: `${nome} aceitou o seu desafio da temporada ${sanitizeText(desafio.temporadaRotulo, 20, "")}. Que vença o melhor!`,
+      body: `${nome} aceitou o seu desafio ${descricaoDe(desafio)}. Que vença o melhor!`,
       data: { tipo: "desafio", turmaId: "" },
     },
   };
@@ -278,23 +456,26 @@ export type Apuracao =
   | { ok: true; acao: "nada" }
   | Negado;
 
+/** Quando o resultado pode sair: `HORAS_APURACAO_DIA` depois do fim do dia, ou `DIAS_APURACAO` depois do fim da temporada. */
+export const apuracaoLiberadaEm = (desafio: Dados): number =>
+  fimDe(desafio) + (ehDoDia(desafio) ? HORAS_APURACAO_DIA * 3600_000 : DIAS_APURACAO * DIA_MS);
+
 /**
- * O que fazer com o desafio agora: aceito e com a apuração liberada (fim + `DIAS_APURACAO`) → finalizar; pendente depois do fim
- * da temporada → expirar; qualquer outro caso → nada (pedir cedo não é erro: o app pergunta ao abrir a tela).
+ * O que fazer com o desafio agora: aceito e com a apuração liberada → finalizar; pendente depois do prazo para aceitar →
+ * expirar; qualquer outro caso → nada (pedir cedo não é erro: o app pergunta ao abrir a tela).
  */
 export const decidirApuracao = (uid: string, desafio: Dados, agoraMs: number): Apuracao => {
   if (!desafio) return negar(404, "desafio_nao_encontrado", "Desafio não encontrado.");
   if (!listaDe(desafio.participantes).includes(uid)) return negar(403, "nao_participante", "Você não participa deste desafio.");
-  const fim = fimDe(desafio);
-  if (desafio.status === "pendente" && agoraMs >= fim) return { ok: true, acao: "expirar" };
-  if (desafio.status === "aceito" && agoraMs >= fim + DIAS_APURACAO * DIA_MS) return { ok: true, acao: "finalizar" };
+  if (desafio.status === "pendente" && agoraMs >= prazoParaAceitar(desafio)) return { ok: true, acao: "expirar" };
+  if (desafio.status === "aceito" && agoraMs >= apuracaoLiberadaEm(desafio)) return { ok: true, acao: "finalizar" };
   return { ok: true, acao: "nada" };
 };
 
-export const avisoDeResultado = (vencedorNome: string | null, rotulo: string): PushDraft => ({
+export const avisoDeResultado = (vencedorNome: string | null, desafio: Dados): PushDraft => ({
   title: "Resultado do desafio",
   body: vencedorNome
-    ? `${sanitizeText(vencedorNome, NOME_MAX, "Um atleta")} venceu o desafio da temporada ${sanitizeText(rotulo, 20, "")}. Toque para ver o placar.`
-    : `O desafio da temporada ${sanitizeText(rotulo, 20, "")} terminou empatado. Toque para ver o placar.`,
+    ? `${sanitizeText(vencedorNome, NOME_MAX, "Um atleta")} venceu o desafio ${descricaoDe(desafio)}. Toque para ver o placar.`
+    : `O desafio ${descricaoDe(desafio)} terminou empatado. Toque para ver o placar.`,
   data: { tipo: "desafio", turmaId: "" },
 });

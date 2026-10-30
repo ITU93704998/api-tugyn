@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { FieldValue, type Firestore, getFirestore } from "firebase-admin/firestore";
+import { FieldValue, type Firestore, Timestamp, getFirestore } from "firebase-admin/firestore";
 import { verificarAppCheck } from "./_lib/appCheck";
 import { getFirebaseApp, requireUser } from "./_lib/auth";
 import {
@@ -9,8 +9,13 @@ import {
   autorizarResposta,
   avisoDeResultado,
   decidirApuracao,
+  diaDeBrasiliaDe,
+  ehDoDia,
   idDoDesafio,
+  inicioDoDia,
+  MAX_PARTIDAS_DO_DIA,
   somarDoDesafio,
+  somarDoDia,
   temporadaInfo,
   turmaDoDesafio,
   vencedorEntre,
@@ -22,7 +27,8 @@ import { dentroDoLimite } from "./_lib/rateLimit";
 
 /**
  * POST /api/desafios   (corpo: { action, ... }, cabeçalho: Authorization: Bearer <login do Firebase>)
- *  - criar { desafiadoId, turmaId, temporada }               desafia um atleta numa turma ativa dos dois
+ *  - criar { desafiadoId, turmaId, temporada }               desafia um atleta numa turma ativa dos dois (temporada)
+ *  - criar { tipo: "dia", desafiadoId, turmaId }            só a partida de hoje da turma (até 30 min antes)
  *  - responder { desafioId, aceitar }                         o desafiado aceita ou recusa
  *  - cancelar { desafioId }                                   quem desafiou desiste (só enquanto pendente)
  *  - apurar { desafioIds }                                    fecha os que já podem ter resultado (o app pede ao abrir a aba)
@@ -54,9 +60,12 @@ const contarAtivos = async (db: Firestore, uid: string): Promise<number> => {
   return snap.data().count;
 };
 
-const criar = async (db: Firestore, uid: string, desafiadoId: string, turmaId: string, temporada: "atual" | "proxima"): Promise<Resultado> => {
+const criar = async (db: Firestore, uid: string, pedido: Extract<DesafioRequest, { action: "criar" }>): Promise<Resultado> => {
+  const { desafiadoId, turmaId } = pedido;
+  const temporada = pedido.tipo === "temporada" ? pedido.temporada : undefined;
   const agoraMs = Date.now();
-  const chave = temporadaInfo(agoraMs, temporada === "atual" ? 0 : 1).chave;
+  // Id: a temporada ou o dia de hoje (o servidor confere depois se hoje tem partida nesta turma).
+  const chave = pedido.tipo === "dia" ? `d${diaDeBrasiliaDe(agoraMs).replace(/-/g, "")}` : temporadaInfo(agoraMs, temporada === "proxima" ? 1 : 0).chave;
   const ref = db.doc(`${COLECAO}/${idDoDesafio(chave, uid, desafiadoId)}`);
 
   const [perfilA, perfilB, bloqueioA, bloqueioB, turma, existente, ativosA, ativosB] = await Promise.all([
@@ -73,7 +82,9 @@ const criar = async (db: Firestore, uid: string, desafiadoId: string, turmaId: s
   const auth = autorizarCriacao({
     uid,
     desafiadoId,
+    tipo: pedido.tipo,
     temporada,
+    turmaDados: turma.exists ? (turma.data() ?? null) : null,
     agoraMs,
     perfilDesafiante: perfilA.data() ?? null,
     perfilDesafiado: perfilB.exists ? (perfilB.data() ?? null) : null,
@@ -92,7 +103,9 @@ const criar = async (db: Firestore, uid: string, desafiadoId: string, turmaId: s
     tx.set(ref, { ...auth.dados, criadoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp() });
     return true;
   });
-  if (!criado) return { ok: false, status: 409, code: "ja_existe", error: "Vocês já têm um desafio nesta temporada." };
+  if (!criado) {
+    return { ok: false, status: 409, code: "ja_existe", error: pedido.tipo === "dia" ? "Vocês já têm um desafio hoje." : "Vocês já têm um desafio nesta temporada." };
+  }
 
   await avisar(db, desafiadoId, `desafio_novo_${auth.id}`, auth.draft);
   return { ok: true, body: { desafioId: auth.id } };
@@ -132,7 +145,7 @@ const apurarUm = async (db: Firestore, uid: string, desafioId: string): Promise<
   const ref = db.doc(`${COLECAO}/${desafioId}`);
   type Fechamento =
     | { status: "expirado" }
-    | { status: "finalizado"; outro: string; vencedorNome: string | null; rotulo: string };
+    | { status: "finalizado"; outro: string; vencedorNome: string | null; desafio: Record<string, unknown> };
   const fechado = await db.runTransaction(async (tx): Promise<Fechamento | null> => {
     const snap = await tx.get(ref);
     const desafio = snap.exists ? (snap.data() ?? null) : null;
@@ -149,11 +162,39 @@ const apurarUm = async (db: Firestore, uid: string, desafioId: string): Promise<
     const ids = turmas.map((t) => t?.id).filter((id): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id));
     const a = String(desafio.desafianteId);
     const b = String(desafio.desafiadoId);
-    const chave = String(desafio.temporada);
-    const docs = ids.length ? await tx.getAll(...ids.flatMap((id) => [db.doc(`turmas/${id}/participantes/${a}`), db.doc(`turmas/${id}/participantes/${b}`)])) : [];
-    const dados = docs.map((d) => (d.exists ? (d.data() ?? null) : null));
-    const numerosA = { uid: a, ...somarDoDesafio(dados.filter((_, i) => i % 2 === 0), chave) };
-    const numerosB = { uid: b, ...somarDoDesafio(dados.filter((_, i) => i % 2 === 1), chave) };
+    let numerosA: { uid: string } & ReturnType<typeof somarDoDesafio>;
+    let numerosB: typeof numerosA;
+
+    if (ehDoDia(desafio)) {
+      // Partida do dia: só as partidas da turma salvas a partir daquele dia (até o fim do dia seguinte), e delas só as
+      // daquele dia. Uma consulta pequena, com só os campos usados.
+      const dia = String(desafio.dia ?? "");
+      const inicio = /^\d{4}-\d{2}-\d{2}$/.test(dia) ? inicioDoDia(dia) : 0;
+      const partidas =
+        ids.length && inicio
+          ? await tx.get(
+              db
+                .collection(`turmas/${ids[0]}/partidas`)
+                .where("salvadoEm", ">=", Timestamp.fromMillis(inicio))
+                .where("salvadoEm", "<", Timestamp.fromMillis(inicio + 2 * 24 * 3600_000))
+                .select("data", "jogadores", "salvadoEm")
+                .limit(MAX_PARTIDAS_DO_DIA),
+            )
+          : null;
+      const lista = (partidas?.docs ?? []).map((p) => ({
+        data: p.get("data"),
+        salvadoEmMs: (p.get("salvadoEm") as Timestamp | undefined)?.toMillis?.() ?? 0,
+        jogadores: p.get("jogadores"),
+      }));
+      numerosA = { uid: a, ...somarDoDia(lista, dia, a) };
+      numerosB = { uid: b, ...somarDoDia(lista, dia, b) };
+    } else {
+      const chave = String(desafio.temporada);
+      const docs = ids.length ? await tx.getAll(...ids.flatMap((id) => [db.doc(`turmas/${id}/participantes/${a}`), db.doc(`turmas/${id}/participantes/${b}`)])) : [];
+      const dados = docs.map((d) => (d.exists ? (d.data() ?? null) : null));
+      numerosA = { uid: a, ...somarDoDesafio(dados.filter((_, i) => i % 2 === 0), chave) };
+      numerosB = { uid: b, ...somarDoDesafio(dados.filter((_, i) => i % 2 === 1), chave) };
+    }
     const vencedorId = vencedorEntre(numerosA, numerosB);
 
     tx.update(ref, {
@@ -170,11 +211,11 @@ const apurarUm = async (db: Firestore, uid: string, desafioId: string): Promise<
       [a]: (desafio.desafiante as { nome?: unknown } | undefined)?.nome,
       [b]: (desafio.desafiado as { nome?: unknown } | undefined)?.nome,
     };
-    return { status: "finalizado", outro: uid === a ? b : a, vencedorNome: vencedorId ? String(nomes[vencedorId] ?? "") : null, rotulo: String(desafio.temporadaRotulo ?? "") };
+    return { status: "finalizado", outro: uid === a ? b : a, vencedorNome: vencedorId ? String(nomes[vencedorId] ?? "") : null, desafio };
   });
   if (!fechado) return null;
   if (fechado.status === "finalizado") {
-    await avisar(db, fechado.outro, `desafio_resultado_${desafioId}`, avisoDeResultado(fechado.vencedorNome, fechado.rotulo));
+    await avisar(db, fechado.outro, `desafio_resultado_${desafioId}`, avisoDeResultado(fechado.vencedorNome, fechado.desafio));
   }
   return fechado.status;
 };
@@ -195,7 +236,7 @@ const apurar = async (db: Firestore, uid: string, desafioIds: string[]): Promise
 const executar = (db: Firestore, uid: string, pedido: DesafioRequest): Promise<Resultado> => {
   switch (pedido.action) {
     case "criar":
-      return criar(db, uid, pedido.desafiadoId, pedido.turmaId, pedido.temporada);
+      return criar(db, uid, pedido);
     case "responder":
       return responder(db, uid, pedido.desafioId, pedido.aceitar);
     case "cancelar":

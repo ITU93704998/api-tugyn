@@ -40,7 +40,7 @@ test('id fixo por dupla e temporada', () => {
 });
 
 test('valida o corpo', () => {
-  assert.deepEqual(d.parseDesafioBody({ action: 'criar', desafiadoId: 'u2', turmaId: 't1', temporada: 'proxima' }).value, { action: 'criar', desafiadoId: 'u2', turmaId: 't1', temporada: 'proxima' });
+  assert.deepEqual(d.parseDesafioBody({ action: 'criar', desafiadoId: 'u2', turmaId: 't1', temporada: 'proxima' }).value, { action: 'criar', tipo: 'temporada', desafiadoId: 'u2', turmaId: 't1', temporada: 'proxima' });
   assert.equal(d.parseDesafioBody({ action: 'criar', desafiadoId: 'u2', turmaId: 't1', temporada: 'outra' }).ok, false);
   assert.equal(d.parseDesafioBody({ action: 'criar', desafiadoId: 'u2', temporada: 'atual' }).ok, false);
   assert.equal(d.parseDesafioBody({ action: 'criar', desafiadoId: 'u2', turmaId: '../x', temporada: 'atual' }).ok, false);
@@ -113,6 +113,65 @@ test('apuração: só depois do prazo e só para quem participa', () => {
   assert.equal(d.decidirApuracao('a', desafio(), fim).acao, 'expirar');
   assert.equal(d.decidirApuracao('a', desafio(), fim - 1).acao, 'nada');
   assert.equal(d.decidirApuracao('a', desafio({ status: 'finalizado' }), fim + 9 * DIA).acao, 'nada');
+});
+
+// AGORA = terça 10/11/2026, 12:00 em Brasília.
+const turmaHoje = { horario: '21:00', diasSemana: ['tuesday', 'thursday'] };
+const PARTIDA = Date.parse('2026-11-11T00:00:00Z'); // 21:00 de Brasília
+
+test('desafio do dia: corpo, partida de hoje e prazo de 30 minutos', () => {
+  assert.deepEqual(d.parseDesafioBody({ action: 'criar', tipo: 'dia', desafiadoId: 'u2', turmaId: 't1' }).value, { action: 'criar', tipo: 'dia', desafiadoId: 'u2', turmaId: 't1' });
+  assert.equal(d.parseDesafioBody({ action: 'criar', tipo: 'mes', desafiadoId: 'u2', turmaId: 't1', temporada: 'atual' }).ok, false);
+  assert.equal(d.isDesafioId('d20261110__a__b'), true);
+
+  const hoje = d.partidaDeHoje(turmaHoje, AGORA);
+  assert.equal(hoje.chave, 'd20261110');
+  assert.equal(hoje.dia, '2026-11-10');
+  assert.equal(hoje.partidaMs, PARTIDA);
+  assert.equal(hoje.fimMs, Date.parse('2026-11-11T03:00:00Z'));
+  assert.equal(d.partidaDeHoje({ ...turmaHoje, diasSemana: ['segunda'] }, AGORA), null);
+  assert.equal(d.partidaDeHoje({ ...turmaHoje, horario: '' }, AGORA), null);
+  assert.equal(d.partidaDeHoje({ horario: '21:00', diasSemana: ['Terça-feira'] }, AGORA).dia, '2026-11-10');
+
+  const dia = { ...base, tipo: 'dia', temporada: undefined, turmaDados: turmaHoje };
+  const ok = d.autorizarCriacao(dia);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.id, 'd20261110__a__b');
+  assert.equal(ok.dados.tipo, 'dia');
+  assert.equal(ok.dados.dia, '2026-11-10');
+  assert.equal(ok.dados.inicioEm.getTime(), PARTIDA);
+  assert.match(ok.draft.body, /partida de hoje \(21:00\)/);
+  assert.equal(d.autorizarCriacao({ ...dia, agoraMs: PARTIDA - 30 * 60_000 }).ok, true);
+  assert.equal(d.autorizarCriacao({ ...dia, agoraMs: PARTIDA - 29 * 60_000 }).code, 'partida_muito_proxima');
+  assert.equal(d.autorizarCriacao({ ...dia, turmaDados: { ...turmaHoje, diasSemana: ['monday'] } }).code, 'sem_partida_hoje');
+  assert.equal(d.autorizarCriacao({ ...dia, existente: { status: 'aceito' } }).error, 'Vocês já têm um desafio hoje.');
+});
+
+test('desafio do dia: aceitar até a partida e resultado 12 h depois do fim do dia', () => {
+  const doDia = desafio({ tipo: 'dia', dia: '2026-11-10', inicioEm: ts_(PARTIDA), fimEm: ts_(Date.parse('2026-11-11T03:00:00Z')) });
+  assert.match(d.autorizarResposta('b', doDia, true, AGORA).draft.body, /partida de 10\/11/);
+  assert.equal(d.autorizarResposta('b', doDia, true, PARTIDA).code, 'partida_comecou');
+  assert.equal(d.decidirApuracao('a', doDia, PARTIDA).acao, 'expirar');
+  const aceito = { ...doDia, status: 'aceito' };
+  const liberado = Date.parse('2026-11-11T15:00:00Z');
+  assert.equal(d.decidirApuracao('a', aceito, liberado - 1).acao, 'nada');
+  assert.equal(d.decidirApuracao('a', aceito, liberado).acao, 'finalizar');
+  assert.match(d.avisoDeResultado(null, aceito).body, /partida de 10\/11 terminou empatado/);
+});
+
+test('desafio do dia: soma só as partidas daquele dia', () => {
+  const partidas = [
+    { data: '2026-11-11T00:30:00.000Z', salvadoEmMs: 0, jogadores: [{ participanteId: 'a', gols_partida: 2, assistencias: 1 }, { participanteId: 'b', gols_partida: 1 }] },
+    // criada às 23:30 de Brasília do mesmo dia (02:30Z do dia 11): ainda conta
+    { data: '2026-11-11T02:30:00.000Z', salvadoEmMs: 0, jogadores: [{ participanteId: 'a', gols_partida: 1 }] },
+    // outra partida, do dia seguinte: não conta
+    { data: '2026-11-11T22:00:00.000Z', salvadoEmMs: 0, jogadores: [{ participanteId: 'a', gols_partida: 9 }] },
+    // sem data: vale o dia do primeiro envio
+    { salvadoEmMs: Date.parse('2026-11-11T01:00:00Z'), jogadores: [{ participanteId: 'b', gols_partida: 1, assistencias: 2 }] },
+  ];
+  assert.deepEqual(d.somarDoDia(partidas, '2026-11-10', 'a'), { gols: 3, assistencias: 1, jogos: 2, pontos: 10 });
+  assert.deepEqual(d.somarDoDia(partidas, '2026-11-10', 'b'), { gols: 2, assistencias: 2, jogos: 2, pontos: 8 });
+  assert.deepEqual(d.somarDoDia(partidas, '2026-11-10', 'c'), { gols: 0, assistencias: 0, jogos: 0, pontos: 0 });
 });
 
 test('soma só a temporada do desafio e decide o vencedor', () => {
