@@ -12,7 +12,7 @@ import { dentroDoLimite } from "./rateLimit";
  * SEM login: a conta suspensa está desativada no Firebase Auth (não entra nem renova o token). Por isso:
  *  - a resposta é SEMPRE a mesma ("recebemos"), exista a conta ou não: ninguém descobre por aqui quais e-mails têm conta;
  *  - só vira pedido quando o e-mail é de uma conta com `users/{uid}.status == "suspended"`;
- *  - um pedido em aberto por conta (`revisoes/{uid}`); depois da decisão, a pessoa pode pedir de novo;
+ *  - um pedido em aberto por conta (`revisoes/{uid}`); depois de aceito, pode pedir de novo; depois de NEGADO, só após 30 dias;
  *  - limite por IP (5 por hora) e por e-mail (3 por dia). O site não tem App Check: o limite é a proteção.
  *
  * Clientes não leem nem gravam `revisoes` (regras): o painel lista como administrador e decide pela moderação
@@ -22,6 +22,8 @@ import { dentroDoLimite } from "./rateLimit";
 export const REVISOES = "revisoes";
 export const MENSAGEM_MIN = 20;
 export const MENSAGEM_MAX = 1000;
+/** Depois de um pedido negado, um novo só vale depois deste prazo (a política e os Termos dizem 30 dias). */
+export const ESPERA_APOS_NEGADA_MS = 30 * 24 * 60 * 60 * 1000;
 const ORIGENS = ["app", "site"] as const;
 type Origem = (typeof ORIGENS)[number];
 
@@ -51,7 +53,16 @@ const ipDe = (req: VercelRequest): string => {
   return (typeof valor === "string" ? valor.split(",")[0].trim() : "") || "sem-ip";
 };
 
-export type Resultado = "registrada" | "ja_aberta" | "ignorada";
+export type Resultado = "registrada" | "ja_aberta" | "em_espera" | "ignorada";
+
+const millis = (v: unknown): number => {
+  const fn = (v as { toMillis?: unknown } | null)?.toMillis;
+  if (typeof fn === "function") {
+    const n = Number(fn.call(v));
+    return Number.isFinite(n) ? n : 0;
+  }
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+};
 
 /** Grava o pedido se o e-mail for de uma conta suspensa. Nunca diz ao cliente qual dos casos aconteceu. */
 export async function registrarRevisao(db: Firestore, email: string, mensagem: string, origem: Origem): Promise<Resultado> {
@@ -67,6 +78,11 @@ export async function registrarRevisao(db: Firestore, email: string, mensagem: s
   const ref = db.doc(`${REVISOES}/${conta.uid}`);
   const atual = await ref.get();
   if (atual.exists && atual.get("status") === "aberta") return "ja_aberta";
+  // Negado há menos de 30 dias: não vira pedido novo (sem data da decisão, conta como recente).
+  if (atual.exists && atual.get("status") === "negada") {
+    const decidida = millis(atual.get("decididaEm"));
+    if (!decidida || Date.now() - decidida < ESPERA_APOS_NEGADA_MS) return "em_espera";
+  }
   const anteriores = atual.exists ? (Number(atual.get("pedidosAnteriores")) || 0) + 1 : 0;
 
   await ref.set({

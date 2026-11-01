@@ -65,14 +65,27 @@ test('e-mail sem conta ou conta ativa: mesma resposta e nada gravado', async () 
   assert.equal([...f.docs.keys()].some(k => k.startsWith('revisoes/')), false);
 });
 
-test('pedido aberto não é sobrescrito; depois da decisão, pode pedir de novo', async () => {
+test('pedido aberto não é sobrescrito; negado há 30 dias ou mais, pode pedir de novo', async () => {
   const f = fixture({ docs: { 'revisoes/u1': { status: 'aberta', mensagem: 'primeiro pedido original' } } });
   await f.request({ email: 'joao@x.com', mensagem: MSG });
   assert.equal(f.docs.get('revisoes/u1').mensagem, 'primeiro pedido original');
-  f.docs.set('revisoes/u1', { status: 'negada', pedidosAnteriores: 0 });
+  f.docs.set('revisoes/u1', { status: 'negada', pedidosAnteriores: 0, decididaEm: { toMillis: () => Date.now() - 31 * 86_400_000 } });
   await f.request({ email: 'joao@x.com', mensagem: MSG, origem: 'site' });
   const p = f.docs.get('revisoes/u1');
   assert.deepEqual([p.status, p.pedidosAnteriores, p.origem], ['aberta', 1, 'site']);
+});
+
+test('negado há menos de 30 dias (ou sem data): mesma resposta e nada muda', async () => {
+  for (const decididaEm of [{ toMillis: () => Date.now() - 29 * 86_400_000 }, undefined]) {
+    const f = fixture({ docs: { 'revisoes/u1': { status: 'negada', mensagem: 'pedido antigo negado', decididaEm } } });
+    const r = await f.request({ email: 'joao@x.com', mensagem: MSG });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(r.body, { ok: true });
+    assert.deepEqual([f.docs.get('revisoes/u1').status, f.docs.get('revisoes/u1').mensagem], ['negada', 'pedido antigo negado']);
+  }
+  const aceita = fixture({ docs: { 'revisoes/u1': { status: 'aceita', decididaEm: { toMillis: () => Date.now() } } } });
+  await aceita.request({ email: 'joao@x.com', mensagem: MSG });
+  assert.equal(aceita.docs.get('revisoes/u1').status, 'aberta', 'aceita e suspensa de novo: pode pedir na hora');
 });
 
 test('validação, robô, limite e falha do servidor', async () => {
