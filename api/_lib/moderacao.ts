@@ -9,7 +9,8 @@ import { isSafeUid } from "./validation";
 /**
  * Moderação pelo painel (Segurança › Denúncias): POST /api/version?resource=moderacao, só para a permissão `admin`.
  *
- *  consultar      { tipo: "user" | "turma", id }  → situação atual do alvo + histórico de medidas
+ *  consultar      { tipo: "user" | "turma", id, denuncias? }  → situação atual do alvo + histórico de medidas
+ *                 (com `denuncias: true`, também as denúncias recebidas, para decidir um pedido de revisão)
  *  suspender      { id, motivo }  → os MESMOS passos de `scripts/moderar-conta.cjs suspender` (status, Auth desativado,
  *                                   sessões revogadas, tokens de aviso apagados) e resolve as denúncias do usuário
  *  reativar       { id, motivo }  → reativa no Auth e volta o status para "active" (e aceita o pedido de revisão aberto)
@@ -26,6 +27,8 @@ export const MOTIVO_MIN = 3;
 export const MOTIVO_MAX = 500;
 const LOG = "moderacaoLog";
 const HISTORICO_MAX = 20;
+const DENUNCIAS_MAX = 50;
+const STATUS_DENUNCIA = ["open", "reviewing", "resolved", "dismissed"] as const;
 
 type Tipo = "user" | "turma";
 type Acao = "suspender" | "reativar" | "manterSuspensao" | "encerrarTurma" | "reabrirTurma";
@@ -55,6 +58,16 @@ export interface EstadoDoAlvo {
   /** Turma encerrada pela moderação (só essa a moderação reabre). */
   pelaModeracao: boolean;
   historico: Medida[];
+  /** Só quando pedido (`denuncias: true`): denúncias recebidas, da mais recente para a mais antiga. Sem quem denunciou. */
+  denuncias?: DenunciaRecebida[];
+}
+
+export interface DenunciaRecebida {
+  motivo: string;
+  detalhes: string;
+  status: (typeof STATUS_DENUNCIA)[number];
+  em: number;
+  nota: string;
 }
 
 class Recusa extends Error {
@@ -96,10 +109,37 @@ async function historico(db: Firestore, id: string): Promise<Medida[]> {
     .sort((a, b) => b.em - a.em);
 }
 
-export async function consultar(db: Firestore, tipo: Tipo, id: string): Promise<EstadoDoAlvo> {
-  const [snap, medidas] = await Promise.all([db.doc(`${tipo === "user" ? "users" : "turmas"}/${id}`).get(), historico(db, id)]);
+/** Denúncias recebidas pelo alvo (todas as situações). Não devolve quem denunciou. */
+async function denunciasRecebidas(db: Firestore, tipo: Tipo, id: string): Promise<DenunciaRecebida[]> {
+  const snap = await db.collection("reports").where("targetId", "==", id).limit(300).get();
+  return snap.docs
+    .map((doc) => doc.data())
+    .filter((d) => d.targetType === tipo)
+    .map((d) => ({
+      motivo: txt(d.reason, 40) || "other",
+      detalhes: txt(d.details, 500),
+      status: (STATUS_DENUNCIA as readonly string[]).includes(d.status) ? (d.status as DenunciaRecebida["status"]) : "open",
+      em: ms(d.createdAt),
+      nota: txt(d.nota, MOTIVO_MAX),
+    }))
+    .sort((a, b) => b.em - a.em)
+    .slice(0, DENUNCIAS_MAX);
+}
+
+export async function consultar(db: Firestore, tipo: Tipo, id: string, comDenuncias = false): Promise<EstadoDoAlvo> {
+  const [snap, medidas, denuncias] = await Promise.all([
+    db.doc(`${tipo === "user" ? "users" : "turmas"}/${id}`).get(),
+    historico(db, id),
+    comDenuncias ? denunciasRecebidas(db, tipo, id) : Promise.resolve(undefined),
+  ]);
   const d = snap.exists ? snap.data() ?? {} : {};
-  const base = { tipo, id, existe: snap.exists, historico: medidas.filter((m) => (tipo === "user") === ACOES_DE_USUARIO.includes(m.acao)) };
+  const base = {
+    tipo,
+    id,
+    existe: snap.exists,
+    historico: medidas.filter((m) => (tipo === "user") === ACOES_DE_USUARIO.includes(m.acao)),
+    ...(denuncias ? { denuncias } : {}),
+  };
   if (tipo === "user") {
     const suspensa = d.status === "suspended";
     return {
@@ -239,7 +279,7 @@ export async function handleModeracao(req: VercelRequest, res: VercelResponse) {
     const db = getFirestore(getFirebaseApp());
     if (body.action === "consultar") {
       if (body.tipo !== "user" && body.tipo !== "turma") return res.status(400).json({ error: "Tipo inválido." });
-      return res.status(200).json(await consultar(db, body.tipo, id));
+      return res.status(200).json(await consultar(db, body.tipo, id, body.denuncias === true));
     }
     if (!(ACOES as readonly unknown[]).includes(body.action)) return res.status(400).json({ error: "Ação inválida." });
     const motivo = parseMotivo(body.motivo);

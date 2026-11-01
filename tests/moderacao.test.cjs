@@ -196,6 +196,21 @@ test('consultar devolve a situação e o histórico só do tipo pedido', async (
   assert.equal(f.logs().length, 0, 'consultar não grava nada');
 });
 
+test('consultar com denuncias devolve as denúncias recebidas, sem quem denunciou', async () => {
+  const f = fixture({ docs: {
+    'reports/a': { targetType: 'user', targetId: 'alvo', status: 'open', reason: 'spam', details: 'manda link', reporterId: 'r1', createdAt: 1000 },
+    'reports/b': { targetType: 'user', targetId: 'alvo', status: 'resolved', reason: 'harassment', nota: 'suspensa', reporterId: 'r2', createdAt: 3000 },
+  } });
+  const sem = await f.request({ action: 'consultar', tipo: 'user', id: 'alvo' });
+  assert.equal(sem.body.denuncias, undefined, 'sem pedir, não lê as denúncias');
+  const com = await f.request({ action: 'consultar', tipo: 'user', id: 'alvo', denuncias: true });
+  assert.deepEqual(com.body.denuncias.map(d => [d.motivo, d.status, d.em]), [['harassment', 'resolved', 3000], ['spam', 'open', 1000], ['other', 'dismissed', 0]]);
+  assert.equal(com.body.denuncias[1].detalhes, 'manda link');
+  assert.ok(com.body.denuncias.every(d => !('reporterId' in d)), 'não expõe quem denunciou');
+  const turma = await f.request({ action: 'consultar', tipo: 'turma', id: 't1', denuncias: true });
+  assert.deepEqual(turma.body.denuncias.map(d => d.motivo), ['spam'], 'só as do tipo pedido');
+});
+
 test('pedido de revisão: reativar aceita, manter suspensão nega; sem pedido aberto, manter é recusado', async () => {
   const f = fixture({ docs: { 'revisoes/alvo': { uid: 'alvo', status: 'aberta', mensagem: 'foi engano' } } });
   await f.request({ action: 'suspender', id: 'alvo', motivo: 'assédio' });
