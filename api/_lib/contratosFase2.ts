@@ -81,7 +81,7 @@ export const clienteImagem = async (c: CtxCliente) => {
 
   const enviado = await cloudinary.uploader.upload(imagem.dataUri, {
     ...conta,
-    // `anuncios/<uid do administrador>/contratos/<nome>`: o painel reconhece esse caminho e apaga a imagem junto com a campanha
+    // `anuncios/<uid do administrador>/contratos/<nome>`: o painel reconhece esse caminho e MANTÉM a imagem ao excluir a campanha (é o registro do contrato)
     folder: `anuncios/${d.criadoPor || "contratos"}/contratos`,
     public_id: aleatorio(),
     type: "upload",
