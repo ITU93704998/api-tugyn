@@ -195,3 +195,19 @@ test('consultar devolve a situação e o histórico só do tipo pedido', async (
   assert.equal(nada.body.existe, false);
   assert.equal(f.logs().length, 0, 'consultar não grava nada');
 });
+
+test('pedido de revisão: reativar aceita, manter suspensão nega; sem pedido aberto, manter é recusado', async () => {
+  const f = fixture({ docs: { 'revisoes/alvo': { uid: 'alvo', status: 'aberta', mensagem: 'foi engano' } } });
+  await f.request({ action: 'suspender', id: 'alvo', motivo: 'assédio' });
+  const negada = await f.request({ action: 'manterSuspensao', id: 'alvo', motivo: 'provas claras' });
+  assert.equal(negada.statusCode, 200);
+  assert.equal(negada.body.situacao, 'suspensa');
+  assert.deepEqual([f.docs.get('revisoes/alvo').status, f.docs.get('revisoes/alvo').nota, f.docs.get('revisoes/alvo').decididaPor], ['negada', 'provas claras', 'admin-uid']);
+  assert.ok(negada.body.historico.some(m => m.acao === 'manterSuspensao' && m.motivo === 'provas claras'));
+  assert.equal((await f.request({ action: 'manterSuspensao', id: 'alvo', motivo: 'de novo' })).statusCode, 409, 'nada em aberto');
+
+  f.docs.set('revisoes/alvo', { uid: 'alvo', status: 'aberta' });
+  await f.request({ action: 'reativar', id: 'alvo', motivo: 'recurso aceito' });
+  assert.equal(f.docs.get('revisoes/alvo').status, 'aceita');
+  assert.equal((await f.request({ action: 'manterSuspensao', id: 'alvo', motivo: 'ativa' })).statusCode, 409, 'conta ativa');
+});

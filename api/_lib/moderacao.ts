@@ -12,7 +12,8 @@ import { isSafeUid } from "./validation";
  *  consultar      { tipo: "user" | "turma", id }  → situação atual do alvo + histórico de medidas
  *  suspender      { id, motivo }  → os MESMOS passos de `scripts/moderar-conta.cjs suspender` (status, Auth desativado,
  *                                   sessões revogadas, tokens de aviso apagados) e resolve as denúncias do usuário
- *  reativar       { id, motivo }  → reativa no Auth e volta o status para "active"
+ *  reativar       { id, motivo }  → reativa no Auth e volta o status para "active" (e aceita o pedido de revisão aberto)
+ *  manterSuspensao { id, motivo } → nega o pedido de revisão aberto (`revisoes/{uid}`); a conta continua suspensa
  *  encerrarTurma  { id, motivo }  → encerra a turma (como o organizador faria) marcando `encerradaPor: "moderacao"`
  *                                   e resolve as denúncias da turma
  *  reabrirTurma   { id, motivo }  → só reabre turma encerrada pela moderação
@@ -27,8 +28,10 @@ const LOG = "moderacaoLog";
 const HISTORICO_MAX = 20;
 
 type Tipo = "user" | "turma";
-type Acao = "suspender" | "reativar" | "encerrarTurma" | "reabrirTurma";
-const ACOES: readonly Acao[] = ["suspender", "reativar", "encerrarTurma", "reabrirTurma"];
+type Acao = "suspender" | "reativar" | "manterSuspensao" | "encerrarTurma" | "reabrirTurma";
+const ACOES: readonly Acao[] = ["suspender", "reativar", "manterSuspensao", "encerrarTurma", "reabrirTurma"];
+const ACOES_DE_USUARIO: readonly Acao[] = ["suspender", "reativar", "manterSuspensao"];
+const REVISOES = "revisoes";
 
 export interface Medida {
   acao: Acao;
@@ -96,7 +99,7 @@ async function historico(db: Firestore, id: string): Promise<Medida[]> {
 export async function consultar(db: Firestore, tipo: Tipo, id: string): Promise<EstadoDoAlvo> {
   const [snap, medidas] = await Promise.all([db.doc(`${tipo === "user" ? "users" : "turmas"}/${id}`).get(), historico(db, id)]);
   const d = snap.exists ? snap.data() ?? {} : {};
-  const base = { tipo, id, existe: snap.exists, historico: medidas.filter((m) => (tipo === "user") === (m.acao === "suspender" || m.acao === "reativar")) };
+  const base = { tipo, id, existe: snap.exists, historico: medidas.filter((m) => (tipo === "user") === ACOES_DE_USUARIO.includes(m.acao)) };
   if (tipo === "user") {
     const suspensa = d.status === "suspended";
     return {
@@ -134,6 +137,17 @@ async function resolverDenuncias(db: Firestore, tipo: Tipo, id: string, nota: st
   return alvo.length;
 }
 
+/** Fecha o pedido de revisão aberto da conta. `exigir`: sem pedido aberto, recusa (409). */
+async function decidirRevisao(db: Firestore, uid: string, decisao: "aceita" | "negada", nota: string, adminUid: string, exigir: boolean): Promise<void> {
+  const ref = db.doc(`${REVISOES}/${uid}`);
+  const snap = await ref.get();
+  if (!snap.exists || snap.get("status") !== "aberta") {
+    if (exigir) throw new Recusa(409, "Não há pedido de revisão em aberto para esta conta.");
+    return;
+  }
+  await ref.update({ status: decisao, nota: nota.slice(0, MOTIVO_MAX), decididaPor: adminUid, decididaEm: FieldValue.serverTimestamp() });
+}
+
 const ignorarSemConta = (erro: unknown) => {
   // Perfil sem conta no Auth (apagada à mão): o status no Firestore já basta.
   if ((erro as { code?: unknown } | null)?.code !== "auth/user-not-found") throw erro;
@@ -141,7 +155,7 @@ const ignorarSemConta = (erro: unknown) => {
 
 export async function aplicar(db: Firestore, acao: Acao, id: string, motivo: string, adminUid: string): Promise<EstadoDoAlvo> {
   const auth = getAuth(getFirebaseApp());
-  const tipo: Tipo = acao === "suspender" || acao === "reativar" ? "user" : "turma";
+  const tipo: Tipo = ACOES_DE_USUARIO.includes(acao) ? "user" : "turma";
   const ref = db.doc(`${tipo === "user" ? "users" : "turmas"}/${id}`);
   const snap = await ref.get();
   if (!snap.exists) throw new Recusa(404, tipo === "user" ? "Usuário não encontrado." : "Turma não encontrada.");
@@ -164,6 +178,10 @@ export async function aplicar(db: Firestore, acao: Acao, id: string, motivo: str
   } else if (acao === "reativar") {
     await auth.updateUser(id, { disabled: false }).catch(ignorarSemConta);
     await ref.update({ status: "active", suspensaEm: FieldValue.delete() });
+    await decidirRevisao(db, id, "aceita", motivo, adminUid, false);
+  } else if (acao === "manterSuspensao") {
+    if (snap.get("status") !== "suspended") throw new Recusa(409, "Esta conta não está suspensa.");
+    await decidirRevisao(db, id, "negada", motivo, adminUid, true);
   } else if (acao === "encerrarTurma") {
     await ref.update({
       status: "encerrada",

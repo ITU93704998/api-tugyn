@@ -33,6 +33,8 @@ const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
   { collection: "avaliacoes", field: "avaliadoId" }, // avaliações que ele recebeu (o resumo some junto com o perfil)
   { collection: "desafiosVagas", field: "uid" }, // vagas de desafio dele (api/desafios.ts)
   { collection: COLECAO_RESERVAS, field: "uid" }, // reservas de troca de imagem (as imagens somem na etapa "imagens")
+  { collection: "reportQuota", field: "uid" }, // hora da última denúncia dele (limite de 1 a cada 24 h)
+  { collection: "revisoes", field: "uid" }, // pedido de revisão da suspensão (api/_lib/revisao.ts)
 ];
 
 const jobRef = (db: Firestore, uid: string) => db.doc(`${COLECAO_EXCLUSOES}/${uid}`);
