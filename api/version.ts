@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleContacts } from "./_lib/contatos";
+import { handleModeracao } from "./_lib/moderacao";
 import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from "./_lib/version";
 
 /**
@@ -12,6 +13,8 @@ import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from ".
  */
 export default function handler(req: VercelRequest, res: VercelResponse) {
   if (req.query?.resource === "contatos") return handleContacts(req, res);
+  // Moderação do painel (Segurança › Denúncias): só administradores. Fica aqui para não criar outra função na Vercel.
+  if (req.query?.resource === "moderacao") return handleModeracao(req, res);
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
     return res.status(405).json({ error: "Método não permitido." });

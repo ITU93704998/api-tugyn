@@ -19,6 +19,7 @@ export const ACOES_DA_API = [
   "apagar-midia",
   "contratos-admin",
   "contatos-admin",
+  "moderacao",
   "excluir-conta",
 ] as const;
 export type AcaoDaApi = (typeof ACOES_DA_API)[number];

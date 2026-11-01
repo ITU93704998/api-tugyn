@@ -15,6 +15,8 @@
  *  4. apaga os tokens de notificação da conta.
  * reativar: reativa no Auth e volta `status` para "active". A pessoa entra de novo normalmente.
  *
+ * O painel (Segurança › Denúncias) faz o mesmo pela API: `api/_lib/moderacao.ts`. Mudou os passos aqui? Mude lá também.
+ *
  * Pedido de exclusão de conta suspensa (LGPD), recebido pelo suporte: reative, peça para a pessoa excluir pelo app
  * (Configurações > Excluir conta) ou siga o procedimento de exclusão pelo suporte.
  */

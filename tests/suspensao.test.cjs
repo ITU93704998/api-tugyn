@@ -26,7 +26,7 @@ test('conta ativa (ou sem perfil) faz todas as ações', () => {
 test('conta suspensa só exclui a conta e apaga as próprias imagens', () => {
   const liberadas = s.ACOES_DA_API.filter((acao) => s.acaoPermitida(SUSPENSA, acao));
   assert.deepEqual(liberadas.sort(), ['apagar-midia', 'excluir-conta']);
-  for (const acao of ['avaliar', 'desafiar', 'push', 'turma-gestao', 'upload', 'contratos-admin', 'contatos-admin']) {
+  for (const acao of ['avaliar', 'desafiar', 'push', 'turma-gestao', 'upload', 'contratos-admin', 'contatos-admin', 'moderacao']) {
     assert.equal(s.acaoPermitida(SUSPENSA, acao), false, acao);
   }
 });
