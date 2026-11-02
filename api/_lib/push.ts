@@ -13,6 +13,11 @@ export const EXPO_TIMEOUT_MS = 8000;
 export const MAX_TOKENS_PER_USER = 5;
 /** O mesmo aviso (mesmo evento, turma e pessoa) não se repete dentro deste tempo. */
 export const DEDUPE_MS = 10 * 60_000;
+/**
+ * Avisos de time: a chave inclui a ocorrência (data da convocação, do pedido ou da entrada), então a MESMA ocorrência nunca é avisada
+ * duas vezes nesta janela (o app reenvia o que ficou pendente por até 24 h), e uma ocorrência nova tem chave nova.
+ */
+export const DEDUPE_TIME_MS = 7 * 24 * 3600_000;
 /** Os registros de "já avisei" duram isto (dá para ligar a política de expiração do Firestore no campo `expiresAt`). */
 export const DEDUPE_TTL_MS = 30 * 24 * 3600_000;
 /** Canal do Android que o app cria (precisa ser o mesmo nome). */
@@ -56,7 +61,14 @@ export type PushRequest =
   | { action: "notificar"; evento: "pedido_entrada"; turmaId: string }
   | { action: "notificar"; evento: "pedido_aceito"; turmaId: string; userId: string }
   | { action: "notificar"; evento: "partida_aberta"; turmaId: string }
-  | { action: "notificar"; evento: "presenca_confirmada"; turmaId: string };
+  | { action: "notificar"; evento: "presenca_confirmada"; turmaId: string }
+  | { action: "notificar"; evento: "time_convocacao"; timeId: string; userId: string }
+  | { action: "notificar"; evento: "time_pedido"; timeId: string }
+  | { action: "notificar"; evento: "time_aprovado"; timeId: string; userId: string };
+
+/** Id de um time: `{uid do dono}_1` ou `_2`. */
+const TIME_ID = /^[A-Za-z0-9_-]{1,128}_[12]$/;
+export const isTimeId = (value: unknown): value is string => typeof value === "string" && TIME_ID.test(value);
 
 export type ParseResult = { ok: true; value: PushRequest } | { ok: false; error: string };
 
@@ -76,6 +88,15 @@ export const parsePushBody = (body: unknown): ParseResult => {
     if (!isValidPushToken(b.token)) return { ok: false, error: "Token inválido." };
     if (!isValidRevogacao(b.revogacao)) return { ok: false, error: "Chave inválida." };
     return { ok: true, value: { action: "revogar", token: b.token, revogacao: b.revogacao } };
+  }
+  if (b.action === "notificar" && typeof b.evento === "string" && b.evento.startsWith("time_")) {
+    if (!isTimeId(b.timeId)) return { ok: false, error: "Time inválido." };
+    if (b.evento === "time_pedido") return { ok: true, value: { action: "notificar", evento: "time_pedido", timeId: b.timeId } };
+    if (b.evento === "time_convocacao" || b.evento === "time_aprovado") {
+      if (!isSafeUid(b.userId)) return { ok: false, error: "Usuário inválido." };
+      return { ok: true, value: { action: "notificar", evento: b.evento, timeId: b.timeId, userId: b.userId } };
+    }
+    return { ok: false, error: "Evento inválido." };
   }
   if (b.action === "notificar") {
     if (!isSafeUid(b.turmaId)) return { ok: false, error: "Turma inválida." };
@@ -121,9 +142,20 @@ export interface PushDraft {
   title: string;
   body: string;
   data: {
-    tipo: "pedido_entrada" | "pedido_aceito" | "partida_aberta" | "presenca_confirmada" | "organizacao_transferida" | "desafio";
-    /** Vazio nos avisos de desafio (o toque abre a aba Desafios). */
+    tipo:
+      | "pedido_entrada"
+      | "pedido_aceito"
+      | "partida_aberta"
+      | "presenca_confirmada"
+      | "organizacao_transferida"
+      | "desafio"
+      | "time_convocacao"
+      | "time_pedido"
+      | "time_aprovado";
+    /** Vazio nos avisos de desafio e de time. */
     turmaId: string;
+    /** Só nos avisos de time: o toque abre o time (ou a convocação). */
+    timeId?: string;
     /** Só nos avisos de desafio: o toque abre a aba destacando este desafio. */
     desafioId?: string;
     /** Identificador da ocorrência na outbox (não é uma chave idempotente do Expo). */
@@ -250,6 +282,97 @@ export const authorizeAttendanceConfirmed = (callerUid: string, turmaId: string,
       title: "Presença confirmada",
       body: `${sanitizeText((presenca as { nome?: unknown }).nome, NAME_MAX, "Um jogador")} confirmou presença na partida de hoje da turma ${sanitizeText(turma.nome, NAME_MAX, "sua turma")}.`,
       data: { tipo: "presenca_confirmada", turmaId },
+    },
+  };
+};
+
+// ─── Times ────────────────────────────────────────────────────────────────────
+
+/** O que os avisos de time leem do documento `times/{id}` (sempre do Firestore, nunca do app). */
+export interface TimeForPush {
+  nome?: unknown;
+  donoId?: unknown;
+  membros?: unknown;
+  convidados?: unknown;
+  solicitantes?: unknown;
+  jogadores?: unknown;
+  pedidos?: unknown;
+  convites?: unknown;
+  /** Quem o dono aprovou por último pelo link (gravado junto com a aprovação; as regras só deixam o dono gravar). */
+  ultimoAprovado?: unknown;
+}
+
+const naLista = (lista: unknown, uid: string): boolean => Array.isArray(lista) && lista.includes(uid);
+const itemEm = (mapa: unknown, uid: string): Record<string, unknown> | null => {
+  const item = mapa && typeof mapa === "object" ? (mapa as Record<string, unknown>)[uid] : null;
+  return item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+};
+/** Data (ms) gravada na ocorrência (Timestamp do Firestore ou número); 0 se faltar. */
+const msEm = (mapa: unknown, uid: string, campo: string): number => {
+  const v = itemEm(mapa, uid)?.[campo] as { toMillis?: () => number } | number | undefined;
+  const ms = typeof v === "number" ? v : typeof v?.toMillis === "function" ? v.toMillis() : 0;
+  return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
+};
+const nomeEm = (mapa: unknown, uid: string, fallback: string): string => {
+  const item = mapa && typeof mapa === "object" ? (mapa as Record<string, unknown>)[uid] : null;
+  return sanitizeText(item && typeof item === "object" ? (item as { nome?: unknown }).nome : null, NAME_MAX, fallback);
+};
+
+/** O DONO convocou alguém: avisa o convocado. A convocação precisa estar no time (`convidados`). */
+export const authorizeTimeConvocacao = (callerUid: string, timeId: string, targetUid: string, time: TimeForPush | null): Authorization => {
+  if (!time) return fail(404, "Time não encontrado.");
+  if (time.donoId !== callerUid) return fail(403, "Só o dono do time pode fazer isso.");
+  if (targetUid === callerUid) return fail(400, "Destino inválido.");
+  if (!naLista(time.convidados, targetUid)) return fail(409, "Não há convocação para esta pessoa.");
+  const nomeTime = sanitizeText(time.nome, NAME_MAX, "um time");
+  return {
+    ok: true,
+    recipientUid: targetUid,
+    dedupeKey: `time_convocacao_${timeId}_${targetUid}_${msEm(time.convites, targetUid, "em")}`,
+    draft: {
+      title: `Convocação: ${nomeTime}`,
+      body: `${nomeEm(time.jogadores, callerUid, "O dono do time")} convocou você para o ${nomeTime}. Toque para responder.`,
+      data: { tipo: "time_convocacao", turmaId: "", timeId },
+    },
+  };
+};
+
+/** Quem pediu para entrar pelo link avisa o DONO. O pedido precisa estar no time (`solicitantes`). */
+export const authorizeTimePedido = (callerUid: string, timeId: string, time: TimeForPush | null): Authorization => {
+  if (!time) return fail(404, "Time não encontrado.");
+  if (!isSafeUid(time.donoId)) return fail(409, "Time sem dono.");
+  if (time.donoId === callerUid) return fail(400, "O dono não pede para entrar no próprio time.");
+  if (!naLista(time.solicitantes, callerUid)) return fail(409, "Não há pedido para entrar.");
+  return {
+    ok: true,
+    recipientUid: time.donoId,
+    dedupeKey: `time_pedido_${timeId}_${callerUid}_${msEm(time.pedidos, callerUid, "em")}`,
+    draft: {
+      title: "Pedido para entrar no time",
+      body: `${nomeEm(time.pedidos, callerUid, "Alguém")} quer entrar no ${sanitizeText(time.nome, NAME_MAX, "seu time")}. Toque para responder.`,
+      data: { tipo: "time_pedido", turmaId: "", timeId },
+    },
+  };
+};
+
+/**
+ * O DONO aprovou um pedido: avisa quem entrou. A pessoa precisa estar no elenco E ser a última aprovada pelo link: membro antigo
+ * (ou quem entrou aceitando convocação) não recebe "você entrou". A chave leva a data da entrada: a mesma aprovação avisa uma vez só.
+ */
+export const authorizeTimeAprovado = (callerUid: string, timeId: string, targetUid: string, time: TimeForPush | null): Authorization => {
+  if (!time) return fail(404, "Time não encontrado.");
+  if (time.donoId !== callerUid) return fail(403, "Só o dono do time pode fazer isso.");
+  if (targetUid === callerUid) return fail(400, "Destino inválido.");
+  if (!naLista(time.membros, targetUid)) return fail(409, "Esta pessoa não está no elenco.");
+  if (time.ultimoAprovado !== targetUid) return fail(409, "Não há aprovação recente para esta pessoa.");
+  return {
+    ok: true,
+    recipientUid: targetUid,
+    dedupeKey: `time_aprovado_${timeId}_${targetUid}_${msEm(time.jogadores, targetUid, "entrouEm")}`,
+    draft: {
+      title: `Você entrou no ${sanitizeText(time.nome, NAME_MAX, "time")}!`,
+      body: "O dono aceitou o seu pedido. Toque para ver o elenco.",
+      data: { tipo: "time_aprovado", turmaId: "", timeId },
     },
   };
 };

@@ -5,6 +5,7 @@ import { verificarAppCheck } from "./_lib/appCheck";
 import { getFirebaseApp, requireUser } from "./_lib/auth";
 import {
   DEDUPE_MS,
+  DEDUPE_TIME_MS,
   DEDUPE_PARTIDA_MS,
   MAX_TOKENS_PER_USER,
   type Authorization,
@@ -12,6 +13,9 @@ import {
   authorizeAttendanceConfirmed,
   authorizeJoinApproved,
   authorizeJoinRequest,
+  authorizeTimeAprovado,
+  authorizeTimeConvocacao,
+  authorizeTimePedido,
   TOKEN_TTL_MS,
   diaDeBrasilia,
   novaRevogacao,
@@ -31,6 +35,9 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  *  - notificar   { evento: "pedido_aceito", turmaId, userId }            o organizador avisa quem entrou
  *  - notificar   { evento: "partida_aberta", turmaId }                   o organizador abriu a partida de hoje: avisa os membros da turma
  *  - notificar   { evento: "presenca_confirmada", turmaId }             avisa o organizador apos confirmar presenca
+ *  - notificar   { evento: "time_convocacao", timeId, userId }          o dono do time avisa quem ele convocou
+ *  - notificar   { evento: "time_pedido", timeId }                       quem pediu para entrar pelo link avisa o dono
+ *  - notificar   { evento: "time_aprovado", timeId, userId }            o dono avisa quem ele aceitou no elenco
  * Uma rota só (o plano gratuito da Vercel limita o número de funções). O uid vem SEMPRE do login; o destinatário vem SEMPRE do Firestore.
  */
 const TOKENS = "pushTokens";
@@ -144,7 +151,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ ok: true });
     }
 
-    // notificar
+    // notificar — times: o documento do time decide se o aviso vale e para quem vai.
+    if (request.evento === "time_convocacao" || request.evento === "time_pedido" || request.evento === "time_aprovado") {
+      const timeSnap = await db.doc(`times/${request.timeId}`).get();
+      const time = timeSnap.exists ? (timeSnap.data() ?? null) : null;
+      const auth =
+        request.evento === "time_pedido"
+          ? authorizeTimePedido(user.uid, request.timeId, time)
+          : request.evento === "time_convocacao"
+            ? authorizeTimeConvocacao(user.uid, request.timeId, request.userId, time)
+            : authorizeTimeAprovado(user.uid, request.timeId, request.userId, time);
+      if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
+      const resultado = await enviarAviso(db, { evento: request.evento, turmaId: "", dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_TIME_MS, recipientUids: [auth.recipientUid], dedupeUid: auth.recipientUid, draft: auth.draft });
+      return res.status(200).json(resultado);
+    }
+
     const turmaSnap = await db.doc(`turmas/${request.turmaId}`).get();
     const turma = turmaSnap.exists ? (turmaSnap.data() ?? null) : null;
 
