@@ -9,7 +9,7 @@ require.extensions['.ts'] = (module, filename) => {
   const source = fs.readFileSync(filename, 'utf8');
   module._compile(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, filename);
 };
-const { isValidLinkId, timeDoDocumento, renderizarPaginaTime, fotoPequena } = require(path.join(root, 'api/_lib/timeLink.ts'));
+const { isValidLinkId, timeDoDocumento, renderizarPaginaTime, fotoPequena, conviteDoDocumento, renderizarPaginaConvite } = require(path.join(root, 'api/_lib/timeLink.ts'));
 if (previousLoader) require.extensions['.ts'] = previousLoader;
 else delete require.extensions['.ts'];
 
@@ -68,7 +68,7 @@ test('mostra escudo, sigla, modalidade, categoria, cidade, número e posição',
   const time = timeDoDocumento({
     ...documento(),
     sigla: 'BRA', modalidade: 'futsal', genero: 'misto', faixaEtaria: 'veterano', cidade: { city: 'Recife', state: 'PE', cityId: '1' },
-    escudoUrl: 'https://res.cloudinary.com/demo/image/upload/v9/times/uid-dono/escudo/esc_1.png',
+    escudoUrl: 'https://res.cloudinary.com/demo/image/upload/v9/turmas/uid-dono/escudo/esc_1.png',
     camisas: { 'uid-ana': { numero: 10, posicao: 'pivo' }, 'uid-dono': { numero: 'x', posicao: '<b>' } },
   });
   assert.equal(time.detalhes, 'Futsal · Misto Veterano · Recife, PE');
@@ -81,4 +81,32 @@ test('mostra escudo, sigla, modalidade, categoria, cidade, número e posição',
   assert.match(html, /\(BRA\)/);
   assert.equal(html.includes('cityId'), false);
   assert.equal(timeDoDocumento({ ...documento(), sigla: 'x<y' }).sigla, '');
+});
+
+test("prévia do WhatsApp usa o escudo (JPG 600x600 com fundo branco); sem escudo, o ícone", () => {
+  const comEscudo = timeDoDocumento({ ...documento(), escudoUrl: "https://res.cloudinary.com/demo/image/upload/v9/turmas/uid-dono/escudo/esc_1.png" });
+  const html = renderizarPaginaTime({ time: comEscudo, lojaIos: null, lojaAndroid: null, plataforma: "outra", iconUrl: "https://api/x.png" });
+  assert.ok(html.includes('og:image" content="https://res.cloudinary.com/demo/image/upload/c_pad,b_white,w_600,h_600,q_auto,f_jpg/v9/'));
+  assert.match(html, /og:image:width" content="600"/);
+  const semEscudo = renderizarPaginaTime({ time: timeDoDocumento(documento()), lojaIos: null, lojaAndroid: null, plataforma: "outra", iconUrl: "https://api/x.png" });
+  assert.ok(semEscudo.includes('og:image" content="https://api/x.png"'));
+});
+
+test("link de convocação: vale 1 hora, abre o app com o código e mostra o escudo", () => {
+  const criadoEm = { toMillis: () => 1_000_000 };
+  const convite = conviteDoDocumento({ nome: "Os Brabos", cor: "#17212F", sigla: "BRA", detalhes: "Futsal · Misto", criadoEm, timeId: "uid-dono_1", donoId: "uid-dono",
+    escudoUrl: "https://res.cloudinary.com/demo/image/upload/v9/turmas/uid-dono/escudo/esc_1.png" });
+  assert.equal(convite.expiraEmMs, 1_000_000 + 3_600_000);
+  const base = { convite, codigo: "Cod1234567890abc", lojaIos: null, lojaAndroid: null, plataforma: "outra" };
+  const valido = renderizarPaginaConvite({ ...base, agoraMs: 1_000_000 + 60_000 });
+  assert.ok(valido.includes("tugyn://time-convite/Cod1234567890abc"));
+  assert.match(valido, /og:image" content="[^"]*f_jpg/);
+  assert.ok(valido.includes("Convocação: Os Brabos (BRA)"));
+  for (const segredo of ["uid-dono_1", "timeId", "donoId"])assert.equal(valido.includes(segredo), false, segredo);
+  const vencido = renderizarPaginaConvite({ ...base, agoraMs: 1_000_000 + 3_600_001 });
+  assert.equal(vencido.includes("time-convite"), false);
+  assert.match(vencido, /expirou/);
+  assert.match(renderizarPaginaConvite({ ...base, convite: null, agoraMs: 0 }), /Link não encontrado/);
+  assert.equal(conviteDoDocumento({ nome: "<b>x</b>", criadoEm }).nome, "<b>x</b>");
+  assert.equal(renderizarPaginaConvite({ ...base, convite: conviteDoDocumento({ nome: "<b>x</b>", criadoEm }), agoraMs: 0 }).includes("<b>x"), false);
 });

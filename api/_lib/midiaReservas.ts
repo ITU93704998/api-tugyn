@@ -83,8 +83,8 @@ export const anteriorParaApagar = (r: Reserva): { bucket: string; publicId: stri
   if (!anterior) return null;
   if (r.tipo === "escudoTime") {
     const id = publicIdDaUrl(anterior.url);
-    const pasta = `times/${r.uid}/escudo/`;
-    return id && id.startsWith(pasta) && id !== r.publicId && /^[A-Za-z0-9_\-./]+$/.test(id) ? { bucket: "times", publicId: id } : null;
+    const pasta = `turmas/${r.uid}/escudo/`;
+    return id && id.startsWith(pasta) && id !== r.publicId && /^[A-Za-z0-9_\-./]+$/.test(id) ? { bucket: "turmas", publicId: id } : null;
   }
   if (r.tipo === "bannerTurma") {
     const banner = typeof anterior.url === "string" ? bannerParaApagar(anterior.url) : null;

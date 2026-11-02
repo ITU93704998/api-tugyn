@@ -9,7 +9,15 @@ import {
   renderizarPagina,
   type PreviaTurma,
 } from "../_lib/turmaLink";
-import { isValidLinkId, renderizarPaginaTime, timeDoDocumento, type TimePublico } from "../_lib/timeLink";
+import {
+  conviteDoDocumento,
+  isValidLinkId,
+  renderizarPaginaConvite,
+  renderizarPaginaTime,
+  timeDoDocumento,
+  type ConvitePublico,
+  type TimePublico,
+} from "../_lib/timeLink";
 
 /**
  * GET /api/turma/<id>  (link de convite compartilhado)
@@ -19,6 +27,7 @@ import { isValidLinkId, renderizarPaginaTime, timeDoDocumento, type TimePublico 
  * se demorar ou falhar, a página sai genérica em vez de travar.
  *
  * GET /api/time/<linkId>  (vercel.json reescreve para cá com ?tipo=time: a página pública de um time, sem função nova)
+ * GET /api/time/c/<codigo>  (?tipo=convite: o link de convocação de 1 hora; lê convitesTime/<codigo>)
  * Os links das lojas vêm das MESMAS variáveis do /api/version (APP_STORE_URL[_IOS|_ANDROID]), já validadas.
  */
 const PREVIA_TIMEOUT_MS = 2500;
@@ -62,6 +71,24 @@ const lerTime = async (linkId: string): Promise<TimePublico | null> => {
   }
 };
 
+/** Prévia do link de convocação (1 leitura). null se não existir, demorar ou falhar. */
+const lerConvite = async (codigo: string): Promise<ConvitePublico | null> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const leitura = getFirestore(getFirebaseApp()).collection("convitesTime").doc(codigo).get();
+    const limite = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
+    });
+    const snap = await Promise.race([leitura, limite]);
+    return snap && snap.exists ? conviteDoDocumento(snap.data()) : null;
+  } catch (error) {
+    console.warn("[time-convite] convite indisponível:", error instanceof Error ? error.message : error);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
@@ -79,7 +106,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const query = req.query ?? {};
   const bruto = Array.isArray(query.id) ? query.id[0] : query.id;
-  const ehTime = (Array.isArray(query.tipo) ? query.tipo[0] : query.tipo) === "time";
+  const tipo = Array.isArray(query.tipo) ? query.tipo[0] : query.tipo;
+  const ehTime = tipo === "time" || tipo === "convite";
   if (ehTime ? !isValidLinkId(bruto) : !isValidTurmaId(bruto)) {
     // Nunca devolve o que foi digitado.
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -96,8 +124,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       : null;
   const iconUrl = origin ? new URL("/tugyn-icon.png", origin).toString() : null;
   const paginaUrl = origin
-    ? new URL(`/api/${ehTime ? "time" : "turma"}/${encodeURIComponent(bruto)}`, origin).toString()
+    ? new URL(`/api/${tipo === "convite" ? "time/c" : ehTime ? "time" : "turma"}/${encodeURIComponent(bruto)}`, origin).toString()
     : null;
+  // Escudos vêm do Cloudinary (a página da turma não mostra imagens de fora).
+  const cspComCloudinary =
+    "default-src 'none'; img-src 'self' https://res.cloudinary.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+  if (tipo === "convite") {
+    const convite = await lerConvite(bruto);
+    res.setHeader("Content-Security-Policy", cspComCloudinary);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Vary", "User-Agent");
+    // Pouco tempo na CDN: o link vence em 1 hora (o app confere o prazo de novo ao pedir).
+    res.setHeader("Cache-Control", "public, s-maxage=60");
+    return res
+      .status(convite ? 200 : 404)
+      .send(renderizarPaginaConvite({ convite, codigo: bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
+  }
 
   if (ehTime) {
     const time = await lerTime(bruto);

@@ -5,6 +5,10 @@
  * O link usa o `linkId` do time (16 letras/números aleatórios, gerado pelo app e imutável nas regras), nunca o id do
  * documento (que leva o uid do dono). Mostra só o nome e a cor do time e o nome e a foto de quem ACEITOU a convocação:
  * nada de @usuário, uid, convocações pendentes ou recusas.
+ *
+ * Link de convocação: https://<servidor>/api/time/c/<codigo>  (reescrito para /api/turma/<codigo>?tipo=convite). Lê a
+ * prévia `convitesTime/<codigo>` (nome, cor, sigla, escudo e detalhes) e mostra até que horas o link vale (1 hora). O
+ * botão abre o app em `tugyn://time-convite/<codigo>`, onde a pessoa pede para entrar (o dono aprova).
  */
 import { esc, limpar, type Plataforma } from "./turmaLink";
 
@@ -28,8 +32,14 @@ export interface TimePublico {
   detalhes: string;
   /** Escudo do Cloudinary em 256 px, ou "". */
   escudo: string;
+  /** Escudo em 600x600 JPG com fundo branco: a imagem da prévia do link (WhatsApp), ou "". */
+  imagem: string;
   jogadores: JogadorPublico[];
 }
+
+export const CORTE_ESCUDO = "c_pad,w_256,h_256,q_auto,f_png";
+/** WhatsApp e afins: JPG (sem transparência, que vira fundo preto em alguns apps), quadrado e com mais de 300 px. */
+export const CORTE_PREVIA_LINK = "c_pad,b_white,w_600,h_600,q_auto,f_jpg";
 
 const MODALIDADES: Record<string, string> = { campo: "Futebol de campo", society: "Society", futsal: "Futsal" };
 const GENEROS: Record<string, string> = { masculino: "Masculino", feminino: "Feminino", misto: "Misto" };
@@ -80,8 +90,47 @@ export const timeDoDocumento = (dados: unknown): TimePublico | null => {
       return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId, numero, posicao }] : [];
     })
     .sort((a, b) => Number(b.dono) - Number(a.dono) || (a.numero ?? 100) - (b.numero ?? 100) || a.nome.localeCompare(b.nome, "pt-BR"));
-  return { nome, cor, sigla, detalhes, escudo: fotoPequena(d.escudoUrl, "c_pad,w_256,h_256,q_auto,f_png"), jogadores };
+  return { nome, cor, sigla, detalhes, escudo: fotoPequena(d.escudoUrl, CORTE_ESCUDO), imagem: fotoPequena(d.escudoUrl, CORTE_PREVIA_LINK), jogadores };
 };
+
+export const VALIDADE_CONVITE_MS = 60 * 60 * 1000;
+
+export interface ConvitePublico {
+  nome: string;
+  cor: string;
+  sigla: string;
+  detalhes: string;
+  escudo: string;
+  imagem: string;
+  /** Até quando o link vale (ms); 0 se o documento não diz. */
+  expiraEmMs: number;
+}
+
+const ms = (v: unknown): number => {
+  if (v && typeof v === "object" && typeof (v as { toMillis?: unknown }).toMillis === "function") return (v as { toMillis: () => number }).toMillis();
+  return v instanceof Date ? v.getTime() : 0;
+};
+
+/** Documento `convitesTime/<codigo>` → o que a página do convite mostra; null se não servir. */
+export const conviteDoDocumento = (dados: unknown): ConvitePublico | null => {
+  if (!dados || typeof dados !== "object") return null;
+  const d = dados as Record<string, unknown>;
+  const nome = limpar(d.nome, 40);
+  if (!nome) return null;
+  const criadoEm = ms(d.criadoEm);
+  return {
+    nome,
+    cor: typeof d.cor === "string" && /^#[0-9A-Fa-f]{6}$/.test(d.cor) ? d.cor : "#FE7552",
+    sigla: typeof d.sigla === "string" && /^[A-Z0-9]{3}$/.test(d.sigla) ? d.sigla : "",
+    detalhes: limpar(d.detalhes, 200),
+    escudo: fotoPequena(d.escudoUrl, CORTE_ESCUDO),
+    imagem: fotoPequena(d.escudoUrl, CORTE_PREVIA_LINK),
+    expiraEmMs: criadoEm ? criadoEm + VALIDADE_CONVITE_MS : 0,
+  };
+};
+
+const horaDeBrasilia = (msHora: number): string =>
+  new Date(msHora).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" });
 
 /** "Ana, Bruno, Carla e mais 4" (para a descrição da prévia do link). */
 const resumoDoElenco = (jogadores: JogadorPublico[]): string => {
@@ -99,6 +148,79 @@ interface PaginaTimeParams {
   paginaUrl?: string | null;
 }
 
+/** Bloco "Ainda não tem o app?" com as lojas do aparelho. */
+const blocoDasLojas = (lojaIos: string | null, lojaAndroid: string | null, plataforma: Plataforma): string => {
+  const lojas: { rotulo: string; url: string }[] = [];
+  if (plataforma !== "android" && lojaIos) lojas.push({ rotulo: "Baixar na App Store", url: lojaIos });
+  if (plataforma !== "ios" && lojaAndroid) lojas.push({ rotulo: "Baixar no Google Play", url: lojaAndroid });
+  return lojas.length
+    ? `<p class="hint">Ainda não tem o app?</p>
+       <div class="store-links">${lojas.map((l) => `<a class="link" href="${esc(l.url)}">${esc(l.rotulo)} <span class="link-arrow">›</span></a>`).join("")}</div>`
+    : `<p class="hint">Ainda não tem o app? Procure por <strong>Tugyn</strong> na App Store ou no Google Play.</p>`;
+};
+
+/** Imagem da prévia do link: o escudo (600x600) quando existe; senão, o ícone do app. */
+const metaDaImagem = (imagem: string, iconUrl: string | null | undefined): string =>
+  imagem
+    ? `<meta property="og:image" content="${esc(imagem)}">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="600">
+<meta property="og:image:height" content="600">`
+    : iconUrl
+      ? `<meta property="og:image" content="${esc(iconUrl)}">
+<meta property="og:image:width" content="512">
+<meta property="og:image:height" content="512">`
+      : "";
+
+const escudoHtml = (t: { escudo: string; cor: string; nome: string; sigla: string }): string =>
+  t.escudo
+    ? `<div class="escudo escudo-img" style="border-color:${esc(t.cor)}"><img src="${esc(t.escudo)}" alt="Escudo do ${esc(t.nome)}" width="72" height="72"></div>`
+    : `<div class="escudo" style="background:${esc(t.cor)}">${esc(t.sigla) || esc((Array.from(t.nome)[0] ?? "?").toUpperCase())}</div>`;
+
+interface PaginaConviteParams {
+  convite: ConvitePublico | null;
+  codigo: string;
+  agoraMs: number;
+  lojaIos: string | null;
+  lojaAndroid: string | null;
+  plataforma: Plataforma;
+  iconUrl?: string | null;
+  paginaUrl?: string | null;
+}
+
+/** Página do link de convocação (vale 1 hora): o time e o botão que abre o app para pedir para entrar. */
+export const renderizarPaginaConvite = ({ convite, codigo, agoraMs, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaConviteParams): string => {
+  const valido = Boolean(convite && convite.expiraEmMs > agoraMs);
+  const titulo = convite ? `Convocação: ${convite.nome}${convite.sigla ? ` (${convite.sigla})` : ""}` : "Convocação para um time no Tugyn";
+  const descricao = convite && valido
+    ? `${convite.detalhes ? `${convite.detalhes}. ` : ""}Toque para pedir para entrar no time pelo app Tugyn. O link vale até ${horaDeBrasilia(convite.expiraEmMs)}.`
+    : "Este link de convocação expirou. Peça um novo ao dono do time.";
+  const corpo = convite
+    ? `${escudoHtml(convite)}
+  <p class="eyebrow">Convocação para o time</p>
+  <h1>${esc(convite.nome)}</h1>
+  ${convite.detalhes ? `<p class="det">${esc(convite.detalhes)}</p>` : ""}
+  ${valido
+    ? `<p class="sub">Peça para entrar pelo app. O dono do time confirma a sua entrada.<br>Link válido até ${esc(horaDeBrasilia(convite.expiraEmMs))}.</p>
+  <a class="btn" href="tugyn://time-convite/${esc(encodeURIComponent(codigo))}">Pedir para entrar no time</a>`
+    : `<p class="sub">Este link expirou (vale 1 hora). Peça um novo ao dono do time.</p>
+  <a class="btn" href="tugyn://">Abrir no Tugyn</a>`}`
+    : `<div class="escudo" style="background:#FE7552">?</div>
+  <h1>Link não encontrado</h1>
+  <p>O link pode ter expirado ou sido trocado pelo dono do time.</p>
+  <a class="btn" href="tugyn://">Abrir no Tugyn</a>`;
+  return documentoHtml({
+    titulo,
+    descricao,
+    imagemMeta: metaDaImagem(convite?.imagem ?? "", iconUrl),
+    iconUrl,
+    paginaUrl,
+    conteudo: `${corpo}
+  ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}
+  <p class="footer">Compartilhado pelo app Tugyn</p>`,
+  });
+};
+
 export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaTimeParams): string => {
   const total = time?.jogadores.length ?? 0;
   const titulo = time ? `${time.nome}${time.sigla ? ` (${time.sigla})` : ""} · Tugyn` : "Time no Tugyn";
@@ -106,13 +228,7 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
     ? `${time.detalhes ? `${time.detalhes}. ` : ""}${total} ${total === 1 ? "jogador" : "jogadores"}${total ? `: ${resumoDoElenco(time.jogadores)}` : ""}. Monte o seu time no app Tugyn.`
     : "Monte o seu time no app Tugyn.";
 
-  const lojas: { rotulo: string; url: string }[] = [];
-  if (plataforma !== "android" && lojaIos) lojas.push({ rotulo: "Baixar na App Store", url: lojaIos });
-  if (plataforma !== "ios" && lojaAndroid) lojas.push({ rotulo: "Baixar no Google Play", url: lojaAndroid });
-  const download = lojas.length
-    ? `<p class="hint">Ainda não tem o app?</p>
-       <div class="store-links">${lojas.map((l) => `<a class="link" href="${esc(l.url)}">${esc(l.rotulo)} <span class="link-arrow">›</span></a>`).join("")}</div>`
-    : `<p class="hint">Ainda não tem o app? Procure por <strong>Tugyn</strong> na App Store ou no Google Play.</p>`;
+  const download = blocoDasLojas(lojaIos, lojaAndroid, plataforma);
 
   const inicial = (nome: string) => esc((Array.from(nome)[0] ?? "?").toUpperCase());
   const elenco = time && total
@@ -128,9 +244,7 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
     : `<p>Este time ainda não tem jogadores.</p>`;
 
   const corpo = time
-    ? `${time.escudo
-        ? `<div class="escudo escudo-img" style="border-color:${esc(time.cor)}"><img src="${esc(time.escudo)}" alt="Escudo do ${esc(time.nome)}" width="72" height="72"></div>`
-        : `<div class="escudo" style="background:${esc(time.cor)}">${esc(time.sigla) || inicial(time.nome)}</div>`}
+    ? `${escudoHtml(time)}
   <p class="eyebrow">Time no Tugyn${time.sigla ? ` · ${esc(time.sigla)}` : ""}</p>
   <h1>${esc(time.nome)}</h1>
   ${time.detalhes ? `<p class="det">${esc(time.detalhes)}</p>` : ""}
@@ -140,6 +254,29 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
   <h1>Time não encontrado</h1>
   <p>O link pode ter mudado ou o time foi apagado.</p>`;
 
+  return documentoHtml({
+    titulo,
+    descricao,
+    imagemMeta: metaDaImagem(time?.imagem ?? "", iconUrl),
+    iconUrl,
+    paginaUrl,
+    conteudo: `${corpo}
+  <a class="btn" href="tugyn://">Abrir no Tugyn</a>
+  ${download}
+  <p class="footer">Compartilhado pelo app Tugyn</p>`,
+  });
+};
+
+/** Molde comum das páginas de time (HTML e CSS, sem scripts). */
+const documentoHtml = (p: {
+  titulo: string;
+  descricao: string;
+  imagemMeta: string;
+  iconUrl?: string | null;
+  paginaUrl?: string | null;
+  conteudo: string;
+}): string => {
+  const { titulo, descricao, imagemMeta, iconUrl, paginaUrl, conteudo } = p;
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -154,10 +291,8 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
 <meta property="og:site_name" content="Tugyn">
 <meta property="og:locale" content="pt_BR">
 ${paginaUrl ? `<meta property="og:url" content="${esc(paginaUrl)}">` : ""}
-${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
-<meta property="og:image:width" content="512">
-<meta property="og:image:height" content="512">
-<link rel="icon" type="image/png" href="${esc(iconUrl)}">` : ""}
+${imagemMeta}
+${iconUrl ? `<link rel="icon" type="image/png" href="${esc(iconUrl)}">` : ""}
 <style>
   :root { --bg:#F2F2F7; --surface:#FFFFFF; --label:#1C1C1E; --secondary:#6E6E73; --tertiary:#A1A1A6;
     --separator:rgba(60,60,67,0.12); --accent:#FE7552; --shadow:0 1px 2px rgba(0,0,0,0.04),0 8px 24px rgba(0,0,0,0.06); }
@@ -187,6 +322,7 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
   .tag { flex:none; font-size:11px; font-weight:700; color:var(--accent); background:rgba(254,117,82,0.12); padding:3px 8px; border-radius:8px; }
   .btn { display:flex; align-items:center; justify-content:center; min-height:50px; border-radius:14px; background:var(--accent);
     color:#fff; text-decoration:none; font-size:17px; font-weight:600; }
+  .sub + .btn { margin-top:4px; }
   .hint { font-size:13px; color:var(--tertiary); margin:18px 0 8px; }
   .store-links { display:flex; flex-direction:column; gap:4px; }
   .link { padding:10px 8px; color:var(--accent); text-decoration:none; font-size:15px; font-weight:500; }
@@ -196,10 +332,7 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
 </head>
 <body>
 <main>
-  ${corpo}
-  <a class="btn" href="tugyn://">Abrir no Tugyn</a>
-  ${download}
-  <p class="footer">Compartilhado pelo app Tugyn</p>
+  ${conteudo}
 </main>
 </body>
 </html>`;

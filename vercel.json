@@ -7,6 +7,10 @@
   ],
   "rewrites": [
     {
+      "source": "/api/time/c/:codigo",
+      "destination": "/api/turma/:codigo?tipo=convite"
+    },
+    {
       "source": "/api/time/:linkId",
       "destination": "/api/turma/:linkId?tipo=time"
     }

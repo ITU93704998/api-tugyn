@@ -81,17 +81,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const folder = parseFolderName(body.folderName);
   if (!folder) return res.status(400).json({ error: "Nome de pasta inválido." });
 
-  // A conta de turmas é exclusiva para banners associados a uma turma existente.
-  // Não aceitar upload sem turmaId evita uploads órfãos antes da criação da turma.
-  if (bucket === "turmas" && folder !== "banner") {
-    return res.status(400).json({ error: "Este bucket aceita somente banners de turma." });
+  // A conta de turmas guarda só banners de turma e escudos de time, sempre de um alvo que já existe
+  // (turmaId / timeId obrigatórios): evita uploads órfãos antes de a turma ou o time existir.
+  if (bucket === "turmas" && folder !== "banner" && folder !== "escudo") {
+    return res.status(400).json({ error: "Este bucket aceita somente banners de turma e escudos de time." });
   }
-  if (bucket === "turmas" || (bucket === "times" && folder === "banner")) {
+  if ((bucket === "turmas" && folder === "banner") || (bucket === "times" && folder === "banner")) {
     if (typeof body.turmaId !== "string" || body.turmaId.length === 0) {
       return res.status(400).json({ error: "Informe a turma para enviar o banner." });
     }
   }
-  const ehEscudo = bucket === "times" && folder === "escudo";
+  const ehEscudo = bucket === "turmas" && folder === "escudo";
   if (ehEscudo && (typeof body.timeId !== "string" || body.timeId.length === 0)) {
     return res.status(400).json({ error: "Informe o time para enviar o escudo." });
   }

@@ -170,8 +170,8 @@ test('escudo do time: chave, nome, prazo, dono e só apaga o escudo antigo da pa
   assert.equal(cool.checarIntervalo('u1', 'escudoTime', { donoId: 'u1' }).allowed, true);
   const agora = Date.now();
   assert.equal(cool.checarIntervalo('u1', 'escudoTime', { donoId: 'u1', escudoTrocadoEm: new Date(agora - 86_400_000) }, agora).status, 429);
-  const antigo = 'https://res.cloudinary.com/c/image/upload/v1/times/u1/escudo/esc_old.png';
-  assert.deepEqual(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'times/u1/escudo/esc_new', anterior: { url: antigo } }), { bucket: 'times', publicId: 'times/u1/escudo/esc_old' });
+  const antigo = 'https://res.cloudinary.com/c/image/upload/v1/turmas/u1/escudo/esc_old.png';
+  assert.deepEqual(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'turmas/u1/escudo/esc_new', anterior: { url: antigo } }), { bucket: 'turmas', publicId: 'turmas/u1/escudo/esc_old' });
   assert.equal(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'x', anterior: { url: antigo.replace('/u1/', '/u2/') } }), null);
-  assert.equal(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'x', anterior: { url: 'https://res.cloudinary.com/c/image/upload/v1/times/u1/banner/b_1.jpg' } }), null);
+  assert.equal(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'x', anterior: { url: 'https://res.cloudinary.com/c/image/upload/v1/turmas/u1/banner/b_1.jpg' } }), null);
 });
