@@ -160,3 +160,18 @@ test('avaliarRestos: limpo conclui; resto principal refaz o fluxo; resto de etap
   assert.equal(principal.refazerExclusao, true);
   assert.deepEqual(principal.pendencias, ['conta_auth', 'desafios']);
 });
+
+test('escudo do time: chave, nome, prazo, dono e só apaga o escudo antigo da pasta do dono', () => {
+  assert.equal(res.chaveDaReserva('u1', 'escudoTime', 'u1_1'), 'escudo_u1_1');
+  assert.match(res.nomeDoEnvio('escudoTime', 'abc', 1000), /^esc_/);
+  assert.equal(res.proximoPasso({ tipo: 'escudoTime' }, true), 'concluir');
+  assert.equal(cool.checarIntervalo('u1', 'escudoTime', null).status, 404);
+  assert.equal(cool.checarIntervalo('u1', 'escudoTime', { donoId: 'outro' }).status, 403);
+  assert.equal(cool.checarIntervalo('u1', 'escudoTime', { donoId: 'u1' }).allowed, true);
+  const agora = Date.now();
+  assert.equal(cool.checarIntervalo('u1', 'escudoTime', { donoId: 'u1', escudoTrocadoEm: new Date(agora - 86_400_000) }, agora).status, 429);
+  const antigo = 'https://res.cloudinary.com/c/image/upload/v1/times/u1/escudo/esc_old.png';
+  assert.deepEqual(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'times/u1/escudo/esc_new', anterior: { url: antigo } }), { bucket: 'times', publicId: 'times/u1/escudo/esc_old' });
+  assert.equal(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'x', anterior: { url: antigo.replace('/u1/', '/u2/') } }), null);
+  assert.equal(res.anteriorParaApagar({ tipo: 'escudoTime', uid: 'u1', publicId: 'x', anterior: { url: 'https://res.cloudinary.com/c/image/upload/v1/times/u1/banner/b_1.jpg' } }), null);
+});

@@ -1,6 +1,6 @@
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-export type TipoDeImagem = "fotoPerfil" | "bannerTurma";
+export type TipoDeImagem = "fotoPerfil" | "bannerTurma" | "escudoTime";
 
 export type CheckResult =
   | { allowed: true }
@@ -44,6 +44,11 @@ export const checarIntervalo = (
   now = Date.now(),
 ): CheckResult => {
   if (tipo === "fotoPerfil") return cooldownResult(alvo?.profileImageChangedAt, "A foto de perfil", now);
+  if (tipo === "escudoTime") {
+    if (!alvo) return { allowed: false, status: 404, error: "Time não encontrado." };
+    if (alvo.donoId !== uid) return { allowed: false, status: 403, error: "Somente o dono pode trocar o escudo." };
+    return cooldownResult(alvo.escudoTrocadoEm, "O escudo deste time", now);
+  }
   if (!alvo) return { allowed: false, status: 404, error: "Turma não encontrada." };
   if (alvo.creatorId !== uid) {
     return { allowed: false, status: 403, error: "Somente o organizador pode trocar o banner." };

@@ -30,17 +30,19 @@ export interface Reserva {
   publicId: string;
   bucket: string;
   turmaId?: string | null;
+  /** Escudo: o time (`times/{timeId}`). */
+  timeId?: string | null;
   url?: string | null;
   anterior?: { url?: string | null; publicId?: string | null } | null;
 }
 
 /** Um alvo por chave: a foto de cada pessoa e o banner de cada turma. */
-export const chaveDaReserva = (uid: string, tipo: TipoDeImagem, turmaId?: string): string =>
-  tipo === "fotoPerfil" ? `foto_${uid}` : `banner_${turmaId}`;
+export const chaveDaReserva = (uid: string, tipo: TipoDeImagem, alvoId?: string): string =>
+  tipo === "fotoPerfil" ? `foto_${uid}` : tipo === "escudoTime" ? `escudo_${alvoId}` : `banner_${alvoId}`;
 
-/** Nome do arquivo no Cloudinary: foto → temporário (`tmp_`), promovido depois; banner → definitivo. */
+/** Nome do arquivo no Cloudinary: foto → temporário (`tmp_`), promovido depois; banner e escudo → definitivo. */
 export const nomeDoEnvio = (tipo: TipoDeImagem, aleatorio: string, agoraMs: number): string =>
-  `${tipo === "fotoPerfil" ? "tmp" : "b"}_${agoraMs.toString(36)}_${aleatorio}`;
+  `${tipo === "fotoPerfil" ? "tmp" : tipo === "escudoTime" ? "esc" : "b"}_${agoraMs.toString(36)}_${aleatorio}`;
 
 /** Segura o alvo: ainda dentro do prazo e sem desfecho. */
 export const reservaAtiva = (r: { estado?: unknown; expiraEmMs?: number | null }, agoraMs: number): boolean =>
@@ -79,6 +81,11 @@ export const proximoPasso = (r: Pick<Reserva, "tipo">, referenciada: boolean): P
 export const anteriorParaApagar = (r: Reserva): { bucket: string; publicId: string } | null => {
   const anterior = r.anterior ?? null;
   if (!anterior) return null;
+  if (r.tipo === "escudoTime") {
+    const id = publicIdDaUrl(anterior.url);
+    const pasta = `times/${r.uid}/escudo/`;
+    return id && id.startsWith(pasta) && id !== r.publicId && /^[A-Za-z0-9_\-./]+$/.test(id) ? { bucket: "times", publicId: id } : null;
+  }
   if (r.tipo === "bannerTurma") {
     const banner = typeof anterior.url === "string" ? bannerParaApagar(anterior.url) : null;
     return banner && banner.publicId !== r.publicId ? banner : null;

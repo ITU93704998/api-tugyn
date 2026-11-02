@@ -15,23 +15,37 @@ export interface JogadorPublico {
   /** Foto pequena do Cloudinary, ou "" (a página mostra a inicial). */
   foto: string;
   dono: boolean;
+  /** Número da camisa (null sem número) e posição já por extenso ("" sem posição). */
+  numero: number | null;
+  posicao: string;
 }
 
 export interface TimePublico {
   nome: string;
   cor: string;
+  sigla: string;
+  /** "Society · Masculino · Recife, PE" (só o que existir). */
+  detalhes: string;
+  /** Escudo do Cloudinary em 256 px, ou "". */
+  escudo: string;
   jogadores: JogadorPublico[];
 }
+
+const MODALIDADES: Record<string, string> = { campo: "Futebol de campo", society: "Society", futsal: "Futsal" };
+const GENEROS: Record<string, string> = { masculino: "Masculino", feminino: "Feminino", misto: "Misto" };
+const POSICOES: Record<string, string> = {
+  goleiro: "Goleiro", fixo: "Fixo", ala: "Ala", pivo: "Pivô", zagueiro: "Zagueiro",
+  lateral: "Lateral", volante: "Volante", meia: "Meia", atacante: "Atacante",
+};
 
 const MAX_JOGADORES = 30;
 
 /** Só fotos do próprio Cloudinary, recortadas em 96x96; qualquer outra coisa vira "". */
-export const fotoPequena = (url: unknown): string => {
+export const fotoPequena = (url: unknown, corte = "c_fill,g_face,w_96,h_96,q_auto,f_jpg"): string => {
   const bruto = limpar(url, 500);
   const m = /^https:\/\/res\.cloudinary\.com\/([a-z0-9_-]+)\/image\/upload\/([A-Za-z0-9_\-./,]+)$/i.exec(bruto);
   if (!m) return "";
   const partes = m[2].split("/");
-  const corte = "c_fill,g_face,w_96,h_96,q_auto,f_jpg";
   const versao = partes.findIndex((p) => /^v\d+$/.test(p));
   if (versao >= 0) partes.splice(versao, 0, corte);
   else if (/^[a-z]{1,3}_/.test(partes[0])) return "";
@@ -48,16 +62,25 @@ export const timeDoDocumento = (dados: unknown): TimePublico | null => {
   const cor = typeof d.cor === "string" && /^#[0-9A-Fa-f]{6}$/.test(d.cor) ? d.cor : "#FE7552";
   const donoId = typeof d.donoId === "string" ? d.donoId : "";
   const mapa = d.jogadores && typeof d.jogadores === "object" ? (d.jogadores as Record<string, unknown>) : {};
+  const camisas = d.camisas && typeof d.camisas === "object" ? (d.camisas as Record<string, Record<string, unknown> | null>) : {};
+  const cidade = d.cidade && typeof d.cidade === "object" ? (d.cidade as Record<string, unknown>) : {};
+  const lugar = [limpar(cidade.city, 60), limpar(cidade.state, 20)].filter(Boolean).join(", ");
+  const categoria = [GENEROS[String(d.genero)], d.faixaEtaria === "veterano" ? "Veterano" : ""].filter(Boolean).join(" ");
+  const detalhes = [MODALIDADES[String(d.modalidade)] ?? "", categoria, lugar].filter(Boolean).join(" · ");
+  const sigla = typeof d.sigla === "string" && /^[A-Z0-9]{3}$/.test(d.sigla) ? d.sigla : "";
   const jogadores = Object.entries(mapa)
     .slice(0, MAX_JOGADORES)
     .flatMap(([uid, j]): JogadorPublico[] => {
       if (!j || typeof j !== "object") return [];
       const jogador = j as Record<string, unknown>;
       const nomeJogador = limpar(jogador.nome, 60);
-      return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId }] : [];
+      const camisa = camisas[uid] && typeof camisas[uid] === "object" ? camisas[uid] : {};
+      const numero = Number.isInteger(camisa?.numero) && (camisa?.numero as number) >= 0 && (camisa?.numero as number) <= 99 ? (camisa?.numero as number) : null;
+      const posicao = POSICOES[String(camisa?.posicao)] ?? "";
+      return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId, numero, posicao }] : [];
     })
-    .sort((a, b) => Number(b.dono) - Number(a.dono) || a.nome.localeCompare(b.nome, "pt-BR"));
-  return { nome, cor, jogadores };
+    .sort((a, b) => Number(b.dono) - Number(a.dono) || (a.numero ?? 100) - (b.numero ?? 100) || a.nome.localeCompare(b.nome, "pt-BR"));
+  return { nome, cor, sigla, detalhes, escudo: fotoPequena(d.escudoUrl, "c_pad,w_256,h_256,q_auto,f_png"), jogadores };
 };
 
 /** "Ana, Bruno, Carla e mais 4" (para a descrição da prévia do link). */
@@ -78,9 +101,9 @@ interface PaginaTimeParams {
 
 export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaTimeParams): string => {
   const total = time?.jogadores.length ?? 0;
-  const titulo = time ? `${time.nome} · Tugyn` : "Time no Tugyn";
+  const titulo = time ? `${time.nome}${time.sigla ? ` (${time.sigla})` : ""} · Tugyn` : "Time no Tugyn";
   const descricao = time
-    ? `${total} ${total === 1 ? "jogador" : "jogadores"}${total ? `: ${resumoDoElenco(time.jogadores)}` : ""}. Monte o seu time no app Tugyn.`
+    ? `${time.detalhes ? `${time.detalhes}. ` : ""}${total} ${total === 1 ? "jogador" : "jogadores"}${total ? `: ${resumoDoElenco(time.jogadores)}` : ""}. Monte o seu time no app Tugyn.`
     : "Monte o seu time no app Tugyn.";
 
   const lojas: { rotulo: string; url: string }[] = [];
@@ -97,16 +120,20 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
         .map(
           (j) => `<li>
           <span class="avatar">${inicial(j.nome)}${j.foto ? `<img src="${esc(j.foto)}" alt="" width="40" height="40" loading="lazy">` : ""}</span>
-          <span class="nome">${esc(j.nome)}</span>${j.dono ? `<span class="tag">Dono</span>` : ""}
+          <span class="num">${j.numero === null ? "" : esc(String(j.numero))}</span>
+          <span class="nome">${esc(j.nome)}${j.posicao ? `<small>${esc(j.posicao)}</small>` : ""}</span>${j.dono ? `<span class="tag">Dono</span>` : ""}
         </li>`,
         )
         .join("")}</ul>`
     : `<p>Este time ainda não tem jogadores.</p>`;
 
   const corpo = time
-    ? `<div class="escudo" style="background:${esc(time.cor)}">${inicial(time.nome)}</div>
-  <p class="eyebrow">Time no Tugyn</p>
+    ? `${time.escudo
+        ? `<div class="escudo escudo-img" style="border-color:${esc(time.cor)}"><img src="${esc(time.escudo)}" alt="Escudo do ${esc(time.nome)}" width="72" height="72"></div>`
+        : `<div class="escudo" style="background:${esc(time.cor)}">${esc(time.sigla) || inicial(time.nome)}</div>`}
+  <p class="eyebrow">Time no Tugyn${time.sigla ? ` · ${esc(time.sigla)}` : ""}</p>
   <h1>${esc(time.nome)}</h1>
+  ${time.detalhes ? `<p class="det">${esc(time.detalhes)}</p>` : ""}
   <p class="sub">${total} ${total === 1 ? "jogador" : "jogadores"}</p>
   ${elenco}`
     : `<div class="escudo" style="background:#FE7552">?</div>
@@ -152,6 +179,11 @@ ${iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
     justify-content:center; background:rgba(254,117,82,0.14); color:var(--accent); font-weight:800; }
   .avatar img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
   .nome { flex:1; min-width:0; font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .nome small { display:block; font-size:12px; font-weight:500; color:var(--secondary); }
+  .num { flex:none; width:24px; text-align:center; font-size:15px; font-weight:800; color:var(--accent); }
+  .escudo-img { background:#fff; border:3px solid; overflow:hidden; padding:4px; }
+  .escudo-img img { width:100%; height:100%; object-fit:contain; }
+  .det { margin:0 0 4px; font-size:13px; }
   .tag { flex:none; font-size:11px; font-weight:700; color:var(--accent); background:rgba(254,117,82,0.12); padding:3px 8px; border-radius:8px; }
   .btn { display:flex; align-items:center; justify-content:center; min-height:50px; border-radius:14px; background:var(--accent);
     color:#fff; text-decoration:none; font-size:17px; font-weight:600; }

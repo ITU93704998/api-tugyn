@@ -26,13 +26,16 @@ const LOTE_DE_LIMPEZA = 20;
 /** Reservas da mesma chave lidas na transação (vencidas somem na rotina; uma por 10 min no máximo). */
 const MAX_DA_CHAVE = 50;
 
-const alvoDe = (db: Firestore, tipo: TipoDeImagem, uid: string, turmaId?: string | null): DocumentReference =>
-  tipo === "fotoPerfil" ? db.doc(`users/${uid}`) : db.doc(`turmas/${turmaId}`);
+const alvoDe = (db: Firestore, tipo: TipoDeImagem, uid: string, alvoId?: string | null): DocumentReference =>
+  tipo === "fotoPerfil" ? db.doc(`users/${uid}`) : tipo === "escudoTime" ? db.doc(`times/${alvoId}`) : db.doc(`turmas/${alvoId}`);
+
+/** Campo do documento-alvo que guarda a URL da imagem. */
+const campoDaUrl = (tipo: TipoDeImagem): string => (tipo === "fotoPerfil" ? "profileImage" : tipo === "escudoTime" ? "escudoUrl" : "bannerUrl");
 
 const referenciaDe = (tipo: TipoDeImagem, alvo: Record<string, unknown> | null) =>
   tipo === "fotoPerfil"
     ? { url: (alvo?.profileImage as string | undefined) ?? null, publicId: (alvo?.profileImagePublicId as string | undefined) ?? null }
-    : { url: (alvo?.bannerUrl as string | undefined) ?? null, publicId: null };
+    : { url: (alvo?.[campoDaUrl(tipo)] as string | undefined) || null, publicId: null };
 
 export type ReservaFeita = { ok: true; reservaId: string; nome: string; pasta: string } | ({ ok: false } & Exclude<CheckResult, { allowed: true }>);
 
@@ -42,19 +45,25 @@ export type ReservaFeita = { ok: true; reservaId: string; nome: string; pasta: s
  */
 export const reservarTrocaDeImagem = async (
   db: Firestore,
-  c: { uid: string; tipo: TipoDeImagem; turmaId?: unknown; bucket: Bucket; pasta: string },
+  c: { uid: string; tipo: TipoDeImagem; turmaId?: unknown; timeId?: unknown; bucket: Bucket; pasta: string },
 ): Promise<ReservaFeita> => {
   if (c.tipo === "bannerTurma" && !isSafeUid(c.turmaId)) {
     return { ok: false, allowed: false, status: 400, error: "Identificador da turma inválido." };
   }
+  // O time é sempre `{dono}_1` ou `{dono}_2`: só o dono chega a um id válido (o documento confere de novo abaixo).
+  if (c.tipo === "escudoTime" && !(typeof c.timeId === "string" && [`${c.uid}_1`, `${c.uid}_2`].includes(c.timeId))) {
+    return { ok: false, allowed: false, status: 403, error: "Somente o dono pode trocar o escudo." };
+  }
   const turmaId = c.tipo === "bannerTurma" ? (c.turmaId as string) : null;
-  const chave = chaveDaReserva(c.uid, c.tipo, turmaId ?? undefined);
+  const timeId = c.tipo === "escudoTime" ? (c.timeId as string) : null;
+  const alvoId = turmaId ?? timeId;
+  const chave = chaveDaReserva(c.uid, c.tipo, alvoId ?? undefined);
   const agora = Date.now();
   const nome = nomeDoEnvio(c.tipo, randomBytes(6).toString("hex"), agora);
   const reservaRef = db.collection(COLECAO_RESERVAS).doc();
 
   return db.runTransaction(async (tx): Promise<ReservaFeita> => {
-    const alvoSnap = await tx.get(alvoDe(db, c.tipo, c.uid, turmaId));
+    const alvoSnap = await tx.get(alvoDe(db, c.tipo, c.uid, alvoId));
     const daChave = await tx.get(db.collection(COLECAO_RESERVAS).where("chave", "==", chave).limit(MAX_DA_CHAVE));
     const alvo = alvoSnap.exists ? (alvoSnap.data() ?? null) : null;
     const prazo = checarIntervalo(c.uid, c.tipo, alvo, agora);
@@ -76,6 +85,7 @@ export const reservarTrocaDeImagem = async (
       uid: c.uid,
       tipo: c.tipo,
       turmaId,
+      ...(timeId ? { timeId } : {}),
       bucket: c.bucket,
       publicId: `${c.pasta}/${nome}`,
       url: null,
@@ -200,8 +210,8 @@ const resolverReserva = async (db: Firestore, doc: QueryDocumentSnapshot): Promi
     await doc.ref.delete(); // registro inválido: nada a apagar no Cloudinary
     return;
   }
-  const alvo = await alvoDe(db, r.tipo, r.uid, r.turmaId).get();
-  const url = alvo.get(r.tipo === "fotoPerfil" ? "profileImage" : "bannerUrl");
+  const alvo = await alvoDe(db, r.tipo, r.uid, r.tipo === "escudoTime" ? r.timeId : r.turmaId).get();
+  const url = alvo.exists ? alvo.get(campoDaUrl(r.tipo)) : null;
   const passo = proximoPasso(r, referenciaAponta(url, r.publicId));
   if (passo === "promover") {
     await promoverFoto(db, doc.ref, { ...r, url: r.url || (url as string) });

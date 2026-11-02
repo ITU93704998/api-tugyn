@@ -13,6 +13,16 @@ import { isAvatar, parseBucket, parseFolderName, parseImage } from "./_lib/valid
 const MAX_UPLOADS_POR_USUARIO_HORA = 15;
 const MAX_UPLOADS_POR_IP_HORA = 80;
 
+/**
+ * Escudo: quadrado de até 512 px. Com "fundo liso", o fundo de cor única (branco, verde...) vira transparente com
+ * `e_make_transparent` (transformação comum, aplicada UMA vez no envio; NÃO é a remoção de fundo por IA, que é cara).
+ * Salvo em PNG para guardar a transparência.
+ */
+const transformacaoDoEscudo = (fundoLiso: boolean) => [
+  { width: 512, height: 512, crop: "limit" },
+  ...(fundoLiso ? [{ effect: "make_transparent:15" }] : [{ quality: "auto" }]),
+];
+
 /** O IP fica só como hash no limitador; o UID continua sendo a chave principal. */
 const chaveAnonimaDoIp = (req: VercelRequest): string => {
   const forwarded = req.headers["x-forwarded-for"];
@@ -81,6 +91,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: "Informe a turma para enviar o banner." });
     }
   }
+  const ehEscudo = bucket === "times" && folder === "escudo";
+  if (ehEscudo && (typeof body.timeId !== "string" || body.timeId.length === 0)) {
+    return res.status(400).json({ error: "Informe o time para enviar o escudo." });
+  }
 
   const limiteUsuario = bucket === "anuncios" ? 80 : MAX_UPLOADS_POR_USUARIO_HORA;
   if (!(await dentroDoLimite(user.uid, "upload", limiteUsuario, 3600))) {
@@ -102,16 +116,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const pasta = bucket + "/" + user.uid + "/" + folder;
   const tipo = isAvatar(bucket, folder)
     ? "fotoPerfil"
-    : (bucket === "turmas" || bucket === "times") && folder === "banner"
-      ? "bannerTurma"
-      : null;
+    : ehEscudo
+      ? "escudoTime"
+      : (bucket === "turmas" || bucket === "times") && folder === "banner"
+        ? "bannerTurma"
+        : null;
 
   // Foto e banner: RESERVA a troca no servidor (prazo, propriedade e uma troca por vez) antes de gastar no Cloudinary.
   let reserva: { reservaId: string; nome: string } | null = null;
   if (tipo) {
     let feita: Awaited<ReturnType<typeof reservarTrocaDeImagem>>;
     try {
-      feita = await reservarTrocaDeImagem(getFirestore(getFirebaseApp()), { uid: user.uid, tipo, turmaId: body.turmaId, bucket, pasta });
+      feita = await reservarTrocaDeImagem(getFirestore(getFirebaseApp()), { uid: user.uid, tipo, turmaId: body.turmaId, timeId: body.timeId, bucket, pasta });
     } catch (error) {
       console.error("[upload] falha ao reservar a troca da imagem:", error);
       return res.status(503).json({ error: "Não foi possível validar o prazo para trocar esta imagem." });
@@ -134,7 +150,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       use_filename: false,
       resource_type: "image",
       allowed_formats: ["jpg", "jpeg", "png", "webp"],
-      transformation: [{ width: 1080, height: 1080, crop: "limit", quality: "auto" }],
+      transformation: ehEscudo ? transformacaoDoEscudo(body.fundoLiso === true) : [{ width: 1080, height: 1080, crop: "limit", quality: "auto" }],
+      ...(ehEscudo && body.fundoLiso === true ? { format: "png" } : {}),
       tags: isAdminOnlyBucket(bucket) ? ["anuncio"] : ["uid_" + user.uid],
     });
 

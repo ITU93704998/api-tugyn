@@ -63,3 +63,22 @@ test('documento inválido ou time inexistente não quebra a página', () => {
   assert.deepEqual(timeDoDocumento({ nome: 'X', jogadores: { a: null, b: { nome: 5 } } }).jogadores, []);
   assert.match(renderizarPaginaTime({ time: null, lojaIos: null, lojaAndroid: null, plataforma: 'outra' }), /Time não encontrado/);
 });
+
+test('mostra escudo, sigla, modalidade, categoria, cidade, número e posição', () => {
+  const time = timeDoDocumento({
+    ...documento(),
+    sigla: 'BRA', modalidade: 'futsal', genero: 'misto', faixaEtaria: 'veterano', cidade: { city: 'Recife', state: 'PE', cityId: '1' },
+    escudoUrl: 'https://res.cloudinary.com/demo/image/upload/v9/times/uid-dono/escudo/esc_1.png',
+    camisas: { 'uid-ana': { numero: 10, posicao: 'pivo' }, 'uid-dono': { numero: 'x', posicao: '<b>' } },
+  });
+  assert.equal(time.detalhes, 'Futsal · Misto Veterano · Recife, PE');
+  assert.match(time.escudo, /upload\/c_pad,w_256,h_256,q_auto,f_png\/v9\//);
+  const ana = time.jogadores.find((j) => j.nome === 'Ana Souza');
+  assert.deepEqual([ana.numero, ana.posicao], [10, 'Pivô']);
+  const dono = time.jogadores.find((j) => j.dono);
+  assert.deepEqual([dono.numero, dono.posicao], [null, '']);
+  const html = renderizarPaginaTime({ time, lojaIos: null, lojaAndroid: null, plataforma: 'outra' });
+  assert.match(html, /\(BRA\)/);
+  assert.equal(html.includes('cityId'), false);
+  assert.equal(timeDoDocumento({ ...documento(), sigla: 'x<y' }).sigla, '');
+});

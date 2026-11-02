@@ -46,7 +46,7 @@ const lerTime = async (linkId: string): Promise<TimePublico | null> => {
     const leitura = getFirestore(getFirebaseApp())
       .collection("times")
       .where("linkId", "==", linkId)
-      .select("nome", "cor", "donoId", "jogadores")
+      .select("nome", "cor", "donoId", "jogadores", "sigla", "modalidade", "genero", "faixaEtaria", "cidade", "escudoUrl", "camisas")
       .limit(1)
       .get();
     const limite = new Promise<null>((resolve) => {
