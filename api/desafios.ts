@@ -39,6 +39,7 @@ import {
   vencedorEntre,
   parseDesafioBody,
 } from "./_lib/desafios";
+import { ehAcaoDeAmistoso, executarAmistoso, parseAmistosoBody } from "./_lib/amistosos";
 import { DEDUPE_MS, type PushDraft } from "./_lib/push";
 import { consultarRecibos, recuperarAvisosPendentes, enviarAviso } from "./_lib/pushEnvio";
 import { bucketsSemCredenciais } from "./_lib/cloudinaryCleanup";
@@ -54,6 +55,7 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  *  - responder { desafioId, aceitar }                         o desafiado aceita ou recusa
  *  - cancelar { desafioId }                                   quem desafiou desiste (só enquanto pendente)
  *  - apurar { desafioIds }                                    fecha os que já podem ter resultado (o app pede ao abrir a aba)
+ *  - time_chave / time_buscar / amistoso_*                    chave pública dos times e amistosos (ver `_lib/amistosos.ts`)
  * GET /api/desafios   (só a rotina diária da Vercel, com `Authorization: Bearer <CRON_SECRET>`; ver docs/rotina-diaria.md)
  *  - expira e apura os desafios vencidos (`apurarEm` <= agora), mesmo que ninguém abra o app, em lotes com cursor e prazo;
  *  - envia a fila de avisos de resultado (separada do cálculo), termina exclusões de conta e resolve reservas de imagem;
@@ -65,6 +67,8 @@ import { dentroDoLimite } from "./_lib/rateLimit";
 const COLECAO = "desafios";
 const VAGAS = "desafiosVagas";
 const LIMITE_POR_HORA = 40;
+/** Buscas pela chave e amistosos: limite próprio (não gasta o dos desafios). */
+const LIMITE_AMISTOSOS_POR_HORA = 60;
 const LOTE_DE_APURACAO = 20;
 const LOTE_DE_AVISOS = 20;
 /**
@@ -494,6 +498,31 @@ const executar = (db: Firestore, uid: string, pedido: DesafioRequest): Promise<R
   }
 };
 
+/** Chave dos times e amistosos: mesma autenticação e App Check dos desafios, limite e log próprios. */
+const tratarAmistoso = async (req: VercelRequest, res: VercelResponse, uid: string) => {
+  const parsed = parseAmistosoBody(req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  if (!(await dentroDoLimite(uid, "amistosos", LIMITE_AMISTOSOS_POR_HORA, 3600))) {
+    return res.status(429).json({ error: "Muitas tentativas. Tente novamente mais tarde." });
+  }
+  let db: Firestore;
+  try {
+    db = getFirestore(getFirebaseApp());
+  } catch (error) {
+    console.error("[amistosos] Firebase Admin não configurado:", error);
+    return res.status(500).json({ error: "Servidor não configurado." });
+  }
+  try {
+    const resultado = await executarAmistoso(db, uid, parsed.value);
+    if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
+    console.log(JSON.stringify({ evt: parsed.value.action }));
+    return res.status(200).json({ success: true, ...(resultado.body ?? {}) });
+  } catch (erro) {
+    console.error(JSON.stringify({ evt: "amistosos_failed", action: parsed.value.action, message: (erro as Error)?.message ?? String(erro) }));
+    return res.status(502).json({ error: "Não foi possível concluir agora. Tente novamente." });
+  }
+};
+
 /** A Vercel chama a rotina com `Authorization: Bearer <CRON_SECRET>`. Sem o segredo configurado, ninguém entra. */
 const ehRotinaAutorizada = (req: VercelRequest): boolean => {
   const segredo = process.env.CRON_SECRET;
@@ -588,6 +617,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const user = await requireUser(req, res, "desafiar");
   if (!user) return;
   if (!(await verificarAppCheck(req, res, "desafios"))) return;
+
+  if (ehAcaoDeAmistoso(req.body)) return tratarAmistoso(req, res, user.uid);
 
   const parsed = parseDesafioBody(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });

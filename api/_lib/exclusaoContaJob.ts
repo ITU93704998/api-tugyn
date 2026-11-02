@@ -37,6 +37,7 @@ const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
   { collection: "revisoes", field: "uid" }, // pedido de revisão da suspensão (api/_lib/revisao.ts)
   { collection: "times", field: "donoId" }, // times que ele montou (os dos outros: etapa "times" de accountDeletion)
   { collection: "convitesTime", field: "donoId" }, // prévias dos links de convocação dos times dele
+  { collection: "chavesTime", field: "donoId" }, // chaves públicas dos times dele (garantia: a etapa "amistosos" já apaga)
 ];
 
 const jobRef = (db: Firestore, uid: string) => db.doc(`${COLECAO_EXCLUSOES}/${uid}`);

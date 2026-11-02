@@ -1,4 +1,5 @@
 import { type DocumentData, FieldValue, type Firestore, type UpdateData, type WriteBatch } from "firebase-admin/firestore";
+import { encerrarAmistososDoTime } from "./amistosos";
 
 /**
  * Exclusão de conta: apaga ou anonimiza TUDO do usuário no Firestore, depois as imagens e, por
@@ -345,6 +346,10 @@ export const excluirConta = async (
   }
 
   await etapa("times", () => sairDosTimes(db, uid));
+  // Amistosos em aberto dos times dele viram "cancelado" no adversário, e as chaves somem (os times saem em EXTRA_COLLECTIONS).
+  await etapa("amistosos", async () => {
+    for (const n of [1, 2]) await encerrarAmistososDoTime(db, `${uid}_${n}`);
+  });
 
   await etapa("perfil", async () => {
     // Todas as reservas de username deste uid (não depende de o perfil ainda existir).

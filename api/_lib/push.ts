@@ -151,7 +151,8 @@ export interface PushDraft {
       | "desafio"
       | "time_convocacao"
       | "time_pedido"
-      | "time_aprovado";
+      | "time_aprovado"
+      | "time_amistoso";
     /** Vazio nos avisos de desafio e de time. */
     turmaId: string;
     /** Só nos avisos de time: o toque abre o time (ou a convocação). */
