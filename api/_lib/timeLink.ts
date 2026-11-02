@@ -86,7 +86,8 @@ export const timeDoDocumento = (dados: unknown): TimePublico | null => {
       const nomeJogador = limpar(jogador.nome, 60);
       const camisa = camisas[uid] && typeof camisas[uid] === "object" ? camisas[uid] : {};
       const numero = Number.isInteger(camisa?.numero) && (camisa?.numero as number) >= 0 && (camisa?.numero as number) <= 99 ? (camisa?.numero as number) : null;
-      const posicao = POSICOES[String(camisa?.posicao)] ?? "";
+      // "Treinador" só vale para o dono (as regras já garantem; aqui é defesa extra).
+      const posicao = camisa?.posicao === "treinador" ? (uid === donoId ? "Treinador" : "") : POSICOES[String(camisa?.posicao)] ?? "";
       return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId, numero, posicao }] : [];
     })
     .sort((a, b) => Number(b.dono) - Number(a.dono) || (a.numero ?? 100) - (b.numero ?? 100) || a.nome.localeCompare(b.nome, "pt-BR"));

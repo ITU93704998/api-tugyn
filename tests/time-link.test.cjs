@@ -64,6 +64,12 @@ test('documento inválido ou time inexistente não quebra a página', () => {
   assert.match(renderizarPaginaTime({ time: null, lojaIos: null, lojaAndroid: null, plataforma: 'outra' }), /Time não encontrado/);
 });
 
+test('"Treinador" aparece só para o dono', () => {
+  const time = timeDoDocumento({ ...documento(), camisas: { 'uid-dono': { posicao: 'treinador' }, 'uid-ana': { posicao: 'treinador' } } });
+  assert.equal(time.jogadores.find((j) => j.dono).posicao, 'Treinador');
+  assert.equal(time.jogadores.find((j) => j.nome === 'Ana Souza').posicao, '');
+});
+
 test('mostra escudo, sigla, modalidade, categoria, cidade, número e posição', () => {
   const time = timeDoDocumento({
     ...documento(),
