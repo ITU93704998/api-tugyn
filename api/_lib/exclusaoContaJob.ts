@@ -35,6 +35,7 @@ const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
   { collection: COLECAO_RESERVAS, field: "uid" }, // reservas de troca de imagem (as imagens somem na etapa "imagens")
   { collection: "reportQuota", field: "uid" }, // hora da última denúncia dele (limite de 1 a cada 24 h)
   { collection: "revisoes", field: "uid" }, // pedido de revisão da suspensão (api/_lib/revisao.ts)
+  { collection: "times", field: "donoId" }, // times que ele montou (os dos outros: etapa "times" de accountDeletion)
 ];
 
 const jobRef = (db: Firestore, uid: string) => db.doc(`${COLECAO_EXCLUSOES}/${uid}`);

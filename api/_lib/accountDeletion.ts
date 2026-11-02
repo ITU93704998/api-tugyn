@@ -261,6 +261,32 @@ const sairDaTurma = async (
   return partidasAlteradas.length;
 };
 
+// ─── Times ────────────────────────────────────────────────────────────────────
+
+/**
+ * Tira o usuário dos times de OUTRAS pessoas: do elenco, das convocações e da lista de quem recusou. Os times que ele
+ * montou são apagados inteiros (EXTRA_COLLECTIONS: times.donoId). Idempotente.
+ */
+export const sairDosTimes = async (db: Firestore, uid: string): Promise<number> => {
+  const consultas = await Promise.all(
+    ["membros", "convidados", "recusados"].map((campo) => db.collection("times").where(campo, "array-contains", uid).select("donoId", "ultimoConvidado").get()),
+  );
+  const docs = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
+  for (const snap of consultas) for (const doc of snap.docs) if (doc.get("donoId") !== uid) docs.set(doc.id, doc);
+  for (const doc of docs.values()) {
+    await doc.ref.update({
+      ...(doc.get("ultimoConvidado") === uid ? { ultimoConvidado: FieldValue.delete() } : {}),
+      membros: FieldValue.arrayRemove(uid),
+      convidados: FieldValue.arrayRemove(uid),
+      recusados: FieldValue.arrayRemove(uid),
+      [`jogadores.${uid}`]: FieldValue.delete(),
+      [`convites.${uid}`]: FieldValue.delete(),
+      atualizadoEm: FieldValue.serverTimestamp(),
+    });
+  }
+  return docs.size;
+};
+
 // ─── Fluxo completo ───────────────────────────────────────────────────────────
 
 export const excluirConta = async (
@@ -314,6 +340,8 @@ export const excluirConta = async (
       else relatorio.turmasDeixadas += 1;
     });
   }
+
+  await etapa("times", () => sairDosTimes(db, uid));
 
   await etapa("perfil", async () => {
     // Todas as reservas de username deste uid (não depende de o perfil ainda existir).

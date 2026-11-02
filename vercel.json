@@ -1,3 +1,14 @@
 {
-  "crons": [{ "path": "/api/desafios", "schedule": "10 15 * * *" }]
+  "crons": [
+    {
+      "path": "/api/desafios",
+      "schedule": "10 15 * * *"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/api/time/:linkId",
+      "destination": "/api/turma/:linkId?tipo=time"
+    }
+  ]
 }

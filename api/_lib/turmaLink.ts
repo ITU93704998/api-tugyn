@@ -19,7 +19,7 @@ export const detectarPlataforma = (userAgent: unknown): Plataforma => {
   return "outra";
 };
 
-const esc = (texto: string): string =>
+export const esc = (texto: string): string =>
   texto
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -37,7 +37,7 @@ export interface PreviaTurma {
   imagem: string;
 }
 
-const limpar = (valor: unknown, max: number): string =>
+export const limpar = (valor: unknown, max: number): string =>
   typeof valor === "string"
     ? valor.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max).trim()
     : "";

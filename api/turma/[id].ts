@@ -9,6 +9,7 @@ import {
   renderizarPagina,
   type PreviaTurma,
 } from "../_lib/turmaLink";
+import { isValidLinkId, renderizarPaginaTime, timeDoDocumento, type TimePublico } from "../_lib/timeLink";
 
 /**
  * GET /api/turma/<id>  (link de convite compartilhado)
@@ -16,6 +17,8 @@ import {
  * Público: não exige login (quem recebe o link talvez nem tenha o app).
  * Lê só a cópia pública `turmaPreviews/<id>` (já liberada para leitura nas regras) para a prévia do link;
  * se demorar ou falhar, a página sai genérica em vez de travar.
+ *
+ * GET /api/time/<linkId>  (vercel.json reescreve para cá com ?tipo=time: a página pública de um time, sem função nova)
  * Os links das lojas vêm das MESMAS variáveis do /api/version (APP_STORE_URL[_IOS|_ANDROID]), já validadas.
  */
 const PREVIA_TIMEOUT_MS = 2500;
@@ -36,6 +39,29 @@ const lerPrevia = async (turmaId: string): Promise<PreviaTurma | null> => {
     if (timer) clearTimeout(timer);
   }
 };
+/** O time pelo `linkId` (1 leitura; só os campos que a página mostra). null se não existir, demorar ou falhar. */
+const lerTime = async (linkId: string): Promise<TimePublico | null> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const leitura = getFirestore(getFirebaseApp())
+      .collection("times")
+      .where("linkId", "==", linkId)
+      .select("nome", "cor", "donoId", "jogadores")
+      .limit(1)
+      .get();
+    const limite = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
+    });
+    const snap = await Promise.race([leitura, limite]);
+    return snap && !snap.empty ? timeDoDocumento(snap.docs[0].data()) : null;
+  } catch (error) {
+    console.warn("[time-link] time indisponível:", error instanceof Error ? error.message : error);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
@@ -53,7 +79,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const query = req.query ?? {};
   const bruto = Array.isArray(query.id) ? query.id[0] : query.id;
-  if (!isValidTurmaId(bruto)) {
+  const ehTime = (Array.isArray(query.tipo) ? query.tipo[0] : query.tipo) === "time";
+  if (ehTime ? !isValidLinkId(bruto) : !isValidTurmaId(bruto)) {
     // Nunca devolve o que foi digitado.
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     return res.status(400).send("Link inválido.");
@@ -69,8 +96,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       : null;
   const iconUrl = origin ? new URL("/tugyn-icon.png", origin).toString() : null;
   const paginaUrl = origin
-    ? new URL(`/api/turma/${encodeURIComponent(bruto)}`, origin).toString()
+    ? new URL(`/api/${ehTime ? "time" : "turma"}/${encodeURIComponent(bruto)}`, origin).toString()
     : null;
+
+  if (ehTime) {
+    const time = await lerTime(bruto);
+    // As fotos dos jogadores vêm do Cloudinary (a página da turma não mostra imagens de fora).
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'none'; img-src 'self' https://res.cloudinary.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    );
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Vary", "User-Agent");
+    // 5 min na CDN: compartilhar no grupo não vira uma leitura por pessoa que abre; um jogador novo aparece logo.
+    res.setHeader("Cache-Control", time ? "public, s-maxage=300, stale-while-revalidate=600" : "public, s-maxage=60");
+    return res.status(time ? 200 : 404).send(renderizarPaginaTime({ time, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
+  }
   const previa = await lerPrevia(bruto);
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");

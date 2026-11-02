@@ -1,0 +1,65 @@
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const ts = require(require.resolve('typescript', { paths: [root] }));
+const previousLoader = require.extensions['.ts'];
+require.extensions['.ts'] = (module, filename) => {
+  const source = fs.readFileSync(filename, 'utf8');
+  module._compile(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, filename);
+};
+const { isValidLinkId, timeDoDocumento, renderizarPaginaTime, fotoPequena } = require(path.join(root, 'api/_lib/timeLink.ts'));
+if (previousLoader) require.extensions['.ts'] = previousLoader;
+else delete require.extensions['.ts'];
+
+const documento = () => ({
+  nome: 'Os Brabos',
+  cor: '#17212F',
+  donoId: 'uid-dono',
+  linkId: 'AbCdEfGh12345678',
+  membros: ['uid-dono', 'uid-ana'],
+  jogadores: {
+    'uid-ana': { nome: 'Ana Souza', foto: 'https://res.cloudinary.com/demo/image/upload/v1/ana.jpg', userName: 'ana.souza' },
+    'uid-dono': { nome: 'Zeca', foto: 'https://outro.site/foto.jpg', userName: 'zeca' },
+  },
+  convidados: ['uid-bruno'],
+  convites: { 'uid-bruno': { nome: 'Bruno Convidado', userName: 'bruno' } },
+  recusados: ['uid-carla'],
+});
+
+test('aceita só linkId de 16 letras e números', () => {
+  assert.equal(isValidLinkId('AbCdEfGh12345678'), true);
+  for (const v of ['curto', 'AbCdEfGh1234567_', '../AbCdEfGh12345', 'AbCdEfGh123456789', null, 123]) assert.equal(isValidLinkId(v), false);
+});
+
+test('mostra só elenco aceito, dono primeiro, sem @, uid nem convocados', () => {
+  const time = timeDoDocumento(documento());
+  assert.deepEqual(time.jogadores.map((j) => [j.nome, j.dono]), [['Zeca', true], ['Ana Souza', false]]);
+  const html = renderizarPaginaTime({ time, lojaIos: null, lojaAndroid: null, plataforma: 'outra' });
+  assert.match(html, /Os Brabos/);
+  assert.match(html, /2 jogadores/);
+  for (const segredo of ['uid-', 'ana.souza', 'Bruno', 'carla', 'AbCdEfGh12345678']) assert.equal(html.includes(segredo), false, segredo);
+});
+
+test('foto só do Cloudinary (recortada); cor inválida usa a do app', () => {
+  assert.match(fotoPequena('https://res.cloudinary.com/demo/image/upload/v1/ana.jpg'), /upload\/c_fill,g_face,w_96,h_96,q_auto,f_jpg\/v1\/ana\.jpg$/);
+  assert.equal(fotoPequena('https://outro.site/foto.jpg'), '');
+  assert.equal(fotoPequena('javascript:alert(1)'), '');
+  const time = timeDoDocumento({ ...documento(), cor: 'red;background:url(x)' });
+  assert.equal(time.cor, '#FE7552');
+});
+
+test('escapa HTML vindo do usuário', () => {
+  const time = timeDoDocumento({ ...documento(), nome: '<script>alert(1)</script>' });
+  const html = renderizarPaginaTime({ time, lojaIos: null, lojaAndroid: null, plataforma: 'outra' });
+  assert.equal(html.includes('<script>'), false);
+  assert.match(html, /&lt;script&gt;/);
+});
+
+test('documento inválido ou time inexistente não quebra a página', () => {
+  assert.equal(timeDoDocumento(null), null);
+  assert.equal(timeDoDocumento({ nome: '' }), null);
+  assert.deepEqual(timeDoDocumento({ nome: 'X', jogadores: { a: null, b: { nome: 5 } } }).jogadores, []);
+  assert.match(renderizarPaginaTime({ time: null, lojaIos: null, lojaAndroid: null, plataforma: 'outra' }), /Time não encontrado/);
+});
