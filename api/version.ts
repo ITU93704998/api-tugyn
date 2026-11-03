@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleContacts } from "./_lib/contatos";
 import { handleModeracao } from "./_lib/moderacao";
+import { handleNotificacoes } from "./_lib/notificacoesGerais";
 import { handleRevisao } from "./_lib/revisao";
 import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from "./_lib/version";
 
@@ -12,10 +13,15 @@ import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from ".
  *   APP_MIN_VERSION[_IOS|_ANDROID]    APP_LATEST_VERSION[_IOS|_ANDROID]
  *   APP_STORE_URL[_IOS|_ANDROID]      APP_UPDATE_MESSAGE (opcional)
  */
+// As notificações gerais (resource=notificacoes) trabalham até ~20 s por chamada; o resto desta rota responde na hora.
+export const config = { maxDuration: 60 };
+
 export default function handler(req: VercelRequest, res: VercelResponse) {
   if (req.query?.resource === "contatos") return handleContacts(req, res);
   // Moderação do painel (Segurança › Denúncias): só administradores. Fica aqui para não criar outra função na Vercel.
   if (req.query?.resource === "moderacao") return handleModeracao(req, res);
+  // Notificações do painel para os usuários (Tugyn APP › Notificações): só administradores.
+  if (req.query?.resource === "notificacoes") return handleNotificacoes(req, res);
   // Pedido de revisão de conta suspensa (app e site, SEM login: a conta suspensa não entra).
   if (req.query?.resource === "revisao") return handleRevisao(req, res);
   if (req.method !== "GET") {

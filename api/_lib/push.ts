@@ -10,6 +10,22 @@ import { isSafeUid } from "./validation";
 export const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 export const EXPO_CHUNK_SIZE = 100;
 export const EXPO_TIMEOUT_MS = 8000;
+/** Conexões simultâneas com o Expo (o SDK oficial usa até 6): um envio grande não abre dezenas de chamadas de uma vez. */
+export const EXPO_CONEXOES_MAX = 6;
+
+/** Roda `fn` em cada item com no máximo `limite` ao mesmo tempo; o resultado sai na ordem dos itens. */
+export const emParalelo = async <T, R>(itens: readonly T[], limite: number, fn: (item: T) => Promise<R>): Promise<R[]> => {
+  const saida: R[] = new Array(itens.length);
+  let proximo = 0;
+  const trabalhador = async (): Promise<void> => {
+    while (proximo < itens.length) {
+      const i = proximo++;
+      saida[i] = await fn(itens[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(limite, 1), itens.length) }, trabalhador));
+  return saida;
+};
 export const MAX_TOKENS_PER_USER = 5;
 /** O mesmo aviso (mesmo evento, turma e pessoa) não se repete dentro deste tempo. */
 export const DEDUPE_MS = 10 * 60_000;
@@ -152,7 +168,9 @@ export interface PushDraft {
       | "time_convocacao"
       | "time_pedido"
       | "time_aprovado"
-      | "time_amistoso";
+      | "time_amistoso"
+      /** Notificação do painel para muitos usuários (Tugyn APP › Notificações): o toque só abre o app. */
+      | "aviso_geral";
     /** Vazio nos avisos de desafio e de time. */
     turmaId: string;
     /** Só nos avisos de time: o toque abre o time (ou a convocação). */
@@ -419,7 +437,7 @@ export interface PushResult {
 
 const TICKET_ID = /^[A-Za-z0-9-]{1,64}$/;
 
-/** Envia em lotes de 100, todos ao mesmo tempo (a função da Vercel tem poucos segundos). Mantém a ordem das mensagens. Nunca lança e nunca escreve o token em log. */
+/** Envia em lotes de 100, até `EXPO_CONEXOES_MAX` ao mesmo tempo (a função da Vercel tem poucos segundos). Mantém a ordem das mensagens. Nunca lança e nunca escreve o token em log. */
 export const sendExpoPush = async (messages: readonly ExpoMessage[], options: { fetchImpl?: typeof fetch; accessToken?: string } = {}): Promise<PushResult[]> => {
   const doFetch = options.fetchImpl ?? fetch;
   const enviarLote = async (lote: readonly ExpoMessage[]): Promise<PushResult[]> => {
@@ -450,7 +468,7 @@ export const sendExpoPush = async (messages: readonly ExpoMessage[], options: { 
       clearTimeout(timer);
     }
   };
-  const partes = await Promise.all(chunk(messages, EXPO_CHUNK_SIZE).map(enviarLote));
+  const partes = await emParalelo(chunk(messages, EXPO_CHUNK_SIZE), EXPO_CONEXOES_MAX, enviarLote);
   return partes.flat();
 };
 

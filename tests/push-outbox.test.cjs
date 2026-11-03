@@ -191,7 +191,7 @@ test('recovery HTTP endpoint refuses public and Firebase-user requests', async (
   const route = load('api/push.ts', {
     'firebase-admin/firestore': { getFirestore: () => f.db },
     './_lib/appCheck': {}, './_lib/auth': { getFirebaseApp: () => ({}) }, './_lib/rateLimit': {}, './_lib/push': push,
-    './_lib/pushEnvio': f.api,
+    './_lib/pushEnvio': f.api, './_lib/notificacoesGerais': { avancarCampanhasPendentes: async () => ({ campanhas: 0 }) },
   });
   const previous = process.env.CRON_SECRET;
   process.env.CRON_SECRET = 'local-test-secret-at-least-16';

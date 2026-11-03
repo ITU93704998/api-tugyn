@@ -231,6 +231,17 @@ async function processar(db: Firestore, ref: DocumentReference, options: EnvioOp
   return { enviados, ...(pending ? { motivo: "falha-envio", pendente: true } : state === "uncertain" ? { motivo: "envio-incerto" } : state === "failed" ? { motivo: "falha-definitiva" } : {}) };
 }
 
+/** Coleção dos tickets à espera de recibo (lida por `consultarRecibos`). */
+export const COLECAO_RECIBOS = RECIBOS;
+
+/**
+ * Documento de recibos no formato que `consultarRecibos` lê, para quem grava os tickets na própria transação (ex.: os lotes das
+ * notificações gerais). `tickets`: ticketId → id do token; no máximo `EXPO_RECEIPTS_MAX`. `origem`: rótulo sem dados pessoais.
+ */
+export const reciboPendente = (tickets: Record<string, string>, origem: string, time: number) => ({
+  schema: 1 as const, tickets, outboxId: origem, enviadoEm: time, verificarApos: time + RECIBO_ESPERA_MS, expiresAt: new Date(time + RECIBO_TTL_MS),
+});
+
 /** Coleção da fila de avisos (um documento por `dedupeKey`). */
 export const COLECAO_AVISOS = COLLECTION;
 

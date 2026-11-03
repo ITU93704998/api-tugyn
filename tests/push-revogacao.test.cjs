@@ -59,7 +59,7 @@ function rota() {
     './_lib/auth': { getFirebaseApp: () => ({}), requireUser: async (req, res) => logado ?? (res.status(401).json({ error: 'login' }), null) },
     './_lib/rateLimit': { dentroDoLimite: async () => true },
     './_lib/push': push,
-    './_lib/pushEnvio': {},
+    './_lib/pushEnvio': {}, './_lib/notificacoesGerais': {},
   });
   const chamar = async body => {
     const res = { setHeader() {}, status(code) { this.code = code; return this; }, json(data) { this.body = data; return this; } };

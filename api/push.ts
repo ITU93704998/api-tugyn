@@ -24,6 +24,7 @@ import {
   tokenDocId,
 } from "./_lib/push";
 import { consultarRecibos, recuperarAvisosPendentes, enviarAviso } from "./_lib/pushEnvio";
+import { avancarCampanhasPendentes } from "./_lib/notificacoesGerais";
 import { dentroDoLimite } from "./_lib/rateLimit";
 
 /**
@@ -97,11 +98,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const received = new Uint8Array(Buffer.from(typeof req.headers.authorization === "string" ? req.headers.authorization : ""));
     if (!secret || secret.length < 16 || received.length !== expected.length || !timingSafeEqual(received, expected)) return res.status(401).json({ error: "Não autorizado." });
     try {
+      const inicio = Date.now();
       const db = getFirestore(getFirebaseApp());
       const counts = await recuperarAvisosPendentes(db);
       console.log(JSON.stringify({ evt: "push_outbox_recovery", ...counts }));
       const recibos = await consultarRecibos(db);
-      return res.status(200).json({ ok: true, ...counts, recibos });
+      // Notificações gerais do painel que ninguém está acompanhando: continua do ponto em que pararam (com o tempo que sobrou).
+      const campanhas = await avancarCampanhasPendentes(db, { prazoAte: inicio + 56_000 }).catch(() => ({ falhou: 1 }));
+      return res.status(200).json({ ok: true, ...counts, recibos, campanhas });
     } catch {
       console.error(JSON.stringify({ evt: "push_outbox_recovery_failed" }));
       return res.status(503).json({ error: "Não foi possível recuperar os avisos." });
