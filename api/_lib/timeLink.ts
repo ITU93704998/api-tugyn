@@ -22,6 +22,7 @@ export interface JogadorPublico {
   /** Número da camisa (null sem número) e posição já por extenso ("" sem posição). */
   numero: number | null;
   posicao: string;
+  capitao: boolean;
 }
 
 export interface TimePublico {
@@ -88,7 +89,7 @@ export const timeDoDocumento = (dados: unknown): TimePublico | null => {
       const numero = Number.isInteger(camisa?.numero) && (camisa?.numero as number) >= 0 && (camisa?.numero as number) <= 99 ? (camisa?.numero as number) : null;
       // "Treinador" só vale para o dono (as regras já garantem; aqui é defesa extra).
       const posicao = camisa?.posicao === "treinador" ? (uid === donoId ? "Treinador" : "") : POSICOES[String(camisa?.posicao)] ?? "";
-      return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId, numero, posicao }] : [];
+      return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId, numero, posicao, capitao: camisa?.capitao === true }] : [];
     })
     .sort((a, b) => Number(b.dono) - Number(a.dono) || (a.numero ?? 100) - (b.numero ?? 100) || a.nome.localeCompare(b.nome, "pt-BR"));
   return { nome, cor, sigla, detalhes, escudo: fotoPequena(d.escudoUrl, CORTE_ESCUDO), imagem: fotoPequena(d.escudoUrl, CORTE_PREVIA_LINK), jogadores };

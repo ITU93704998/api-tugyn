@@ -177,7 +177,7 @@ test('dados públicos: elenco igual ao da página do time (sem uid nem @usuário
     convites: { bruno: { nome: 'Bruno' } }, chave: 'AB3K9Z', cidade: { city: 'Recife', state: 'PE', lat: 1 },
   }), 'ana');
   const ana = pub.elenco.find((j) => j.nome === 'Ana');
-  assert.deepEqual({ ...ana }, { nome: 'Ana', foto: '', dono: false, numero: 9, posicao: 'Atacante' });
+  assert.deepEqual({ ...ana }, { nome: 'Ana', foto: '', dono: false, numero: 9, posicao: 'Atacante', capitao: false });
   assert.equal(pub.elenco.length, 2);
   assert.equal(pub.elenco.some((j) => j.nome === 'Bruno'), false);
   assert.equal(JSON.stringify(pub).includes('ana.user'), false);
@@ -221,4 +221,13 @@ test('par de times: amistosos com um time que foi apagado não bloqueiam o time 
   const passado = AGORA - 2 * 3600_000;
   const jogo = (status) => ({ de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' }, status, quando: Timestamp.fromMillis(passado), adversarioEncerrado: true });
   assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('sem_acordo'), jogo('aceito')] })), null);
+});
+
+test('resumo público: números do time e só os 2 maiores artilheiros que ainda estão no elenco, sem uid', () => {
+  const d = { jogos: 3, vitorias: 2, empates: 0, derrotas: 1, golsPro: 7, golsContra: 4, jogadores: { a: { nome: 'Ana', gols: 3 }, b: { nome: 'Bia', gols: 2 }, c: { nome: 'Saiu', gols: 5 }, e: { nome: 'Edu', gols: 1 }, z: { nome: 'Zero', gols: 0 } } };
+  const r = A.resumoPublico(d, ['a', 'b', 'e', 'z']);
+  assert.equal(r.jogos, 3);
+  assert.equal(JSON.stringify(r.artilheiros), JSON.stringify([{ nome: 'Ana', gols: 3 }, { nome: 'Bia', gols: 2 }]));
+  assert.equal(A.resumoPublico({ jogos: 0 }, []), null);
+  assert.equal(A.resumoPublico(undefined, []), null);
 });

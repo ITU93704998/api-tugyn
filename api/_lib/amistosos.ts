@@ -360,6 +360,34 @@ const pegarChave = async (db: Firestore, uid: string, timeId: string): Promise<R
   throw new Error("chave: muitas colisões");
 };
 
+const contagem = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+
+/**
+ * Resumo dos amistosos para quem visita o time: números do time e os 2 maiores artilheiros que ainda estão no elenco
+ * (só nome e gols, sem uid). Sem jogos com placar = null.
+ */
+export const resumoPublico = (d: Doc | undefined, membros: unknown[]) => {
+  if (!d || contagem(d.jogos) === 0) return null;
+  const jogadores = (d.jogadores && typeof d.jogadores === "object" ? d.jogadores : {}) as Doc;
+  const artilheiros = Object.entries(jogadores)
+    .flatMap(([u, x]) => {
+      const j = (x && typeof x === "object" ? x : {}) as Doc;
+      const gols = contagem(j.gols);
+      return membros.includes(u) && gols ? [{ nome: texto(j.nome, 40) || "Jogador", gols }] : [];
+    })
+    .sort((a, b) => b.gols - a.gols || a.nome.localeCompare(b.nome, "pt-BR"))
+    .slice(0, 2);
+  return {
+    jogos: contagem(d.jogos),
+    vitorias: contagem(d.vitorias),
+    empates: contagem(d.empates),
+    derrotas: contagem(d.derrotas),
+    golsPro: contagem(d.golsPro),
+    golsContra: contagem(d.golsContra),
+    artilheiros,
+  };
+};
+
 const buscar = async (db: Firestore, uid: string, chave: string): Promise<Resultado> => {
   const ref = await db.doc(`${COLECAO_CHAVES}/${chave}`).get();
   const timeId = ref.exists ? ref.get("timeId") : null;
@@ -390,14 +418,19 @@ const buscar = async (db: Firestore, uid: string, chave: string): Promise<Result
     const { timeId: _id, ...adversario } = resumoDoTime(String(outro.timeId ?? ""), outro);
     return [{
       id: jogo.id,
-      quando: millis(d.quando),
+      quando: millis(d.quando) || (typeof d.quando === "number" && d.quando > 0 ? d.quando : 0),
       adversario: d.adversarioEncerrado === true ? { ...adversario, chave: "" } : adversario,
       golsMeu: meus,
       golsAdversario: deles,
     }];
   });
   const ultimosResultados = ultimosJogos.map((j): "V" | "E" | "D" => (j.golsMeu > j.golsAdversario ? "V" : j.golsMeu === j.golsAdversario ? "E" : "D"));
-  return { ok: true, body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados, ultimosJogos } } };
+  const resumo = await resumoRef(db, time.id).get();
+  const membros = Array.isArray(time.get("membros")) ? (time.get("membros") as unknown[]) : [];
+  return {
+    ok: true,
+    body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados, ultimosJogos, resumo: resumoPublico(resumo.data(), membros) } },
+  };
 };
 
 const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_propor" }>): Promise<Resultado> => {
