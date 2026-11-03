@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import { FieldValue, type Firestore, Timestamp } from "firebase-admin/firestore";
 import { DEDUPE_MS, type PushDraft } from "./push";
 import { enviarAviso } from "./pushEnvio";
+import { timeDoDocumento } from "./timeLink";
 
 /**
  * Chave pública dos times e amistosos entre times (pela rota `POST /api/desafios`: o plano da Vercel não comporta outra função).
@@ -139,7 +140,10 @@ export const resumoDoTime = (timeId: string, d: Doc) => ({
   chave: texto(d.chave, TAMANHO_CHAVE),
 });
 
-/** Só dados PÚBLICOS do time (nada do elenco além de quantos são). */
+/**
+ * Dados PÚBLICOS do time, os mesmos da página do link do time ("Divulgar"): o elenco vai com nome, foto pequena, número
+ * e posição de quem aceitou a convocação (sem uid, @usuário, convocações pendentes, pedidos ou recusas).
+ */
 export const timePublico = (timeId: string, d: Doc, uid: string) => {
   const cidade = d.cidade as { city?: unknown; state?: unknown } | undefined;
   const membros = Array.isArray(d.membros) ? d.membros : [];
@@ -155,6 +159,7 @@ export const timePublico = (timeId: string, d: Doc, uid: string) => {
     faixaEtaria: texto(d.faixaEtaria, 10),
     cidade: cidade?.city ? { city: texto(cidade.city, 100), state: texto(cidade.state, 40) } : null,
     jogadores: membros.length,
+    elenco: timeDoDocumento(d)?.jogadores ?? [],
     chave: texto(d.chave, TAMANHO_CHAVE),
     souDono: d.donoId === uid,
     souMembro: membros.includes(uid),

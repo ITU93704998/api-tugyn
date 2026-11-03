@@ -87,8 +87,17 @@ test('cancelar: qualquer um dos donos, pendente ou aceito, antes do jogo', () =>
   assert.equal(A.motivoParaNaoCancelar('ana', AGORA, 'dono_1', time(), amistoso).code, 'nao-dono');
 });
 
-test('dados públicos: nada do elenco além da contagem', () => {
-  const pub = A.timePublico('dono_1', time({ jogadores: { ana: { nome: 'Ana' } }, convites: {}, chave: 'AB3K9Z', cidade: { city: 'Recife', state: 'PE', lat: 1 } }), 'ana');
+test('dados públicos: elenco igual ao da página do time (sem uid nem @usuário)', () => {
+  const pub = A.timePublico('dono_1', time({
+    jogadores: { ana: { nome: 'Ana', userName: 'ana.user', foto: '' }, dono: { nome: 'Zeca', userName: 'zeca' } },
+    camisas: { ana: { numero: 9, posicao: 'atacante' } },
+    convites: { bruno: { nome: 'Bruno' } }, chave: 'AB3K9Z', cidade: { city: 'Recife', state: 'PE', lat: 1 },
+  }), 'ana');
+  const ana = pub.elenco.find((j) => j.nome === 'Ana');
+  assert.deepEqual({ ...ana }, { nome: 'Ana', foto: '', dono: false, numero: 9, posicao: 'Atacante' });
+  assert.equal(pub.elenco.length, 2);
+  assert.equal(pub.elenco.some((j) => j.nome === 'Bruno'), false);
+  assert.equal(JSON.stringify(pub).includes('ana.user'), false);
   assert.equal(pub.jogadores, 2);
   assert.equal(pub.souMembro, true);
   assert.equal(pub.souDono, false);
