@@ -206,3 +206,22 @@ test('recovery HTTP endpoint refuses public and Firebase-user requests', async (
     assert.equal(res.code, 200);
   } finally { if (previous === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = previous; }
 });
+
+test('aviso gravado como pendente na transação da ação: o envio assume o registro e não duplica', async () => {
+  const f = fixture();
+  f.seed(f.api.avisoPendente({ ...f.aviso, recipientUids: ['recipient', 'recipient'] }, 1_000_000));
+  assert.equal(f.job().state, 'pending');
+  assert.deepEqual([...f.job().aviso.recipientUids], ['recipient']);
+  await f.send();
+  await f.send();
+  assert.equal(f.calls, 1);
+  assert.equal(f.job().state, 'done');
+});
+
+test('aviso pendente sem envio (função caiu) sai pela recuperação da fila', async () => {
+  const f = fixture();
+  f.seed(f.api.avisoPendente(f.aviso, 1_000_000));
+  await f.recover();
+  assert.equal(f.calls, 1);
+  assert.equal(f.job().state, 'done');
+});

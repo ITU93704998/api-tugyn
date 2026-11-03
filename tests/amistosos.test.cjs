@@ -209,3 +209,16 @@ test('avisos: texto e destino (abre o time na aba Jogos)', () => {
   assert.equal(A.avisoDeAmistoso('placar', comPlacar, { nome: 'Os Brabos' }, 'rival_1').body, 'Os Brabos informou o placar: Os Brabos 3 x 2 Rivais. Confirme em até 1 hora.');
   assert.match(A.avisoDeAmistoso('sem_acordo', comPlacar, { nome: 'Rivais' }, 'dono_1').body, /não podem mais se enfrentar/);
 });
+
+test('artilheiros: quem saiu do time mantém e pode ter os gols corrigidos; estranho continua barrado', () => {
+  const a = { de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' }, status: 'finalizado', resultado: { golsDe: 3, golsPara: 1 }, finalizadoEm: Timestamp.fromMillis(AGORA - 3600_000), artilheiros: { ze: 2 } };
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { ze: 2, ana: 1 }), null);
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { ze: 1 }), null);
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { outro: 1 }).code, 'jogador');
+});
+
+test('par de times: amistosos com um time que foi apagado não bloqueiam o time novo na mesma vaga', () => {
+  const passado = AGORA - 2 * 3600_000;
+  const jogo = (status) => ({ de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' }, status, quando: Timestamp.fromMillis(passado), adversarioEncerrado: true });
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('sem_acordo'), jogo('aceito')] })), null);
+});

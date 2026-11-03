@@ -231,6 +231,33 @@ async function processar(db: Firestore, ref: DocumentReference, options: EnvioOp
   return { enviados, ...(pending ? { motivo: "falha-envio", pendente: true } : state === "uncertain" ? { motivo: "envio-incerto" } : state === "failed" ? { motivo: "falha-definitiva" } : {}) };
 }
 
+/** Coleção da fila de avisos (um documento por `dedupeKey`). */
+export const COLECAO_AVISOS = COLLECTION;
+
+/**
+ * Aviso já na fila, esperando o envio: gravado na MESMA transação da ação que o gera. Se a função cair antes de enviar,
+ * `recuperarAvisosPendentes` envia depois; `enviarAviso` com a mesma chave assume este registro (não duplica).
+ */
+export const avisoPendente = (aviso: Aviso, time: number) => ({
+  schema: 1 as const,
+  state: "pending" as State,
+  aviso: { ...aviso, recipientUids: [...new Set(aviso.recipientUids)] },
+  notificationId: randomUUID(),
+  createdAt: time,
+  deadlineAt: time + Math.min(aviso.dedupeMs, 24 * 3600_000),
+  at: time,
+  owner: "",
+  leaseUntil: 0,
+  nextAttemptAt: time,
+  batchIds: [],
+  outcomes: {},
+  tries: {},
+  evento: aviso.evento,
+  turmaId: aviso.turmaId,
+  targetUid: aviso.dedupeUid,
+  expiresAt: new Date(time + DEDUPE_TTL_MS),
+});
+
 export async function enviarAviso(db: Firestore, aviso: Aviso, options: EnvioOptions = {}): Promise<EnvioResult> {
   if (!aviso.recipientUids.length) return { enviados: 0, motivo: "sem-destinatarios" };
   return processar(db, db.doc(`${COLLECTION}/${aviso.dedupeKey}`), options, aviso);

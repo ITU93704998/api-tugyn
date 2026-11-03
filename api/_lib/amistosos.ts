@@ -18,7 +18,7 @@ import {
   resumoDoResultado,
 } from "./amistososResultado";
 import { DEDUPE_MS, type PushDraft } from "./push";
-import { enviarAviso } from "./pushEnvio";
+import { type Aviso, COLECAO_AVISOS, avisoPendente, enviarAviso } from "./pushEnvio";
 import { timeDoDocumento } from "./timeLink";
 
 /**
@@ -28,8 +28,8 @@ import { timeDoDocumento } from "./timeLink";
  *  - amistoso_propor { timeId, adversarioId, data, hora, local }   o dono convida outro time da mesma modalidade
  *  - amistoso_responder { timeId, amistosoId, aceitar }       o dono do time convidado aceita ou recusa
  *  - amistoso_cancelar { timeId, amistosoId }                 o dono de qualquer um dos dois desmarca (antes do jogo)
- *  - time_encerrar { timeId }                                  o dono vai apagar o time: cancela os amistosos em aberto
- *                                                               nos adversários e apaga a chave (a exclusão de conta também)
+ *  - time_encerrar { timeId }                                  o dono apaga o time: cancela os amistosos em aberto nos
+ *                                                               adversários, apaga a chave, o histórico, o resumo e o time
  *  - amistoso_placar { timeId, amistosoId, golsMeu, golsOutro }   finalizar a partida (ou não concordar mandando outro placar)
  *  - amistoso_confirmar { timeId, amistosoId }                 o outro time confirma o placar
  *  - amistoso_recusar_placar { timeId, amistosoId }            não concordar de novo: o jogo fica sem acordo
@@ -245,10 +245,12 @@ export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
   if (c.bloqueio) return negar(403, "bloqueado", "Não é possível marcar amistoso com este time.");
   if (c.quando < c.agora + ANTECEDENCIA_MS) return negar(400, "cedo", "Escolha um horário com pelo menos 30 minutos de antecedência.");
   if (c.quando > c.agora + PRAZO_MAXIMO_MS) return negar(400, "longe", "Marque com no máximo 120 dias de antecedência.");
-  if (c.comEle.some((a) => a.status === "sem_acordo")) {
+  // Amistosos com um time que foi apagado (e talvez recriado com o mesmo id) não contam.
+  const comEle = c.comEle.filter((a) => a.adversarioEncerrado !== true);
+  if (comEle.some((a) => a.status === "sem_acordo")) {
     return negar(409, "sem-acordo", "Estes times não podem mais se enfrentar: um amistoso entre eles terminou sem acordo no placar.");
   }
-  if (c.comEle.some((a) => emAndamento(a, c.agora))) return negar(409, "em-andamento", "Já existe um amistoso em andamento entre esses times.");
+  if (comEle.some((a) => emAndamento(a, c.agora))) return negar(409, "em-andamento", "Já existe um amistoso em andamento entre esses times.");
   const enviados = c.pendentes.filter((p) => (p.de as Doc)?.timeId === c.meuId).length;
   if (enviados >= MAX_PENDENTES) return negar(429, "muitos", `Seu time já tem ${MAX_PENDENTES} convites esperando resposta.`);
   return null;
@@ -309,14 +311,26 @@ export const avisoDeAmistoso = (evento: EventoAmistoso, amistoso: Doc, quemAgiu:
   }
 };
 
-/** Melhor esforço: a ação já está salva. */
-const avisar = async (db: Firestore, para: string, amistosoId: string, evento: EventoAmistoso, draft: PushDraft): Promise<void> => {
-  if (!para) return;
+/**
+ * Avisos: nascem na MESMA transação da ação (`agendarAviso`, na fila de push) e são enviados logo depois
+ * (`dispararAviso`). Se o envio falhar ou a função cair no meio, a rotina de recuperação da fila manda depois.
+ */
+const prepararAviso = (para: string, amistosoId: string, evento: EventoAmistoso, draft: PushDraft): Aviso | null =>
+  para
+    ? { evento: draft.data.tipo, turmaId: "", dedupeKey: `amistoso_${evento}_${amistosoId}_${para}`, dedupeMs: DEDUPE_MS, recipientUids: [para], dedupeUid: para, draft }
+    : null;
+
+const agendarAviso = (tx: Transaction, db: Firestore, aviso: Aviso | null): void => {
+  if (aviso) tx.set(db.doc(`${COLECAO_AVISOS}/${aviso.dedupeKey}`), avisoPendente(aviso, Date.now()));
+};
+
+/** Melhor esforço: a ação e o aviso já estão salvos. */
+const dispararAviso = async (db: Firestore, aviso: Aviso | null): Promise<void> => {
+  if (!aviso) return;
   try {
-    const dedupeKey = `amistoso_${evento}_${amistosoId}_${para}`;
-    await enviarAviso(db, { evento: draft.data.tipo, turmaId: "", dedupeKey, dedupeMs: DEDUPE_MS, recipientUids: [para], dedupeUid: para, draft });
+    await enviarAviso(db, aviso);
   } catch (erro) {
-    console.warn("[amistosos] aviso não enviado:", (erro as Error)?.message ?? "erro");
+    console.warn("[amistosos] aviso fica na fila:", (erro as Error)?.message ?? "erro");
   }
 };
 
@@ -394,10 +408,12 @@ const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { 
     };
     tx.create(amistosoRef(db, p.timeId, id), doc);
     tx.create(amistosoRef(db, p.adversarioId, id), doc);
-    return { ok: true as const, doc, donoAdversario };
+    const aviso = prepararAviso(donoAdversario, id, "novo", avisoDeAmistoso("novo", doc, doc.de, p.adversarioId));
+    agendarAviso(tx, db, aviso);
+    return { ok: true as const, aviso };
   });
   if (!resultado.ok) return resultado;
-  await avisar(db, resultado.donoAdversario, id, "novo", avisoDeAmistoso("novo", { ...resultado.doc, quando: Timestamp.fromMillis(quando) }, resultado.doc.de, p.adversarioId));
+  await dispararAviso(db, resultado.aviso);
   return { ok: true, body: { amistosoId: id } };
 };
 
@@ -409,7 +425,8 @@ const mudarStatus = async (
   amistosoId: string,
   validar: (meu: Doc | null, amistoso: Doc | null) => Negado | null,
   novoStatus: (amistoso: Doc) => StatusAmistoso,
-): Promise<Resultado | { ok: true; amistoso: Doc; outro: Doc; outroDono: string; status: StatusAmistoso }> =>
+  avisoDe: (amistoso: Doc, outro: Doc, outroDono: string) => Aviso | null,
+): Promise<Resultado | { ok: true; amistoso: Doc; outro: Doc; outroDono: string; status: StatusAmistoso; aviso: Aviso | null }> =>
   db.runTransaction(async (tx) => {
     const [meu, minhaCopia] = await tx.getAll(timeRef(db, meuId), amistosoRef(db, meuId, amistosoId));
     const amistoso = minhaCopia.exists ? (minhaCopia.data() ?? {}) : null;
@@ -426,43 +443,69 @@ const mudarStatus = async (
     tx.update(minhaCopia.ref, mudanca);
     if (outraCopia?.exists) tx.update(outraCopia.ref, mudanca);
     if (!outroTime?.exists) return negar(409, "time-apagado", "O outro time não existe mais. O amistoso foi cancelado.");
-    return { ok: true as const, amistoso, outro, outroDono: String(outroTime.get("donoId") ?? ""), status };
+    const outroDono = String(outroTime.get("donoId") ?? "");
+    const aviso = avisoDe(amistoso, outro, outroDono);
+    agendarAviso(tx, db, aviso);
+    return { ok: true as const, amistoso, outro, outroDono, status, aviso };
   });
 
 const responder = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_responder" }>): Promise<Resultado> => {
-  const r = await mudarStatus(db, uid, p.timeId, p.amistosoId, (meu, a) => motivoParaNaoResponder(uid, Date.now(), p.timeId, meu, a), () => (p.aceitar ? "aceito" : "recusado"));
-  if (!r.ok || !("amistoso" in r)) return r;
   const evento: EventoAmistoso = p.aceitar ? "aceito" : "recusado";
-  await avisar(db, r.outroDono, p.amistosoId, evento, avisoDeAmistoso(evento, r.amistoso, r.amistoso.para as Doc, String(r.outro.timeId)));
+  const r = await mudarStatus(
+    db,
+    uid,
+    p.timeId,
+    p.amistosoId,
+    (meu, a) => motivoParaNaoResponder(uid, Date.now(), p.timeId, meu, a),
+    () => (p.aceitar ? "aceito" : "recusado"),
+    (a, outro, dono) => prepararAviso(dono, p.amistosoId, evento, avisoDeAmistoso(evento, a, a.para as Doc, String(outro.timeId))),
+  );
+  if (!r.ok || !("amistoso" in r)) return r;
+  await dispararAviso(db, r.aviso);
   return { ok: true, body: { status: r.status } };
 };
 
 const cancelar = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_cancelar" }>): Promise<Resultado> => {
-  const r = await mudarStatus(db, uid, p.timeId, p.amistosoId, (meu, a) => motivoParaNaoCancelar(uid, Date.now(), p.timeId, meu, a), () => "cancelado");
+  const r = await mudarStatus(
+    db,
+    uid,
+    p.timeId,
+    p.amistosoId,
+    (meu, a) => motivoParaNaoCancelar(uid, Date.now(), p.timeId, meu, a),
+    () => "cancelado",
+    (a, outro, dono) => prepararAviso(dono, p.amistosoId, "cancelado", avisoDeAmistoso("cancelado", a, meuLado(a, p.timeId), String(outro.timeId))),
+  );
   if (!r.ok || !("amistoso" in r)) return r;
-  const eu = (r.amistoso.de as Doc)?.timeId === p.timeId ? (r.amistoso.de as Doc) : (r.amistoso.para as Doc);
-  await avisar(db, r.outroDono, p.amistosoId, "cancelado", avisoDeAmistoso("cancelado", r.amistoso, eu, String(r.outro.timeId)));
+  await dispararAviso(db, r.aviso);
   return { ok: true, body: { status: "cancelado" } };
 };
 
 /**
- * O time vai sumir (o dono apaga, ou a conta é excluída): os amistosos em aberto viram "cancelado" na cópia do adversário
- * e a chave é apagada. A cópia do próprio time some junto com o time. Idempotente.
+ * O time vai sumir (o dono apaga, ou a conta é excluída). Na cópia de cada adversário, o amistoso em aberto vira
+ * "cancelado" e todos ficam marcados `adversarioEncerrado` (histórico preservado para ele, mas não bloqueiam nem contam
+ * como "em andamento" se um time novo nascer com o mesmo id). As cópias do próprio time, a chave e o resumo são apagados:
+ * um time novo na mesma vaga (`uid_1`) começa sem histórico. Idempotente.
  */
 export const encerrarAmistososDoTime = async (db: Firestore, timeId: string): Promise<number> => {
-  const abertos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).where("status", "in", ["pendente", "aceito", "placar"]).get();
+  const todos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).get();
   let cancelados = 0;
-  for (const doc of abertos.docs) {
-    const outroId = String(outroLado(doc.data(), timeId).timeId ?? "");
-    const mudanca = { status: "cancelado", canceladoPor: timeId, respondidoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp() };
+  for (const doc of todos.docs) {
+    const dados = doc.data();
+    const aberto = ["pendente", "aceito", "placar"].includes(String(dados.status));
+    const outroId = String(outroLado(dados, timeId).timeId ?? "");
     const lote = db.batch();
-    lote.update(doc.ref, mudanca);
     if (TIME_ID.test(outroId)) {
       const outra = await amistosoRef(db, outroId, doc.id).get();
-      if (outra.exists) lote.update(outra.ref, mudanca);
+      if (outra.exists) {
+        lote.update(outra.ref, {
+          adversarioEncerrado: true,
+          ...(aberto ? { status: "cancelado", canceladoPor: timeId, respondidoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp() } : {}),
+        });
+      }
     }
+    lote.delete(doc.ref);
     await lote.commit();
-    cancelados += 1;
+    if (aberto) cancelados += 1;
   }
   const chaves = await db.collection(COLECAO_CHAVES).where("timeId", "==", timeId).get();
   for (const chave of chaves.docs) await chave.ref.delete();
@@ -509,7 +552,7 @@ const somarNoResumo = (tx: Transaction, db: Firestore, timeId: string, golsPro: 
   );
 };
 
-type Feito = { ok: true; amistoso: Doc; outro: Doc; outroDono: string; plano: Plano };
+type Feito = { ok: true; amistoso: Doc; outro: Doc; outroDono: string; plano: Plano; aviso: Aviso | null };
 
 /**
  * Lê o amistoso (e o outro time) numa transação e aplica o plano nas duas cópias. Se a ação foi negada mas um prazo já
@@ -520,6 +563,7 @@ const agirNoResultado = (
   meuId: string,
   amistosoId: string,
   acao: (meu: Doc | null, amistoso: Doc | null, agora: number) => Negado | Plano,
+  avisoDe?: (feito: Omit<Feito, "aviso">) => Aviso | null,
 ): Promise<Negado | Feito> =>
   db.runTransaction(async (tx) => {
     const [meu, minhaCopia] = await tx.getAll(timeRef(db, meuId), amistosoRef(db, meuId, amistosoId));
@@ -550,7 +594,10 @@ const agirNoResultado = (
     }
     gravar(mudanca);
     if ("ok" in pedido) return pedido;
-    return { ok: true as const, amistoso: { ...amistoso, ...mudanca }, outro, outroDono: String(outroTime.get("donoId") ?? ""), plano };
+    const feito = { ok: true as const, amistoso: { ...amistoso, ...mudanca }, outro, outroDono: String(outroTime.get("donoId") ?? ""), plano };
+    const aviso = avisoDe?.(feito) ?? null;
+    agendarAviso(tx, db, aviso);
+    return { ...feito, aviso };
   });
 
 /** O time de quem agiu, visto no amistoso. */
@@ -563,10 +610,12 @@ const informarPlacar = async (db: Firestore, uid: string, p: Extract<AmistosoReq
     const rodada = efetivo(a, agora).status === "placar" ? 2 : 1;
     const placar = placarDoDocumento(a, p.timeId, p.golsMeu, p.golsOutro);
     return { status: "placar", campos: { proposta: { porTimeId: p.timeId, ...placar, rodada, venceEm: Timestamp.fromMillis(agora + PRAZO_PLACAR_MS) } } };
+  }, (f) => {
+    const evento: EventoAmistoso = (f.plano.campos?.proposta as Doc)?.rodada === 2 ? "contestado" : "placar";
+    return prepararAviso(f.outroDono, p.amistosoId, evento, avisoDeAmistoso(evento, f.amistoso, meuLado(f.amistoso, p.timeId), String(f.outro.timeId)));
   });
   if (!r.ok) return r;
-  const evento: EventoAmistoso = (r.plano.campos?.proposta as Doc)?.rodada === 2 ? "contestado" : "placar";
-  await avisar(db, r.outroDono, p.amistosoId, evento, avisoDeAmistoso(evento, r.amistoso, meuLado(r.amistoso, p.timeId), String(r.outro.timeId)));
+  await dispararAviso(db, r.aviso);
   return { ok: true, body: { status: "placar" } };
 };
 
@@ -576,9 +625,9 @@ const confirmarPlacar = async (db: Firestore, uid: string, p: Extract<AmistosoRe
     const proposta = a ? propostaDe(a) : null;
     if (negado || !proposta) return negado ?? negar(409, "estado", "Não foi possível ler o placar enviado. Tente de novo.");
     return { status: "finalizado", resultado: { golsDe: proposta.golsDe, golsPara: proposta.golsPara }, como: "confirmado" };
-  });
+  }, (f) => prepararAviso(f.outroDono, p.amistosoId, "confirmado", avisoDeAmistoso("confirmado", f.amistoso, meuLado(f.amistoso, p.timeId), String(f.outro.timeId))));
   if (!r.ok) return r;
-  await avisar(db, r.outroDono, p.amistosoId, "confirmado", avisoDeAmistoso("confirmado", r.amistoso, meuLado(r.amistoso, p.timeId), String(r.outro.timeId)));
+  await dispararAviso(db, r.aviso);
   return { ok: true, body: { status: "finalizado" } };
 };
 
@@ -586,9 +635,9 @@ const recusarPlacar = async (db: Firestore, uid: string, p: Extract<AmistosoRequ
   const r = await agirNoResultado(db, p.timeId, p.amistosoId, (meu, a, agora) => {
     const negado = motivoParaNaoRecusarPlacar(uid, agora, p.timeId, meu, a);
     return negado ?? { status: "sem_acordo", campos: { semAcordoEm: FieldValue.serverTimestamp() } };
-  });
+  }, (f) => prepararAviso(f.outroDono, p.amistosoId, "sem_acordo", avisoDeAmistoso("sem_acordo", f.amistoso, meuLado(f.amistoso, p.timeId), String(f.outro.timeId))));
   if (!r.ok) return r;
-  await avisar(db, r.outroDono, p.amistosoId, "sem_acordo", avisoDeAmistoso("sem_acordo", r.amistoso, meuLado(r.amistoso, p.timeId), String(r.outro.timeId)));
+  await dispararAviso(db, r.aviso);
   return { ok: true, body: { status: "sem_acordo" } };
 };
 
@@ -630,12 +679,23 @@ const apurar = async (db: Firestore, uid: string, timeId: string): Promise<Resul
   return { ok: true, body: { apurados } };
 };
 
+/** Apaga o time inteiro no servidor (amistosos, chave, resumo, prévia do link e o documento). Repetir é seguro. */
 const encerrar = async (db: Firestore, uid: string, timeId: string): Promise<Resultado> => {
   const time = await timeRef(db, timeId).get();
   // Já apagado: o id do time começa com o uid do dono (`uid_1`, `uid_2`).
   const ehDono = time.exists ? time.get("donoId") === uid : timeId.startsWith(`${uid}_`);
   if (!ehDono) return negar(403, "nao-dono", "Só o dono encerra o time.");
-  return { ok: true, body: { cancelados: await encerrarAmistososDoTime(db, timeId) } };
+  const cancelados = await encerrarAmistososDoTime(db, timeId);
+  if (time.exists) {
+    const codigo = time.get("conviteCodigo");
+    if (typeof codigo === "string" && /^[A-Za-z0-9]{16}$/.test(codigo)) {
+      const previa = db.doc(`convitesTime/${codigo}`);
+      const snap = await previa.get();
+      if (snap.exists && snap.get("timeId") === timeId) await previa.delete();
+    }
+    await db.recursiveDelete(timeRef(db, timeId));
+  }
+  return { ok: true, body: { cancelados, apagado: true } };
 };
 
 export const executarAmistoso = (db: Firestore, uid: string, pedido: AmistosoRequest): Promise<Resultado> => {

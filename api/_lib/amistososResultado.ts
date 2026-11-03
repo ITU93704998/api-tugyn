@@ -152,8 +152,10 @@ export const motivoParaNaoMarcarArtilheiros = (
   if (String(a.status) !== "finalizado") return negar(409, "nao-finalizado", "Só depois de o placar ser confirmado.");
   if (millis(a.finalizadoEm) + PRAZO_ARTILHEIROS_MS < agora) return negar(409, "prazo", "O prazo para marcar quem fez os gols (7 dias) acabou.");
   const membros = Array.isArray(meu?.membros) ? (meu?.membros as unknown[]) : [];
+  // Quem já tinha gols marcados e saiu do time continua podendo ser corrigido (ou zerado).
+  const jaMarcados = a.artilheiros && typeof a.artilheiros === "object" ? Object.keys(a.artilheiros as Doc) : [];
   const entradas = Object.entries(gols);
-  if (entradas.some(([u, n]) => !membros.includes(u) || !Number.isInteger(n) || n < 1 || n > MAX_GOLS)) {
+  if (entradas.some(([u, n]) => (!membros.includes(u) && !jaMarcados.includes(u)) || !Number.isInteger(n) || n < 1 || n > MAX_GOLS)) {
     return negar(400, "jogador", "Escolha só jogadores do elenco, com pelo menos 1 gol cada.");
   }
   const total = entradas.reduce((s, [, n]) => s + n, 0);
