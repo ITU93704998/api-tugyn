@@ -366,7 +366,21 @@ const buscar = async (db: Firestore, uid: string, chave: string): Promise<Result
   const time = typeof timeId === "string" ? await timeRef(db, timeId).get() : null;
   // Chave de time apagado (ou trocada) = não encontrado.
   if (!time?.exists || time.get("chave") !== chave) return negar(404, "nao-encontrado", "Nenhum time com essa chave.");
-  return { ok: true, body: { time: timePublico(time.id, time.data() ?? {}, uid) } };
+  // Somente jogos encerrados têm finalizadoEm. Consulta limitada, sem expor o histórico privado.
+  const jogos = await db.collection(`times/${time.id}/${SUB_AMISTOSOS}`)
+    .orderBy("finalizadoEm", "desc").limit(5).get();
+  const ultimosResultados = jogos.docs.flatMap((jogo): ("V" | "E" | "D")[] => {
+    const d = jogo.data();
+    const placar = d.resultado as { golsDe?: unknown; golsPara?: unknown } | undefined;
+    if (d.status !== "finalizado" || !placar
+      || typeof placar.golsDe !== "number" || typeof placar.golsPara !== "number"
+      || !Number.isInteger(placar.golsDe) || !Number.isInteger(placar.golsPara)
+      || placar.golsDe < 0 || placar.golsPara < 0 || placar.golsDe > MAX_GOLS || placar.golsPara > MAX_GOLS) return [];
+    const meus = d.de?.timeId === time.id ? placar.golsDe : placar.golsPara;
+    const deles = d.de?.timeId === time.id ? placar.golsPara : placar.golsDe;
+    return [meus > deles ? "V" : meus === deles ? "E" : "D"];
+  });
+  return { ok: true, body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados } } };
 };
 
 const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_propor" }>): Promise<Resultado> => {
