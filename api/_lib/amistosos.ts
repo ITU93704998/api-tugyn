@@ -369,7 +369,9 @@ const buscar = async (db: Firestore, uid: string, chave: string): Promise<Result
   // Somente jogos encerrados têm finalizadoEm. Consulta limitada, sem expor o histórico privado.
   const jogos = await db.collection(`times/${time.id}/${SUB_AMISTOSOS}`)
     .orderBy("finalizadoEm", "desc").limit(5).get();
-  const ultimosResultados = jogos.docs.flatMap((jogo): ("V" | "E" | "D")[] => {
+  // Os mesmos 5 jogos na aba Jogos de quem visita: data, adversário (dados públicos dele) e placar. Sem local nem gols
+  // por jogador. Adversário apagado vai sem a chave (não dá mais para abrir).
+  const ultimosJogos = jogos.docs.flatMap((jogo) => {
     const d = jogo.data();
     const placar = d.resultado as { golsDe?: unknown; golsPara?: unknown } | undefined;
     if (d.status !== "finalizado" || !placar
@@ -378,9 +380,18 @@ const buscar = async (db: Firestore, uid: string, chave: string): Promise<Result
       || placar.golsDe < 0 || placar.golsPara < 0 || placar.golsDe > MAX_GOLS || placar.golsPara > MAX_GOLS) return [];
     const meus = d.de?.timeId === time.id ? placar.golsDe : placar.golsPara;
     const deles = d.de?.timeId === time.id ? placar.golsPara : placar.golsDe;
-    return [meus > deles ? "V" : meus === deles ? "E" : "D"];
+    const outro = outroLado(d, time.id);
+    const { timeId: _id, ...adversario } = resumoDoTime(String(outro.timeId ?? ""), outro);
+    return [{
+      id: jogo.id,
+      quando: millis(d.quando),
+      adversario: d.adversarioEncerrado === true ? { ...adversario, chave: "" } : adversario,
+      golsMeu: meus,
+      golsAdversario: deles,
+    }];
   });
-  return { ok: true, body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados } } };
+  const ultimosResultados = ultimosJogos.map((j): "V" | "E" | "D" => (j.golsMeu > j.golsAdversario ? "V" : j.golsMeu === j.golsAdversario ? "E" : "D"));
+  return { ok: true, body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados, ultimosJogos } } };
 };
 
 const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_propor" }>): Promise<Resultado> => {
