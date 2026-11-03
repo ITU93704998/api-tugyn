@@ -1,5 +1,22 @@
 import { randomInt } from "node:crypto";
-import { FieldValue, type Firestore, Timestamp } from "firebase-admin/firestore";
+import { FieldValue, type Firestore, Timestamp, type Transaction } from "firebase-admin/firestore";
+import {
+  MAX_GOLS,
+  PRAZO_PLACAR_MS,
+  type StatusAmistoso,
+  diferencaDeGols,
+  efetivo,
+  emAndamento,
+  millis,
+  motivoParaNaoConfirmarPlacar,
+  motivoParaNaoInformarPlacar,
+  motivoParaNaoMarcarArtilheiros,
+  motivoParaNaoRecusarPlacar,
+  placarDoDocumento,
+  placarTexto,
+  propostaDe,
+  resumoDoResultado,
+} from "./amistososResultado";
 import { DEDUPE_MS, type PushDraft } from "./push";
 import { enviarAviso } from "./pushEnvio";
 import { timeDoDocumento } from "./timeLink";
@@ -13,17 +30,26 @@ import { timeDoDocumento } from "./timeLink";
  *  - amistoso_cancelar { timeId, amistosoId }                 o dono de qualquer um dos dois desmarca (antes do jogo)
  *  - time_encerrar { timeId }                                  o dono vai apagar o time: cancela os amistosos em aberto
  *                                                               nos adversários e apaga a chave (a exclusão de conta também)
+ *  - amistoso_placar { timeId, amistosoId, golsMeu, golsOutro }   finalizar a partida (ou não concordar mandando outro placar)
+ *  - amistoso_confirmar { timeId, amistosoId }                 o outro time confirma o placar
+ *  - amistoso_recusar_placar { timeId, amistosoId }            não concordar de novo: o jogo fica sem acordo
+ *  - amistoso_artilheiros { timeId, amistosoId, gols }         o dono marca quem fez os gols do próprio time
+ *  - amistoso_apurar { timeId }                                alguém do elenco abre os jogos: aplica os prazos vencidos
+ * Regras do resultado em `amistososResultado.ts`. O retrospecto de cada time fica em `times/{id}/resumo/geral`.
  * O amistoso fica em `times/{id}/amistosos/{amistosoId}` com uma cópia em cada time (o elenco de cada um lê a sua; o app
  * não grava). A chave fica em `chavesTime/{chave}` (só o servidor lê e grava) e no campo `chave` do time.
  */
 
 export const COLECAO_CHAVES = "chavesTime";
 export const SUB_AMISTOSOS = "amistosos";
+export const SUB_RESUMO = "resumo";
 /** Sem letras e números que se confundem (O/0, I/1). */
 const ALFABETO = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const TAMANHO_CHAVE = 6;
 const CHAVE = /^[A-HJ-NP-Z2-9]{6}$/;
 const TIME_ID = /^[A-Za-z0-9_-]{1,128}_[12]$/;
+const UID = /^[A-Za-z0-9_-]{1,128}$/;
+const MAX_ARTILHEIROS = 40;
 const AMISTOSO_ID = /^[A-Za-z0-9]{20}$/;
 const DATA = /^(\d{4})-(\d{2})-(\d{2})$/;
 const HORA = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -38,7 +64,7 @@ const NOME_MAX = 40;
 /** Brasília (sem horário de verão desde 2019). */
 const FUSO_MS = -3 * 3600_000;
 
-export type StatusAmistoso = "pendente" | "aceito" | "recusado" | "cancelado";
+export type { StatusAmistoso };
 
 export type AmistosoRequest =
   | { action: "time_chave"; timeId: string }
@@ -46,7 +72,12 @@ export type AmistosoRequest =
   | { action: "amistoso_propor"; timeId: string; adversarioId: string; data: string; hora: string; local: string }
   | { action: "amistoso_responder"; timeId: string; amistosoId: string; aceitar: boolean }
   | { action: "amistoso_cancelar"; timeId: string; amistosoId: string }
-  | { action: "time_encerrar"; timeId: string };
+  | { action: "time_encerrar"; timeId: string }
+  | { action: "amistoso_placar"; timeId: string; amistosoId: string; golsMeu: number; golsOutro: number }
+  | { action: "amistoso_confirmar"; timeId: string; amistosoId: string }
+  | { action: "amistoso_recusar_placar"; timeId: string; amistosoId: string }
+  | { action: "amistoso_artilheiros"; timeId: string; amistosoId: string; gols: Record<string, number> }
+  | { action: "amistoso_apurar"; timeId: string };
 
 type Parse = { ok: true; value: AmistosoRequest } | { ok: false; error: string };
 
@@ -117,8 +148,27 @@ export const parseAmistosoBody = (body: unknown): Parse => {
       if (typeof b.aceitar !== "boolean") return { ok: false, error: "Resposta inválida." };
       return { ok: true, value: { action: "amistoso_responder", timeId: b.timeId as string, amistosoId: b.amistosoId, aceitar: b.aceitar } };
     case "amistoso_cancelar":
+    case "amistoso_confirmar":
+    case "amistoso_recusar_placar":
       if (!timeOk || typeof b.amistosoId !== "string" || !AMISTOSO_ID.test(b.amistosoId)) return { ok: false, error: "Amistoso inválido." };
-      return { ok: true, value: { action: "amistoso_cancelar", timeId: b.timeId as string, amistosoId: b.amistosoId } };
+      return { ok: true, value: { action: b.action, timeId: b.timeId as string, amistosoId: b.amistosoId } };
+    case "amistoso_placar": {
+      if (!timeOk || typeof b.amistosoId !== "string" || !AMISTOSO_ID.test(b.amistosoId)) return { ok: false, error: "Amistoso inválido." };
+      const gol = (v: unknown) => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= MAX_GOLS;
+      if (!gol(b.golsMeu) || !gol(b.golsOutro)) return { ok: false, error: `Placar inválido (de 0 a ${MAX_GOLS} gols).` };
+      return { ok: true, value: { action: "amistoso_placar", timeId: b.timeId as string, amistosoId: b.amistosoId, golsMeu: b.golsMeu as number, golsOutro: b.golsOutro as number } };
+    }
+    case "amistoso_artilheiros": {
+      if (!timeOk || typeof b.amistosoId !== "string" || !AMISTOSO_ID.test(b.amistosoId)) return { ok: false, error: "Amistoso inválido." };
+      const g = b.gols;
+      if (typeof g !== "object" || g === null || Array.isArray(g)) return { ok: false, error: "Gols inválidos." };
+      const entradas = Object.entries(g as Record<string, unknown>);
+      const valido = ([u, n]: [string, unknown]) => UID.test(u) && Number.isInteger(n) && (n as number) >= 1 && (n as number) <= MAX_GOLS;
+      if (entradas.length > MAX_ARTILHEIROS || !entradas.every(valido)) return { ok: false, error: "Gols inválidos." };
+      return { ok: true, value: { action: "amistoso_artilheiros", timeId: b.timeId as string, amistosoId: b.amistosoId, gols: Object.fromEntries(entradas) as Record<string, number> } };
+    }
+    case "amistoso_apurar":
+      return timeOk ? { ok: true, value: { action: "amistoso_apurar", timeId: b.timeId as string } } : { ok: false, error: "Time inválido." };
     default:
       return { ok: false, error: "Ação inválida." };
   }
@@ -179,6 +229,8 @@ export interface CenarioProposta {
   bloqueio: boolean;
   /** Amistosos pendentes que o MEU time tem (enviados e recebidos). */
   pendentes: Doc[];
+  /** Todos os amistosos do MEU time com este adversário (histórico do par). */
+  comEle: Doc[];
 }
 
 type Negado = { ok: false; status: number; code: string; error: string };
@@ -193,14 +245,14 @@ export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
   if (c.bloqueio) return negar(403, "bloqueado", "Não é possível marcar amistoso com este time.");
   if (c.quando < c.agora + ANTECEDENCIA_MS) return negar(400, "cedo", "Escolha um horário com pelo menos 30 minutos de antecedência.");
   if (c.quando > c.agora + PRAZO_MAXIMO_MS) return negar(400, "longe", "Marque com no máximo 120 dias de antecedência.");
-  const comEle = c.pendentes.some((p) => (p.de as Doc)?.timeId === c.adversarioId || (p.para as Doc)?.timeId === c.adversarioId);
-  if (comEle) return negar(409, "ja-pendente", "Já existe um convite de amistoso esperando resposta entre esses times.");
+  if (c.comEle.some((a) => a.status === "sem_acordo")) {
+    return negar(409, "sem-acordo", "Estes times não podem mais se enfrentar: um amistoso entre eles terminou sem acordo no placar.");
+  }
+  if (c.comEle.some((a) => emAndamento(a, c.agora))) return negar(409, "em-andamento", "Já existe um amistoso em andamento entre esses times.");
   const enviados = c.pendentes.filter((p) => (p.de as Doc)?.timeId === c.meuId).length;
   if (enviados >= MAX_PENDENTES) return negar(429, "muitos", `Seu time já tem ${MAX_PENDENTES} convites esperando resposta.`);
   return null;
 };
-
-const millis = (v: unknown): number => (v instanceof Timestamp ? v.toMillis() : typeof (v as { toMillis?: unknown })?.toMillis === "function" ? (v as Timestamp).toMillis() : 0);
 
 export const motivoParaNaoResponder = (uid: string, agora: number, meuId: string, meu: Doc | null, amistoso: Doc | null): Negado | null => {
   if (!meu || meu.donoId !== uid) return negar(403, "nao-dono", "Só o dono do time responde convites de amistoso.");
@@ -224,7 +276,7 @@ export const outroLado = (amistoso: Doc, meuId: string): Doc => ((amistoso.de as
 
 // ─── Avisos ───────────────────────────────────────────────────────────────────
 
-export type EventoAmistoso = "novo" | "aceito" | "recusado" | "cancelado";
+export type EventoAmistoso = "novo" | "aceito" | "recusado" | "cancelado" | "placar" | "contestado" | "confirmado" | "sem_acordo";
 
 const nome = (d: Doc | undefined): string => texto(d?.nome, NOME_MAX) || "Um time";
 
@@ -241,6 +293,19 @@ export const avisoDeAmistoso = (evento: EventoAmistoso, amistoso: Doc, quemAgiu:
       return { title: "Amistoso recusado", body: `${nome(quemAgiu)} recusou o convite para ${quando}.`, data };
     case "cancelado":
       return { title: "Amistoso cancelado", body: `${nome(quemAgiu)} desmarcou o amistoso de ${quando}.`, data };
+  }
+  const p = propostaDe(amistoso);
+  const r = amistoso.resultado as { golsDe?: number; golsPara?: number } | undefined;
+  const placar = p ? placarTexto(amistoso, p.golsDe, p.golsPara) : r ? placarTexto(amistoso, Number(r.golsDe), Number(r.golsPara)) : "";
+  switch (evento) {
+    case "placar":
+      return { title: "Placar para confirmar", body: `${nome(quemAgiu)} informou o placar: ${placar}. Confirme em até 1 hora.`, data };
+    case "contestado":
+      return { title: "Placar contestado", body: `${nome(quemAgiu)} não concordou e informou: ${placar}. Confirme em até 1 hora.`, data };
+    case "confirmado":
+      return { title: "Placar confirmado", body: `${nome(quemAgiu)} confirmou o placar: ${placar}.`, data };
+    case "sem_acordo":
+      return { title: "Amistoso sem acordo", body: `${nome(quemAgiu)} não concordou com o placar. O jogo foi para o histórico sem acordo e os times não podem mais se enfrentar.`, data };
   }
 };
 
@@ -299,7 +364,12 @@ const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { 
     const [bloqueioA, bloqueioB] = donoAdversario
       ? await tx.getAll(db.doc(`users/${uid}/blocked/${donoAdversario}`), db.doc(`users/${donoAdversario}/blocked/${uid}`))
       : [null, null];
-    const pendentes = await tx.get(db.collection(`times/${p.timeId}/${SUB_AMISTOSOS}`).where("status", "==", "pendente").limit(50));
+    const meus = db.collection(`times/${p.timeId}/${SUB_AMISTOSOS}`);
+    const [pendentes, enviados, recebidos] = await Promise.all([
+      tx.get(meus.where("status", "==", "pendente").limit(50)),
+      tx.get(meus.where("para.timeId", "==", p.adversarioId).limit(100)),
+      tx.get(meus.where("de.timeId", "==", p.adversarioId).limit(100)),
+    ]);
     const negado = motivoParaNaoPropor({
       uid,
       agora: Date.now(),
@@ -310,6 +380,7 @@ const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { 
       adversario: adversario.exists ? (adversario.data() ?? {}) : null,
       bloqueio: Boolean(bloqueioA?.exists || bloqueioB?.exists),
       pendentes: pendentes.docs.map((d) => d.data()),
+      comEle: [...enviados.docs, ...recebidos.docs].map((d) => d.data()),
     });
     if (negado) return negado;
     const doc = {
@@ -379,7 +450,7 @@ const cancelar = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, 
  * e a chave é apagada. A cópia do próprio time some junto com o time. Idempotente.
  */
 export const encerrarAmistososDoTime = async (db: Firestore, timeId: string): Promise<number> => {
-  const abertos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).where("status", "in", ["pendente", "aceito"]).get();
+  const abertos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).where("status", "in", ["pendente", "aceito", "placar"]).get();
   let cancelados = 0;
   for (const doc of abertos.docs) {
     const outroId = String(outroLado(doc.data(), timeId).timeId ?? "");
@@ -395,7 +466,168 @@ export const encerrarAmistososDoTime = async (db: Firestore, timeId: string): Pr
   }
   const chaves = await db.collection(COLECAO_CHAVES).where("timeId", "==", timeId).get();
   for (const chave of chaves.docs) await chave.ref.delete();
+  await resumoRef(db, timeId).delete();
   return cancelados;
+};
+
+// ─── Resultado (placar, artilheiros e prazos) ────────────────────────────────
+
+const resumoRef = (db: Firestore, timeId: string) => db.doc(`times/${timeId}/${SUB_RESUMO}/geral`);
+
+type Placar = { golsDe: number; golsPara: number };
+/** O que a ação faz com o amistoso (nas duas cópias). */
+interface Plano {
+  status: StatusAmistoso;
+  campos?: Doc;
+  /** Com status "finalizado": o placar que vale. */
+  resultado?: Placar;
+  como?: "confirmado" | "prazo";
+}
+
+/** Os prazos vencidos (o placar enviado vale, ou o jogo fica sem placar). */
+const planoDoPrazo = (a: Doc, agora: number): Plano | null => {
+  const e = efetivo(a, agora);
+  if (e.status === String(a.status)) return null;
+  return e.status === "finalizado" && e.resultado ? { status: "finalizado", resultado: e.resultado, como: "prazo" } : { status: e.status };
+};
+
+const somarNoResumo = (tx: Transaction, db: Firestore, timeId: string, golsPro: number, golsContra: number) => {
+  const r = resumoDoResultado(golsPro, golsContra);
+  const inc = FieldValue.increment;
+  tx.set(
+    resumoRef(db, timeId),
+    {
+      jogos: inc(r.jogos),
+      vitorias: inc(r.vitorias),
+      empates: inc(r.empates),
+      derrotas: inc(r.derrotas),
+      golsPro: inc(r.golsPro),
+      golsContra: inc(r.golsContra),
+      atualizadoEm: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+};
+
+type Feito = { ok: true; amistoso: Doc; outro: Doc; outroDono: string; plano: Plano };
+
+/**
+ * Lê o amistoso (e o outro time) numa transação e aplica o plano nas duas cópias. Se a ação foi negada mas um prazo já
+ * venceu, grava o que o prazo decidiu (o documento estava atrasado). Finalizado soma no resumo dos dois times.
+ */
+const agirNoResultado = (
+  db: Firestore,
+  meuId: string,
+  amistosoId: string,
+  acao: (meu: Doc | null, amistoso: Doc | null, agora: number) => Negado | Plano,
+): Promise<Negado | Feito> =>
+  db.runTransaction(async (tx) => {
+    const [meu, minhaCopia] = await tx.getAll(timeRef(db, meuId), amistosoRef(db, meuId, amistosoId));
+    const amistoso = minhaCopia.exists ? (minhaCopia.data() ?? {}) : null;
+    const outro = amistoso ? outroLado(amistoso, meuId) : {};
+    const outroId = String(outro.timeId ?? "");
+    const [outroTime, outraCopia] = amistoso && TIME_ID.test(outroId) ? await tx.getAll(timeRef(db, outroId), amistosoRef(db, outroId, amistosoId)) : [null, null];
+    const agora = Date.now();
+    const pedido = acao(meu.exists ? (meu.data() ?? {}) : null, amistoso, agora);
+    const plano: Plano | null = "ok" in pedido ? (amistoso ? planoDoPrazo(amistoso, agora) : null) : pedido;
+    if (!plano || !amistoso) return pedido as Negado;
+    const gravar = (mudanca: Doc) => {
+      tx.update(minhaCopia.ref, mudanca);
+      if (outraCopia?.exists) tx.update(outraCopia.ref, mudanca);
+    };
+    // O outro time foi apagado: o amistoso não acontece mais.
+    if (!outroTime?.exists) {
+      gravar({ status: "cancelado", canceladoPor: meuId, atualizadoEm: FieldValue.serverTimestamp() });
+      return negar(409, "time-apagado", "O outro time não existe mais. O amistoso foi cancelado.");
+    }
+    const mudanca: Doc = { status: plano.status, atualizadoEm: FieldValue.serverTimestamp(), ...plano.campos };
+    if (plano.status === "finalizado" && plano.resultado) {
+      Object.assign(mudanca, { resultado: plano.resultado, como: plano.como ?? "confirmado", finalizadoEm: FieldValue.serverTimestamp() });
+      const deId = String((amistoso.de as Doc)?.timeId ?? "");
+      const paraId = String((amistoso.para as Doc)?.timeId ?? "");
+      somarNoResumo(tx, db, deId, plano.resultado.golsDe, plano.resultado.golsPara);
+      somarNoResumo(tx, db, paraId, plano.resultado.golsPara, plano.resultado.golsDe);
+    }
+    gravar(mudanca);
+    if ("ok" in pedido) return pedido;
+    return { ok: true as const, amistoso: { ...amistoso, ...mudanca }, outro, outroDono: String(outroTime.get("donoId") ?? ""), plano };
+  });
+
+/** O time de quem agiu, visto no amistoso. */
+const meuLado = (a: Doc, meuId: string): Doc => ((a.de as Doc)?.timeId === meuId ? (a.de as Doc) : (a.para as Doc)) ?? {};
+
+const informarPlacar = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_placar" }>): Promise<Resultado> => {
+  const r = await agirNoResultado(db, p.timeId, p.amistosoId, (meu, a, agora) => {
+    const negado = motivoParaNaoInformarPlacar(uid, agora, p.timeId, meu, a, p.golsMeu, p.golsOutro);
+    if (negado || !a) return negado ?? negar(404, "inexistente", "Este amistoso não existe mais.");
+    const rodada = efetivo(a, agora).status === "placar" ? 2 : 1;
+    const placar = placarDoDocumento(a, p.timeId, p.golsMeu, p.golsOutro);
+    return { status: "placar", campos: { proposta: { porTimeId: p.timeId, ...placar, rodada, venceEm: Timestamp.fromMillis(agora + PRAZO_PLACAR_MS) } } };
+  });
+  if (!r.ok) return r;
+  const evento: EventoAmistoso = (r.plano.campos?.proposta as Doc)?.rodada === 2 ? "contestado" : "placar";
+  await avisar(db, r.outroDono, p.amistosoId, evento, avisoDeAmistoso(evento, r.amistoso, meuLado(r.amistoso, p.timeId), String(r.outro.timeId)));
+  return { ok: true, body: { status: "placar" } };
+};
+
+const confirmarPlacar = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_confirmar" }>): Promise<Resultado> => {
+  const r = await agirNoResultado(db, p.timeId, p.amistosoId, (meu, a, agora) => {
+    const negado = motivoParaNaoConfirmarPlacar(uid, agora, p.timeId, meu, a);
+    const proposta = a ? propostaDe(a) : null;
+    if (negado || !proposta) return negado ?? negar(409, "estado", "Não foi possível ler o placar enviado. Tente de novo.");
+    return { status: "finalizado", resultado: { golsDe: proposta.golsDe, golsPara: proposta.golsPara }, como: "confirmado" };
+  });
+  if (!r.ok) return r;
+  await avisar(db, r.outroDono, p.amistosoId, "confirmado", avisoDeAmistoso("confirmado", r.amistoso, meuLado(r.amistoso, p.timeId), String(r.outro.timeId)));
+  return { ok: true, body: { status: "finalizado" } };
+};
+
+const recusarPlacar = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_recusar_placar" }>): Promise<Resultado> => {
+  const r = await agirNoResultado(db, p.timeId, p.amistosoId, (meu, a, agora) => {
+    const negado = motivoParaNaoRecusarPlacar(uid, agora, p.timeId, meu, a);
+    return negado ?? { status: "sem_acordo", campos: { semAcordoEm: FieldValue.serverTimestamp() } };
+  });
+  if (!r.ok) return r;
+  await avisar(db, r.outroDono, p.amistosoId, "sem_acordo", avisoDeAmistoso("sem_acordo", r.amistoso, meuLado(r.amistoso, p.timeId), String(r.outro.timeId)));
+  return { ok: true, body: { status: "sem_acordo" } };
+};
+
+/** Quem fez os gols do meu time: fica na cópia do meu time e soma (ou corrige) no resumo do meu time. */
+const marcarArtilheiros = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_artilheiros" }>): Promise<Resultado> =>
+  db.runTransaction(async (tx): Promise<Resultado> => {
+    const [meu, minhaCopia] = await tx.getAll(timeRef(db, p.timeId), amistosoRef(db, p.timeId, p.amistosoId));
+    const time = meu.exists ? (meu.data() ?? {}) : null;
+    const amistoso = minhaCopia.exists ? (minhaCopia.data() ?? {}) : null;
+    const negado = motivoParaNaoMarcarArtilheiros(uid, Date.now(), p.timeId, time, amistoso, p.gols);
+    if (negado || !time || !amistoso) return negado ?? negar(404, "inexistente", "Este amistoso não existe mais.");
+    const anteriores = (amistoso.artilheiros ?? {}) as Record<string, { nome?: string; gols?: number }>;
+    const jogadores = (time.jogadores ?? {}) as Record<string, { nome?: string }>;
+    const nomeDe = (u: string) => texto(jogadores[u]?.nome, NOME_MAX) || texto(anteriores[u]?.nome, NOME_MAX) || "Jogador";
+    const novos = Object.fromEntries(Object.entries(p.gols).map(([u, gols]) => [u, { nome: nomeDe(u), gols }]));
+    const antes = Object.fromEntries(Object.entries(anteriores).map(([u, v]) => [u, Number(v?.gols) || 0]));
+    const dif = diferencaDeGols(antes, p.gols);
+    tx.update(minhaCopia.ref, { artilheiros: novos, artilheirosEm: FieldValue.serverTimestamp() });
+    if (Object.keys(dif).length > 0) {
+      const porJogador = Object.fromEntries(Object.entries(dif).map(([u, d]) => [u, { nome: nomeDe(u), gols: FieldValue.increment(d) }]));
+      tx.set(resumoRef(db, p.timeId), { jogadores: porJogador, atualizadoEm: FieldValue.serverTimestamp() }, { merge: true });
+    }
+    return { ok: true, body: { artilheiros: Object.keys(novos).length } };
+  });
+
+/** Alguém do elenco abriu os jogos: grava o que os prazos vencidos decidiram. */
+const apurar = async (db: Firestore, uid: string, timeId: string): Promise<Resultado> => {
+  const time = await timeRef(db, timeId).get();
+  const membros = time.exists && Array.isArray(time.get("membros")) ? (time.get("membros") as unknown[]) : [];
+  if (!membros.includes(uid)) return negar(403, "nao-membro", "Só quem é do time vê os jogos.");
+  const abertos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).where("status", "in", ["aceito", "placar"]).limit(40).get();
+  const agora = Date.now();
+  let apurados = 0;
+  for (const doc of abertos.docs) {
+    if (!planoDoPrazo(doc.data(), agora)) continue;
+    const r = await agirNoResultado(db, timeId, doc.id, () => negar(409, "apurado", ""));
+    if (!r.ok && r.code === "apurado") apurados += 1;
+  }
+  return { ok: true, body: { apurados } };
 };
 
 const encerrar = async (db: Firestore, uid: string, timeId: string): Promise<Resultado> => {
@@ -420,5 +652,15 @@ export const executarAmistoso = (db: Firestore, uid: string, pedido: AmistosoReq
       return cancelar(db, uid, pedido);
     case "time_encerrar":
       return encerrar(db, uid, pedido.timeId);
+    case "amistoso_placar":
+      return informarPlacar(db, uid, pedido);
+    case "amistoso_confirmar":
+      return confirmarPlacar(db, uid, pedido);
+    case "amistoso_recusar_placar":
+      return recusarPlacar(db, uid, pedido);
+    case "amistoso_artilheiros":
+      return marcarArtilheiros(db, uid, pedido);
+    case "amistoso_apurar":
+      return apurar(db, uid, pedido.timeId);
   }
 };

@@ -10,6 +10,7 @@ require.extensions['.ts'] = (module, filename) => {
   module._compile(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, filename);
 };
 const A = require(path.join(root, 'api/_lib/amistosos.ts'));
+const R = require(path.join(root, 'api/_lib/amistososResultado.ts'));
 const { Timestamp } = require('firebase-admin/firestore');
 if (previousLoader) require.extensions['.ts'] = previousLoader;
 else delete require.extensions['.ts'];
@@ -19,7 +20,7 @@ const time = (extra = {}) => ({ nome: 'Os Brabos', donoId: 'dono', modalidade: '
 const cenario = (extra = {}) => ({
   uid: 'dono', agora: AGORA, quando: AGORA + 3 * 24 * 3600_000,
   meuId: 'dono_1', meu: time(), adversarioId: 'rival_1', adversario: time({ nome: 'Rivais', donoId: 'rival' }),
-  bloqueio: false, pendentes: [], ...extra,
+  bloqueio: false, pendentes: [], comEle: [], ...extra,
 });
 
 test('só ações de amistoso/chave são desviadas da rota de desafios', () => {
@@ -65,10 +66,92 @@ test('propor: dono, outro time, outro dono, mesma modalidade, sem bloqueio, praz
   assert.equal(A.motivoParaNaoPropor(cenario({ bloqueio: true })).code, 'bloqueado');
   assert.equal(A.motivoParaNaoPropor(cenario({ quando: AGORA + 10 * 60_000 })).code, 'cedo');
   assert.equal(A.motivoParaNaoPropor(cenario({ quando: AGORA + 121 * 24 * 3600_000 })).code, 'longe');
-  const comRival = { de: { timeId: 'rival_1' }, para: { timeId: 'dono_1' } };
-  assert.equal(A.motivoParaNaoPropor(cenario({ pendentes: [comRival] })).code, 'ja-pendente');
+  const comRival = { de: { timeId: 'rival_1' }, para: { timeId: 'dono_1' }, status: 'pendente', quando: Timestamp.fromMillis(AGORA + 3600_000) };
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [comRival] })).code, 'em-andamento');
   const enviados = Array.from({ length: A.MAX_PENDENTES }, (_, i) => ({ de: { timeId: 'dono_1' }, para: { timeId: `x${i}_1` } }));
   assert.equal(A.motivoParaNaoPropor(cenario({ pendentes: enviados })).code, 'muitos');
+});
+
+test('par de times: em andamento bloqueia; terminado libera; sem acordo bloqueia para sempre', () => {
+  const jogo = (status, quandoMs, extra = {}) => ({ de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' }, status, quando: Timestamp.fromMillis(quandoMs), ...extra });
+  const passado = AGORA - 2 * 3600_000;
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('aceito', passado)] })).code, 'em-andamento');
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('placar', passado, { proposta: { porTimeId: 'dono_1', golsDe: 1, golsPara: 0, rodada: 1, venceEm: Timestamp.fromMillis(AGORA + 60_000) } })] })).code, 'em-andamento');
+  // Convite que ninguém respondeu até o jogo, placar vencido pelo prazo e jogo sem placar há 3 dias: liberado.
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('pendente', passado)] })), null);
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('placar', passado, { proposta: { porTimeId: 'dono_1', golsDe: 1, golsPara: 0, rodada: 1, venceEm: Timestamp.fromMillis(AGORA - 1) } })] })), null);
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('aceito', AGORA - R.PRAZO_FINALIZAR_MS)] })), null);
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('finalizado', passado), jogo('cancelado', passado)] })), null);
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('sem_acordo', passado)] })).code, 'sem-acordo');
+});
+
+test('placar: só depois do jogo; o outro confirma ou manda outro uma vez; na 2ª rodada não concordar = sem acordo', () => {
+  const base = { de: { timeId: 'rival_1', nome: 'Rivais' }, para: { timeId: 'dono_1', nome: 'Os Brabos' }, status: 'aceito', quando: Timestamp.fromMillis(AGORA - 3600_000) };
+  const rival = time({ donoId: 'rival' });
+  assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), base, 2, 1), null);
+  assert.equal(R.motivoParaNaoInformarPlacar('ana', AGORA, 'dono_1', time(), base, 2, 1).code, 'nao-dono');
+  assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), { ...base, quando: Timestamp.fromMillis(AGORA + 60_000) }, 2, 1).code, 'cedo');
+  assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), base, 100, 1).code, 'placar-invalido');
+  assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), base, 1.5, 1).code, 'placar-invalido');
+  // Visto do time "para": golsMeu vai em golsPara.
+  assert.deepEqual({ ...R.placarDoDocumento(base, 'dono_1', 2, 1) }, { golsDe: 1, golsPara: 2 });
+
+  const enviado = { ...base, status: 'placar', proposta: { porTimeId: 'dono_1', golsDe: 1, golsPara: 2, rodada: 1, venceEm: Timestamp.fromMillis(AGORA + 30 * 60_000) } };
+  assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), enviado, 2, 1).code, 'aguardando');
+  assert.equal(R.motivoParaNaoConfirmarPlacar('dono', AGORA, 'dono_1', time(), enviado).code, 'proprio');
+  assert.equal(R.motivoParaNaoConfirmarPlacar('rival', AGORA, 'rival_1', rival, enviado), null);
+  assert.equal(R.motivoParaNaoInformarPlacar('rival', AGORA, 'rival_1', rival, enviado, 3, 2), null); // não concorda: manda o dele
+  assert.equal(R.motivoParaNaoRecusarPlacar('rival', AGORA, 'rival_1', rival, enviado).code, 'primeira-rodada');
+
+  const contestado = { ...enviado, proposta: { porTimeId: 'rival_1', golsDe: 3, golsPara: 2, rodada: 2, venceEm: Timestamp.fromMillis(AGORA + 30 * 60_000) } };
+  assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), contestado, 2, 1).code, 'segunda-rodada');
+  assert.equal(R.motivoParaNaoRecusarPlacar('dono', AGORA, 'dono_1', time(), contestado), null);
+  assert.equal(R.motivoParaNaoConfirmarPlacar('dono', AGORA, 'dono_1', time(), contestado), null);
+  assert.equal(R.motivoParaNaoRecusarPlacar('rival', AGORA, 'rival_1', rival, contestado).code, 'proprio');
+});
+
+test('prazos: placar sem resposta em 1 hora vale; jogo confirmado sem placar em 3 dias fica sem placar', () => {
+  const placar = { status: 'placar', quando: Timestamp.fromMillis(AGORA - 2 * 3600_000), proposta: { porTimeId: 'dono_1', golsDe: 4, golsPara: 0, rodada: 2, venceEm: Timestamp.fromMillis(AGORA) } };
+  assert.deepEqual({ ...R.efetivo(placar, AGORA) }, { status: 'finalizado', resultado: { golsDe: 4, golsPara: 0 } });
+  assert.equal(R.efetivo(placar, AGORA - 1).status, 'placar');
+  assert.equal(R.motivoParaNaoConfirmarPlacar('rival', AGORA, 'rival_1', time({ donoId: 'rival' }), { ...placar, de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' } }).code, 'finalizado');
+  const aceito = { status: 'aceito', quando: Timestamp.fromMillis(AGORA - R.PRAZO_FINALIZAR_MS) };
+  assert.equal(R.efetivo(aceito, AGORA).status, 'sem_placar');
+  assert.equal(R.efetivo(aceito, AGORA - 1).status, 'aceito');
+});
+
+test('artilheiros: dono, só do elenco, soma até o placar do time e por 7 dias', () => {
+  const a = { de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' }, status: 'finalizado', resultado: { golsDe: 3, golsPara: 1 }, finalizadoEm: Timestamp.fromMillis(AGORA - 3600_000) };
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { ana: 2, dono: 1 }), null);
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, {}), null); // pode limpar
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { ana: 4 }).code, 'soma');
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { estranho: 1 }).code, 'jogador');
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('ana', AGORA, 'dono_1', time(), a, { ana: 1 }).code, 'nao-dono');
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA + R.PRAZO_ARTILHEIROS_MS, 'dono_1', time(), a, { ana: 1 }).code, 'prazo');
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('rival', AGORA, 'rival_1', time({ donoId: 'rival', membros: ['rival', 'zé'] }), a, { 'zé': 2 }).code, 'soma');
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), { ...a, status: 'placar' }, { ana: 1 }).code, 'nao-finalizado');
+});
+
+test('resumo: vitória/empate/derrota e correção dos gols por jogador', () => {
+  assert.deepEqual({ ...R.resumoDoResultado(3, 1) }, { jogos: 1, vitorias: 1, empates: 0, derrotas: 0, golsPro: 3, golsContra: 1 });
+  assert.equal(R.resumoDoResultado(2, 2).empates, 1);
+  assert.equal(R.resumoDoResultado(0, 1).derrotas, 1);
+  assert.deepEqual({ ...R.diferencaDeGols({ ana: 2, bia: 1 }, { ana: 1, caio: 1 }) }, { ana: -1, bia: -1, caio: 1 });
+  assert.deepEqual({ ...R.diferencaDeGols({ ana: 2 }, { ana: 2 }) }, {});
+});
+
+test('parse do resultado: placar inteiro, artilheiros com uid e gols válidos', () => {
+  const id = 'a'.repeat(20);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_placar', timeId: 'dono_1', amistosoId: id, golsMeu: 3, golsOutro: 0 }).ok, true);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_placar', timeId: 'dono_1', amistosoId: id, golsMeu: '3', golsOutro: 0 }).ok, false);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_confirmar', timeId: 'dono_1', amistosoId: id }).value.action, 'amistoso_confirmar');
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_recusar_placar', timeId: 'dono_1', amistosoId: id }).ok, true);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_artilheiros', timeId: 'dono_1', amistosoId: id, gols: { ana: 2 } }).ok, true);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_artilheiros', timeId: 'dono_1', amistosoId: id, gols: { ana: 0 } }).ok, false);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_artilheiros', timeId: 'dono_1', amistosoId: id, gols: { 'a.b': 1 } }).ok, false);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_artilheiros', timeId: 'dono_1', amistosoId: id, gols: [1] }).ok, false);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_apurar', timeId: 'dono_1' }).ok, true);
+  assert.equal(A.ehAcaoDeAmistoso({ action: 'amistoso_apurar' }), true);
 });
 
 test('responder: só o dono do time convidado, só pendente e antes do jogo', () => {
@@ -122,4 +205,7 @@ test('avisos: texto e destino (abre o time na aba Jogos)', () => {
   assert.equal(novo.body, 'Os Brabos chamou o seu time para um amistoso: sáb, 14/11 às 20:00 · Arena Central');
   assert.deepEqual({ ...novo.data }, { tipo: 'time_amistoso', turmaId: '', timeId: 'rival_1' });
   assert.equal(A.avisoDeAmistoso('aceito', amistoso, { nome: 'Rivais' }, 'dono_1').title, 'Amistoso confirmado!');
+  const comPlacar = { ...amistoso, de: { nome: 'Os Brabos' }, para: { nome: 'Rivais' }, proposta: { porTimeId: 'dono_1', golsDe: 3, golsPara: 2, rodada: 1 } };
+  assert.equal(A.avisoDeAmistoso('placar', comPlacar, { nome: 'Os Brabos' }, 'rival_1').body, 'Os Brabos informou o placar: Os Brabos 3 x 2 Rivais. Confirme em até 1 hora.');
+  assert.match(A.avisoDeAmistoso('sem_acordo', comPlacar, { nome: 'Rivais' }, 'dono_1').body, /não podem mais se enfrentar/);
 });

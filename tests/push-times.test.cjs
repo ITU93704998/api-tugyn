@@ -42,7 +42,9 @@ test('convocação: só o dono, só para quem está convocado; o toque abre o ti
   const ok = authorizeTimeConvocacao('dono', 'dono_1', 'bruno', time());
   assert.equal(ok.ok, true);
   assert.equal(ok.recipientUid, 'bruno');
-  assert.match(ok.draft.body, /Zeca convocou você para o Os Brabos/);
+  assert.equal(ok.draft.body, 'Você foi convocado para jogar no Os Brabos (Society). Toque para responder.');
+  const comCidade = authorizeTimeConvocacao('dono', 'dono_1', 'bruno', { ...time(), modalidade: 'futsal', cidade: { city: 'Palmas', state: 'TO', lat: 1 } });
+  assert.equal(comCidade.draft.body, 'Você foi convocado para jogar no Os Brabos (Futsal · Palmas, TO). Toque para responder.');
   assert.deepEqual(ok.draft.data, { tipo: 'time_convocacao', turmaId: '', timeId: 'dono_1' });
   assert.equal(authorizeTimeConvocacao('ana', 'dono_1', 'bruno', time()).status, 403);
   assert.equal(authorizeTimeConvocacao('dono', 'dono_1', 'estranho', time()).status, 409);

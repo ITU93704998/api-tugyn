@@ -301,7 +301,18 @@ export interface TimeForPush {
   convites?: unknown;
   /** Quem o dono aprovou por último pelo link (gravado junto com a aprovação; as regras só deixam o dono gravar). */
   ultimoAprovado?: unknown;
+  modalidade?: unknown;
+  cidade?: unknown;
 }
+
+const MODALIDADE: Record<string, string> = { campo: "Campo", society: "Society", futsal: "Futsal" };
+
+/** "Society · Palmas, TO" (igual ao cartão de convocação do app); só a modalidade se o time não tiver cidade. */
+export const localDoTime = (time: TimeForPush): string => {
+  const cidade = (time.cidade ?? {}) as { city?: unknown; state?: unknown };
+  const lugar = [sanitizeText(cidade.city, 60, ""), sanitizeText(cidade.state, 20, "")].filter(Boolean).join(", ");
+  return [MODALIDADE[String(time.modalidade)] ?? "Society", lugar].filter(Boolean).join(" · ");
+};
 
 const naLista = (lista: unknown, uid: string): boolean => Array.isArray(lista) && lista.includes(uid);
 const itemEm = (mapa: unknown, uid: string): Record<string, unknown> | null => {
@@ -332,7 +343,7 @@ export const authorizeTimeConvocacao = (callerUid: string, timeId: string, targe
     dedupeKey: `time_convocacao_${timeId}_${targetUid}_${msEm(time.convites, targetUid, "em")}`,
     draft: {
       title: `Convocação: ${nomeTime}`,
-      body: `${nomeEm(time.jogadores, callerUid, "O dono do time")} convocou você para o ${nomeTime}. Toque para responder.`,
+      body: `Você foi convocado para jogar no ${nomeTime} (${localDoTime(time)}). Toque para responder.`,
       data: { tipo: "time_convocacao", turmaId: "", timeId },
     },
   };
