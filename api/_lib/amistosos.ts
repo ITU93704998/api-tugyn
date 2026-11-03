@@ -366,6 +366,12 @@ const buscar = async (db: Firestore, uid: string, chave: string): Promise<Result
   const time = typeof timeId === "string" ? await timeRef(db, timeId).get() : null;
   // Chave de time apagado (ou trocada) = não encontrado.
   if (!time?.exists || time.get("chave") !== chave) return negar(404, "nao-encontrado", "Nenhum time com essa chave.");
+  // Placar que já valeu pelo prazo (ninguém do time abriu os jogos depois): grava antes, para entrar nos últimos jogos.
+  try {
+    await aplicarPrazos(db, time.id);
+  } catch (erro) {
+    console.warn("[amistosos] prazos na busca:", (erro as Error)?.message ?? "erro");
+  }
   // Somente jogos encerrados têm finalizadoEm. Consulta limitada, sem expor o histórico privado.
   const jogos = await db.collection(`times/${time.id}/${SUB_AMISTOSOS}`)
     .orderBy("finalizadoEm", "desc").limit(5).get();
@@ -693,6 +699,11 @@ const apurar = async (db: Firestore, uid: string, timeId: string): Promise<Resul
   const time = await timeRef(db, timeId).get();
   const membros = time.exists && Array.isArray(time.get("membros")) ? (time.get("membros") as unknown[]) : [];
   if (!membros.includes(uid)) return negar(403, "nao-membro", "Só quem é do time vê os jogos.");
+  return { ok: true, body: { apurados: await aplicarPrazos(db, timeId) } };
+};
+
+/** Grava o que os prazos vencidos decidiram (placar que valeu, jogo sem placar). Devolve quantos mudaram. */
+const aplicarPrazos = async (db: Firestore, timeId: string): Promise<number> => {
   const abertos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).where("status", "in", ["aceito", "placar"]).limit(40).get();
   const agora = Date.now();
   let apurados = 0;
@@ -701,7 +712,7 @@ const apurar = async (db: Firestore, uid: string, timeId: string): Promise<Resul
     const r = await agirNoResultado(db, timeId, doc.id, () => negar(409, "apurado", ""));
     if (!r.ok && r.code === "apurado") apurados += 1;
   }
-  return { ok: true, body: { apurados } };
+  return apurados;
 };
 
 /** Apaga o time inteiro no servidor (amistosos, chave, resumo, prévia do link e o documento). Repetir é seguro. */
