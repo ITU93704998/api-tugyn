@@ -147,6 +147,8 @@ const resumoDoElenco = (jogadores: JogadorPublico[]): string => {
 
 interface PaginaTimeParams {
   time: TimePublico | null;
+  /** O `linkId` da página: o botão abre `tugyn://time-link/<linkId>` (o app descobre se a pessoa é do time). */
+  linkId?: string;
   lojaIos: string | null;
   lojaAndroid: string | null;
   plataforma: Plataforma;
@@ -240,7 +242,9 @@ const cartaoDoJogador = (j: JogadorPublico): string => {
     </li>`;
 };
 
-export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaTimeParams): string => {
+export const renderizarPaginaTime = ({ time, linkId, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaTimeParams): string => {
+  // Antes era só "tugyn://": abria o app na tela inicial, não o time.
+  const abrir = time && linkId && isValidLinkId(linkId) ? `tugyn://time-link/${encodeURIComponent(linkId)}` : "tugyn://";
   const total = time?.jogadores.length ?? 0;
   const titulo = time ? `${time.nome}${time.sigla ? ` (${time.sigla})` : ""} · Tugyn` : "Time no Tugyn";
   const descricao = time
@@ -269,7 +273,7 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
     iconUrl,
     paginaUrl,
     conteudo: `${corpo}
-  <a class="btn" href="tugyn://">Abrir no Tugyn</a>
+  <a class="btn" href="${esc(abrir)}">${time ? "Abrir o time no Tugyn" : "Abrir no Tugyn"}</a>
   ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}`,
   });
 };

@@ -232,3 +232,56 @@ test('resumo público: só os números do time, sem artilheiros', () => {
   assert.equal(A.resumoPublico({ jogos: 0 }), null);
   assert.equal(A.resumoPublico(undefined), null);
 });
+
+// ── Link da página pública do time (time_link) ──
+const dbDoLink = (dadosDoTime) => {
+  const gravados = [];
+  const docs = { 'times/dono_1': dadosDoTime };
+  const snap = (caminho) => ({ id: caminho.split('/')[1], exists: docs[caminho] !== undefined, get: (c) => docs[caminho]?.[c] });
+  const db = {
+    doc: (caminho) => ({ caminho }),
+    collection: () => ({ where: (_c, _op, v) => ({ limit: () => ({ get: async () => ({ docs: dadosDoTime && dadosDoTime.linkId === v ? [snap('times/dono_1')] : [] }) }) }) }),
+    runTransaction: async (fn) => fn({
+      getAll: async (...refs) => refs.map((r) => snap(r.caminho)),
+      create: (ref, dados) => gravados.push(['create', ref.caminho, dados]),
+      update: (ref, dados) => gravados.push(['update', ref.caminho, dados]),
+    }),
+  };
+  return { db, gravados };
+};
+const LINK = 'AbCdEfGh12345678';
+
+test('time_link: aceito só com linkId válido', () => {
+  assert.equal(A.ehAcaoDeAmistoso({ action: 'time_link' }), true);
+  assert.deepEqual(A.parseAmistosoBody({ action: 'time_link', linkId: LINK }).value, { action: 'time_link', linkId: LINK });
+  for (const linkId of ['curto', '../AbCdEfGh12345', null]) assert.equal(A.parseAmistosoBody({ action: 'time_link', linkId }).ok, false);
+});
+
+test('time_link: quem é do time (jogador, convocado ou pediu) recebe o id', async () => {
+  for (const uid of ['ana', 'convocado', 'pediu']) {
+    const { db, gravados } = dbDoLink(time({ linkId: LINK, convidados: ['convocado'], solicitantes: ['pediu'] }));
+    assert.deepEqual(await A.executarAmistoso(db, uid, { action: 'time_link', linkId: LINK }), { ok: true, body: { timeId: 'dono_1' } });
+    assert.equal(gravados.length, 0);
+  }
+});
+
+test('time_link: quem é de fora recebe a chave (gerada se faltar, com o donoId do time)', async () => {
+  const comChave = dbDoLink(time({ linkId: LINK, chave: 'AB3K9Z' }));
+  assert.deepEqual(await A.executarAmistoso(comChave.db, 'estranho', { action: 'time_link', linkId: LINK }), { ok: true, body: { chave: 'AB3K9Z' } });
+  assert.equal(comChave.gravados.length, 0);
+  const semChave = dbDoLink(time({ linkId: LINK }));
+  const r = await A.executarAmistoso(semChave.db, 'estranho', { action: 'time_link', linkId: LINK });
+  assert.equal(r.ok, true);
+  assert.equal(typeof r.body.chave, 'string');
+  assert.equal(r.body.timeId, undefined);
+  const criado = semChave.gravados.find((g) => g[0] === 'create');
+  assert.equal(criado[2].donoId, 'dono');
+  assert.equal(criado[2].timeId, 'dono_1');
+});
+
+test('time_link: link que não existe mais → 404', async () => {
+  const { db } = dbDoLink(time({ linkId: 'OutroLink1234567' }));
+  const r = await A.executarAmistoso(db, 'ana', { action: 'time_link', linkId: LINK });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 404);
+});

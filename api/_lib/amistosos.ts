@@ -19,12 +19,15 @@ import {
 } from "./amistososResultado";
 import { DEDUPE_MS, type PushDraft } from "./push";
 import { type Aviso, COLECAO_AVISOS, avisoPendente, enviarAviso } from "./pushEnvio";
-import { timeDoDocumento } from "./timeLink";
+import { isValidLinkId, timeDoDocumento } from "./timeLink";
 
 /**
  * Chave pública dos times e amistosos entre times (pela rota `POST /api/desafios`: o plano da Vercel não comporta outra função).
  *  - time_chave { timeId }                                     o dono pega a chave do time (gerada na 1ª vez)
  *  - time_buscar { chave }                                     qualquer pessoa logada vê os dados PÚBLICOS do time
+ *  - time_link { linkId }                                      quem tocou em "Abrir no Tugyn" na página do time: quem é do
+ *                                                               time recebe o id (abre o time); os outros, a chave (abre o
+ *                                                               time público, como quem digita a chave)
  *  - amistoso_propor { timeId, adversarioId, data, hora, local }   o dono convida outro time da mesma modalidade
  *  - amistoso_responder { timeId, amistosoId, aceitar }       o dono do time convidado aceita ou recusa
  *  - amistoso_cancelar { timeId, amistosoId }                 o dono de qualquer um dos dois desmarca (antes do jogo)
@@ -69,6 +72,7 @@ export type { StatusAmistoso };
 export type AmistosoRequest =
   | { action: "time_chave"; timeId: string }
   | { action: "time_buscar"; chave: string }
+  | { action: "time_link"; linkId: string }
   | { action: "amistoso_propor"; timeId: string; adversarioId: string; data: string; hora: string; local: string }
   | { action: "amistoso_responder"; timeId: string; amistosoId: string; aceitar: boolean }
   | { action: "amistoso_cancelar"; timeId: string; amistosoId: string }
@@ -83,7 +87,7 @@ type Parse = { ok: true; value: AmistosoRequest } | { ok: false; error: string }
 
 export const ehAcaoDeAmistoso = (body: unknown): boolean => {
   const action = (body as { action?: unknown } | null)?.action;
-  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_encerrar");
+  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_link" || action === "time_encerrar");
 };
 
 export const normalizarChave = (valor: unknown): string | null => {
@@ -130,6 +134,8 @@ export const parseAmistosoBody = (body: unknown): Parse => {
       return timeOk ? { ok: true, value: { action: "time_chave", timeId: b.timeId as string } } : { ok: false, error: "Time inválido." };
     case "time_encerrar":
       return timeOk ? { ok: true, value: { action: "time_encerrar", timeId: b.timeId as string } } : { ok: false, error: "Time inválido." };
+    case "time_link":
+      return isValidLinkId(b.linkId) ? { ok: true, value: { action: "time_link", linkId: b.linkId } } : { ok: false, error: "Link inválido." };
     case "time_buscar": {
       const chave = normalizarChave(b.chave);
       return chave ? { ok: true, value: { action: "time_buscar", chave } } : { ok: false, error: "Chave inválida. Ela tem 6 letras e números." };
@@ -341,23 +347,42 @@ type Resultado = { ok: true; body?: Record<string, unknown> } | Negado;
 const timeRef = (db: Firestore, id: string) => db.doc(`times/${id}`);
 const amistosoRef = (db: Firestore, timeId: string, id: string) => db.doc(`times/${timeId}/${SUB_AMISTOSOS}/${id}`);
 
-const pegarChave = async (db: Firestore, uid: string, timeId: string): Promise<Resultado> => {
+/** `apenasDoDono`: o botão "chave" do dono. Sem ele (link público do time), qualquer pessoa logada recebe a chave. */
+const pegarChave = async (db: Firestore, uid: string, timeId: string, apenasDoDono = true): Promise<Resultado> => {
   for (let tentativa = 0; tentativa < 5; tentativa += 1) {
     const chave = gerarChave();
     const resultado = await db.runTransaction(async (tx): Promise<Resultado | "repetida"> => {
       const [time, ocupada] = await tx.getAll(timeRef(db, timeId), db.doc(`${COLECAO_CHAVES}/${chave}`));
-      if (!time.exists || time.get("donoId") !== uid) return negar(403, "nao-dono", "Só o dono vê a chave do time.");
+      if (!time.exists) return negar(404, "nao-encontrado", "Este time não existe mais.");
+      if (apenasDoDono && time.get("donoId") !== uid) return negar(403, "nao-dono", "Só o dono vê a chave do time.");
       const atual = normalizarChave(time.get("chave"));
       if (atual) return { ok: true, body: { chave: atual } };
       if (ocupada.exists) return "repetida";
       // donoId: a exclusão de conta acha e apaga as chaves dos times da pessoa.
-      tx.create(db.doc(`${COLECAO_CHAVES}/${chave}`), { timeId, donoId: uid, criadoEm: FieldValue.serverTimestamp() });
+      tx.create(db.doc(`${COLECAO_CHAVES}/${chave}`), { timeId, donoId: time.get("donoId"), criadoEm: FieldValue.serverTimestamp() });
       tx.update(timeRef(db, timeId), { chave });
       return { ok: true, body: { chave } };
     });
     if (resultado !== "repetida") return resultado;
   }
   throw new Error("chave: muitas colisões");
+};
+
+/**
+ * "Abrir no Tugyn" na página pública do time (o link leva o `linkId`, nunca o id do time, que contém o uid do dono).
+ * Quem é do time (jogador, convocado ou quem pediu para entrar) recebe o id e abre o time; os outros recebem a chave e
+ * abrem o time público (os mesmos dados de quem digita a chave). O dono divulgou a página: a chave serve para marcar amistoso.
+ */
+const abrirPeloLink = async (db: Firestore, uid: string, linkId: string): Promise<Resultado> => {
+  const achados = await db.collection("times").where("linkId", "==", linkId).limit(1).get();
+  const time = achados.docs[0];
+  if (!time) return negar(404, "nao-encontrado", "Este time não existe mais.");
+  const lista = (campo: string): unknown[] => (Array.isArray(time.get(campo)) ? time.get(campo) : []);
+  if ([...lista("membros"), ...lista("convidados"), ...lista("solicitantes")].includes(uid)) return { ok: true, body: { timeId: time.id } };
+  const atual = normalizarChave(time.get("chave"));
+  if (atual) return { ok: true, body: { chave: atual } };
+  const gerada = await pegarChave(db, uid, time.id, false);
+  return gerada.ok ? { ok: true, body: { chave: gerada.body?.chave } } : gerada;
 };
 
 const contagem = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
@@ -779,6 +804,8 @@ export const executarAmistoso = (db: Firestore, uid: string, pedido: AmistosoReq
       return pegarChave(db, uid, pedido.timeId);
     case "time_buscar":
       return buscar(db, uid, pedido.chave);
+    case "time_link":
+      return abrirPeloLink(db, uid, pedido.linkId);
     case "amistoso_propor":
       return propor(db, uid, pedido);
     case "amistoso_responder":

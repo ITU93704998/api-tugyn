@@ -153,7 +153,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader("Vary", "User-Agent");
     // 5 min na CDN: compartilhar no grupo não vira uma leitura por pessoa que abre; um jogador novo aparece logo.
     res.setHeader("Cache-Control", time ? "public, s-maxage=300, stale-while-revalidate=600" : "public, s-maxage=60");
-    return res.status(time ? 200 : 404).send(renderizarPaginaTime({ time, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
+    return res.status(time ? 200 : 404).send(renderizarPaginaTime({ time, linkId: bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
   }
   const previa = await lerPrevia(bruto);
 

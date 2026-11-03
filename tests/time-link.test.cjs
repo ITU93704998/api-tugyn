@@ -130,3 +130,10 @@ test('elenco separado por linha, com camisa, capitão e escudo desenhado sem ima
   assert.match(html, /<svg[^>]*viewBox="0 0 24 24"/);
   assert.match(html, /color:#FFD700">BRA</);
 });
+
+test('"Abrir o time no Tugyn" leva o linkId para o app; sem time ou linkId inválido, só abre o app', () => {
+  const time = timeDoDocumento(documento());
+  assert.match(renderizarPaginaTime({ time, linkId: 'AbCdEfGh12345678', lojaIos: null, lojaAndroid: null, plataforma: 'outra' }), /href="tugyn:\/\/time-link\/AbCdEfGh12345678"/);
+  assert.match(renderizarPaginaTime({ time, linkId: '../x"><b>', lojaIos: null, lojaAndroid: null, plataforma: 'outra' }), /href="tugyn:\/\/"/);
+  assert.match(renderizarPaginaTime({ time: null, linkId: 'AbCdEfGh12345678', lojaIos: null, lojaAndroid: null, plataforma: 'outra' }), /href="tugyn:\/\/"/);
+});
