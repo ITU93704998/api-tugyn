@@ -44,6 +44,9 @@ export const lerNaTransacao = async (tx: Transaction, ref: DocumentReference): P
  * Prepara um contrato NOVO (código único, token, documento) sem gravar. Usado pelo "Novo contrato" do painel e pela aprovação de uma
  * solicitação: os dois produzem exatamente o mesmo contrato, na etapa "aguardando o cliente escolher".
  */
+/** Um documento por código curto de contrato (só a API grava; o cliente nunca lê). */
+export const COLECAO_CODIGOS = "contratoCodigos";
+
 export const prepararContrato = async (db: Firestore, cliente: ClienteContrato, uid: string, agora: number) => {
   const config = await lerConfig(db);
   let codigo = gerarCodigo();
@@ -54,5 +57,9 @@ export const prepararContrato = async (db: Firestore, cliente: ClienteContrato, 
   }
   const token = gerarToken();
   const doc = novoContrato(cliente, token, codigo, config, agora, uid);
-  return { ref: db.collection(COLECAO).doc(), codigo, token, doc };
+  const ref = db.collection(COLECAO).doc();
+  // Reserva do código: criada JUNTO com o contrato (create falha se já existir), então dois contratos nunca dividem o
+  // mesmo código, nem quando são criados ao mesmo tempo. A consulta acima só evita a colisão na maioria das vezes.
+  const codigoRef = db.doc(`${COLECAO_CODIGOS}/${codigo}`);
+  return { ref, codigo, token, doc, codigoRef, reservaDoCodigo: { contratoId: ref.id, criadoEm: agora } };
 };

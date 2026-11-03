@@ -4,18 +4,22 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test \"tests/*.test.cjs\"",
+    "typecheck": "tsc --noEmit -p .",
+    "check": "npm run typecheck && npm test"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@vercel/node": "^5.7.13",
     "cloudinary": "^2.10.0",
     "firebase-admin": "^14.5.0"
   },
   "overrides": {
     "jwks-rsa": "3.2.2"
+  },
+  "devDependencies": {
+    "@vercel/node": "^5.7.13"
   }
 }

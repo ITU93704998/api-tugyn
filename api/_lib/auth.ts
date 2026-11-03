@@ -46,6 +46,10 @@ const lerStatusDaConta = async (app: App, uid: string): Promise<StatusDaConta> =
   return perfil;
 };
 
+/** Erros do Firebase Auth que vêm da infraestrutura (rede, cota, erro interno), e não de um token ruim. */
+const CODIGOS_DE_INFRA = new Set(["auth/internal-error", "auth/network-request-failed", "auth/quota-exceeded", "auth/too-many-requests", "app/network-error", "app/network-timeout", "app/internal-error"]);
+export const falhaDeInfraestrutura = (codigo: unknown): boolean => typeof codigo === "string" && CODIGOS_DE_INFRA.has(codigo);
+
 /**
  * Exige `Authorization: Bearer <ID token do Firebase>` e devolve o uid REAL do usuário.
  * O uid sempre vem do token: nada que o cliente escreve no corpo decide quem ele é.
@@ -82,8 +86,14 @@ export const requireUser = async (
     user = { uid: decoded.uid, authTime: typeof decoded.auth_time === "number" ? decoded.auth_time : 0, admin: decoded.admin === true };
   } catch (erro) {
     // Conta desativada pela moderação: o app mostra o aviso de conta suspensa, e não "sessão expirada".
-    if ((erro as { code?: unknown } | null)?.code === "auth/user-disabled") res.status(403).json(RESPOSTA_SUSPENSA);
-    else res.status(401).json({ error: "Sessão inválida ou expirada." });
+    const codigo = (erro as { code?: unknown } | null)?.code;
+    if (codigo === "auth/user-disabled") res.status(403).json(RESPOSTA_SUSPENSA);
+    else if (falhaDeInfraestrutura(codigo)) {
+      // O problema é do lado do servidor/Firebase, não do login: o app tenta de novo em vez de pedir para entrar outra vez.
+      console.error(JSON.stringify({ evt: "auth_indisponivel", acao, code: typeof codigo === "string" ? codigo : "sem-codigo" }));
+      res.setHeader("Retry-After", "5");
+      res.status(503).json({ error: "Serviço indisponível. Tente novamente.", code: "auth-indisponivel", retryable: true });
+    } else res.status(401).json({ error: "Sessão inválida ou expirada." });
     return null;
   }
 

@@ -66,8 +66,15 @@ export const solicitar = async (db: Firestore, body: Record<string, unknown>, re
   const pedido = db.collection(SOLICITACOES).doc();
   try {
     // confere os limites E grava o pedido na MESMA transação: dois pedidos simultâneos não furam o limite
-    await db.runTransaction(async (tx) => {
+    const jaPendente = await db.runTransaction(async (tx): Promise<string | null> => {
       const [ip, wa, em] = await Promise.all([tx.get(limites.ip), tx.get(limites.wa), tx.get(limites.em)]);
+      // Dois envios simultâneos do mesmo WhatsApp passam juntos pela consulta acima; aqui (o documento do WhatsApp é
+      // lido e gravado pelos dois, então eles não correm juntos) o segundo vê o pedido do primeiro e não duplica.
+      const anterior = wa.exists ? (wa.get("pendente") as { id?: unknown; codigo?: unknown } | undefined) : undefined;
+      if (typeof anterior?.id === "string" && /^[A-Za-z0-9]{1,40}$/.test(anterior.id)) {
+        const pedidoAnterior = await tx.get(db.collection(SOLICITACOES).doc(anterior.id));
+        if (pedidoAnterior.exists && pedidoAnterior.get("status") === "pendente") return String(pedidoAnterior.get("codigo") ?? "");
+      }
       const doAparelho = eventosRecentes(ip.exists ? ip.data() : null, agora);
       const doWhatsapp = eventosRecentes(wa.exists ? wa.data() : null, agora);
       const doEmail = eventosRecentes(em.exists ? em.data() : null, agora);
@@ -76,10 +83,12 @@ export const solicitar = async (db: Firestore, body: Record<string, unknown>, re
       if (doEmail.length >= LIMITES.emailDia) throw new LimiteExcedido(MENSAGEM.email);
       const expiraEm = Timestamp.fromMillis(agora + 2 * DIA_MS); // para a política de expiração (TTL) do Firestore limpar sozinha
       tx.set(limites.ip, { eventos: [...doAparelho, agora], expiraEm });
-      tx.set(limites.wa, { eventos: [...doWhatsapp, agora], expiraEm });
+      tx.set(limites.wa, { eventos: [...doWhatsapp, agora], expiraEm, pendente: { id: pedido.id, codigo } });
       tx.set(limites.em, { eventos: [...doEmail, agora], expiraEm });
       tx.create(pedido, { status: "pendente", codigo, ...v.dados, whatsappDigitos: v.whatsappDigitos, origem, criadoEm: agora });
+      return null;
     });
+    if (jaPendente !== null) return responder(res, 200, { ok: true, codigo: jaPendente, repetida: true });
   } catch (error) {
     if (error instanceof LimiteExcedido) return responder(res, 429, { error: error.message });
     throw error;
@@ -105,6 +114,7 @@ export const aprovarSolicitacao = async (db: Firestore, id: string, uid: string,
       if (!atual.exists) throw new NaoEncontrado();
       if (atual.data()?.status !== "pendente") throw new Conflito();
       tx.create(novo.ref, novo.doc);
+      tx.create(novo.codigoRef, novo.reservaDoCodigo);
       tx.update(ref, { status: "aprovada", contratoId: novo.ref.id, aprovadaEm: agora, aprovadaPor: uid, origem: null }); // o código do IP só existe enquanto o pedido está pendente
     });
     resposta = { ok: true, id: novo.ref.id, codigo: novo.codigo, token: novo.token, validoAte: novo.doc.tokenExpiresAt };

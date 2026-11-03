@@ -54,7 +54,7 @@ const AMISTOSO_ID = /^[A-Za-z0-9]{20}$/;
 const DATA = /^(\d{4})-(\d{2})-(\d{2})$/;
 const HORA = /^([01]\d|2[0-3]):([0-5]\d)$/;
 export const LOCAL_MIN = 3;
-export const LOCAL_MAX = 120;
+export const LOCAL_MAX = 60;
 /** Antecedência mínima e prazo máximo para marcar. */
 export const ANTECEDENCIA_MS = 30 * 60_000;
 export const PRAZO_MAXIMO_MS = 120 * 24 * 3600_000;
@@ -366,17 +366,9 @@ const contagem = (v: unknown): number => (typeof v === "number" && Number.isFini
  * Resumo dos amistosos para quem visita o time: números do time e os 2 maiores artilheiros que ainda estão no elenco
  * (só nome e gols, sem uid). Sem jogos com placar = null.
  */
-export const resumoPublico = (d: Doc | undefined, membros: unknown[]) => {
+/** Resumo para quem visita o time: só os números do time (artilheiros ficam só para o próprio elenco). */
+export const resumoPublico = (d: Doc | undefined) => {
   if (!d || contagem(d.jogos) === 0) return null;
-  const jogadores = (d.jogadores && typeof d.jogadores === "object" ? d.jogadores : {}) as Doc;
-  const artilheiros = Object.entries(jogadores)
-    .flatMap(([u, x]) => {
-      const j = (x && typeof x === "object" ? x : {}) as Doc;
-      const gols = contagem(j.gols);
-      return membros.includes(u) && gols ? [{ nome: texto(j.nome, 40) || "Jogador", gols }] : [];
-    })
-    .sort((a, b) => b.gols - a.gols || a.nome.localeCompare(b.nome, "pt-BR"))
-    .slice(0, 2);
   return {
     jogos: contagem(d.jogos),
     vitorias: contagem(d.vitorias),
@@ -384,7 +376,8 @@ export const resumoPublico = (d: Doc | undefined, membros: unknown[]) => {
     derrotas: contagem(d.derrotas),
     golsPro: contagem(d.golsPro),
     golsContra: contagem(d.golsContra),
-    artilheiros,
+    // Lista vazia (e não ausente): versões antigas do app esperam o campo.
+    artilheiros: [],
   };
 };
 
@@ -426,10 +419,9 @@ const buscar = async (db: Firestore, uid: string, chave: string): Promise<Result
   });
   const ultimosResultados = ultimosJogos.map((j): "V" | "E" | "D" => (j.golsMeu > j.golsAdversario ? "V" : j.golsMeu === j.golsAdversario ? "E" : "D"));
   const resumo = await resumoRef(db, time.id).get();
-  const membros = Array.isArray(time.get("membros")) ? (time.get("membros") as unknown[]) : [];
   return {
     ok: true,
-    body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados, ultimosJogos, resumo: resumoPublico(resumo.data(), membros) } },
+    body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados, ultimosJogos, resumo: resumoPublico(resumo.data()) } },
   };
 };
 
@@ -550,29 +542,39 @@ const cancelar = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, 
  * como "em andamento" se um time novo nascer com o mesmo id). As cópias do próprio time, a chave e o resumo são apagados:
  * um time novo na mesma vaga (`uid_1`) começa sem histórico. Idempotente.
  */
+/** Amistosos tratados por vez ao encerrar: as cópias dos adversários são lidas juntas e gravadas num lote só (≤ 100 escritas). */
+const LOTE_ENCERRAR = 50;
+
 export const encerrarAmistososDoTime = async (db: Firestore, timeId: string): Promise<number> => {
   const todos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).get();
   let cancelados = 0;
-  for (const doc of todos.docs) {
-    const dados = doc.data();
-    const aberto = ["pendente", "aceito", "placar"].includes(String(dados.status));
-    const outroId = String(outroLado(dados, timeId).timeId ?? "");
+  // Em blocos (e não um jogo por vez): um time com histórico grande termina dentro do tempo do app. Cada bloco é um
+  // lote atômico e o processo todo é idempotente, então uma repetição continua de onde parou.
+  for (let i = 0; i < todos.docs.length; i += LOTE_ENCERRAR) {
+    const bloco = todos.docs.slice(i, i + LOTE_ENCERRAR);
+    const copias = await Promise.all(
+      bloco.map((doc) => {
+        const outroId = String(outroLado(doc.data(), timeId).timeId ?? "");
+        return TIME_ID.test(outroId) ? amistosoRef(db, outroId, doc.id).get() : Promise.resolve(null);
+      }),
+    );
     const lote = db.batch();
-    if (TIME_ID.test(outroId)) {
-      const outra = await amistosoRef(db, outroId, doc.id).get();
-      if (outra.exists) {
+    bloco.forEach((doc, j) => {
+      const aberto = ["pendente", "aceito", "placar"].includes(String(doc.data().status));
+      const outra = copias[j];
+      if (outra?.exists) {
         lote.update(outra.ref, {
           adversarioEncerrado: true,
           ...(aberto ? { status: "cancelado", canceladoPor: timeId, respondidoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp() } : {}),
         });
       }
-    }
-    lote.delete(doc.ref);
+      lote.delete(doc.ref);
+      if (aberto) cancelados += 1;
+    });
     await lote.commit();
-    if (aberto) cancelados += 1;
   }
   const chaves = await db.collection(COLECAO_CHAVES).where("timeId", "==", timeId).get();
-  for (const chave of chaves.docs) await chave.ref.delete();
+  await Promise.all(chaves.docs.map((chave) => chave.ref.delete()));
   await resumoRef(db, timeId).delete();
   return cancelados;
 };
@@ -735,9 +737,13 @@ const apurar = async (db: Firestore, uid: string, timeId: string): Promise<Resul
   return { ok: true, body: { apurados: await aplicarPrazos(db, timeId) } };
 };
 
+const MAX_ABERTOS_APURAR = 300;
+
 /** Grava o que os prazos vencidos decidiram (placar que valeu, jogo sem placar). Devolve quantos mudaram. */
 const aplicarPrazos = async (db: Firestore, timeId: string): Promise<number> => {
-  const abertos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).where("status", "in", ["aceito", "placar"]).limit(40).get();
+  // Todos os confirmados/com placar do time (é um por adversário, então é pouco): com um limite pequeno, os mesmos jogos
+  // ainda não vencidos podiam ocupar a consulta e deixar os vencidos de fora. O teto só protege contra dado anormal.
+  const abertos = await db.collection(`times/${timeId}/${SUB_AMISTOSOS}`).where("status", "in", ["aceito", "placar"]).limit(MAX_ABERTOS_APURAR).get();
   const agora = Date.now();
   let apurados = 0;
   for (const doc of abertos.docs) {

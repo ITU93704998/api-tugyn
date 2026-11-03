@@ -57,7 +57,13 @@ const registrar = async (db: Firestore, uid: string, token: string, platform: st
   const mine = await db.collection(TOKENS).where("uid", "==", uid).get();
   if (mine.size > MAX_TOKENS_PER_USER) {
     const oldest = [...mine.docs].sort((a, b) => Number(a.get("updatedAt") ?? 0) - Number(b.get("updatedAt") ?? 0)).slice(0, mine.size - MAX_TOKENS_PER_USER);
-    for (const doc of oldest) if (doc.id !== ref.id) await doc.ref.delete();
+    for (const doc of oldest) {
+      if (doc.id === ref.id) continue;
+      // Só apaga se o cadastro não mudou desde a leitura: um aparelho que renovou (ou passou para outra conta) no meio fica.
+      await doc.ref.delete({ lastUpdateTime: doc.updateTime }).catch((erro: unknown) => {
+        if ((erro as { code?: unknown } | null)?.code !== 9) throw erro; // 9 = FAILED_PRECONDITION
+      });
+    }
   }
   return revogacao;
 };
@@ -73,8 +79,11 @@ const revogar = async (db: Firestore, token: string, revogacao: string): Promise
 
 const remover = async (db: Firestore, uid: string, token: string): Promise<void> => {
   const ref = db.doc(`${TOKENS}/${tokenDocId(token)}`);
-  const snapshot = await ref.get();
-  if (snapshot.exists && snapshot.get("uid") === uid) await ref.delete(); // ninguém apaga o token de outra pessoa
+  // Na mesma transação: se o aparelho passou para outra conta entre a leitura e a remoção, o cadastro novo fica.
+  await db.runTransaction(async (tx) => {
+    const snapshot = await tx.get(ref);
+    if (snapshot.exists && snapshot.get("uid") === uid) tx.delete(ref); // ninguém apaga o token de outra pessoa
+  });
 };
 
 export const config = { maxDuration: 60 };

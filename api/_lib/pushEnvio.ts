@@ -264,12 +264,12 @@ export async function enviarAviso(db: Firestore, aviso: Aviso, options: EnvioOpt
 }
 
 /** Consulta indexada por um campo; concorrência, volume e duração limitados. Também aceita chamada de scheduler externo. */
-export async function recuperarAvisosPendentes(db: Firestore, options: EnvioOptions & { limit?: number } = {}): Promise<Record<string, number>> {
+export async function recuperarAvisosPendentes(db: Firestore, options: EnvioOptions & { limit?: number; prazoAte?: number } = {}): Promise<Record<string, number>> {
   const now = options.now ?? Date.now;
   const snap = await db.collection(COLLECTION).where("nextAttemptAt", "<=", now()).orderBy("nextAttemptAt").limit(Math.min(Math.max(options.limit ?? 10, 1), 30)).get();
   const counts = { examinados: snap.size, aceitosExpo: 0, pendentes: 0, incertos: 0, falhas: 0 };
   let cursor = 0;
-  const deadline = Date.now() + 40_000;
+  const deadline = Math.min(Date.now() + 40_000, options.prazoAte ?? Number.POSITIVE_INFINITY);
   await Promise.all(Array.from({ length: Math.min(3, snap.size) }, async () => {
     while (cursor < snap.docs.length && Date.now() < deadline) {
       const doc = snap.docs[cursor++];
@@ -289,13 +289,13 @@ export async function recuperarAvisosPendentes(db: Firestore, options: EnvioOpti
  * de novo depois do envio); credencial APNs/FCM inválida gera o alerta `push_credenciais_invalidas`. Recibo ok ainda não quer dizer que
  * a pessoa viu o aviso. Chamado pelas mesmas rotinas protegidas da outbox; nunca registra token, UID ou texto do aviso.
  */
-export async function consultarRecibos(db: Firestore, options: Pick<EnvioOptions, "now"> & { limit?: number; fetchReceipts?: typeof fetchExpoReceipts } = {}): Promise<Record<string, number>> {
+export async function consultarRecibos(db: Firestore, options: Pick<EnvioOptions, "now"> & { limit?: number; fetchReceipts?: typeof fetchExpoReceipts; prazoAte?: number } = {}): Promise<Record<string, number>> {
   const now = options.now ?? Date.now;
   const buscar = options.fetchReceipts ?? fetchExpoReceipts;
   const snap = await db.collection(RECIBOS).where("verificarApos", "<=", now()).orderBy("verificarApos").limit(Math.min(Math.max(options.limit ?? 20, 1), 50)).get();
   const counts = { lotes: snap.size, entregues: 0, recusados: 0, tokensRemovidos: 0, aguardando: 0, semRecibo: 0, falhas: 0 };
   const erros: Record<string, number> = {};
-  const deadline = Date.now() + 15_000;
+  const deadline = Math.min(Date.now() + 15_000, options.prazoAte ?? Number.POSITIVE_INFINITY);
   for (const doc of snap.docs) {
     if (Date.now() >= deadline) break;
     try {

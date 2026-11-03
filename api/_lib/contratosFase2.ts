@@ -7,6 +7,7 @@ import { bannerOk, montarCampanha, validarAnuncio } from "./anuncioContrato";
 import { type ConfigContratos, datasAoAprovar, linkExpirado, proximoStatus } from "./contratoCore";
 import { ContratoModelo, MODELO_DOC, PDF_URL_SEGUNDOS, acharVersao, limparNomePdf, parseModelo, proximaVersao, validarPdf } from "./contratoModelo";
 import { Conflito, Invalido, NaoEncontrado, lerNaTransacao, responder } from "./contratosComuns";
+import { gravarPublicacao, lerCampanhasNaTransacao } from "./publicacaoAnuncios";
 import { type ContratoDoc, comHistorico, contaDosComprovantes, limparTexto, validarImagem, visaoPublica } from "./contratos";
 
 /**
@@ -200,11 +201,17 @@ export const adminModeloUrl = async (db: Firestore, body: Record<string, unknown
  * Aprova: cria a campanha (ATIVA, com as datas do contrato; se o início já passou, começa agora e mantém os dias) e marca o contrato
  * como aprovado, TUDO na mesma transação. Publicar para o app é feito pelo painel logo depois (a mesma função do botão Publicar).
  */
-export const adminAprovar = async (db: Firestore, ref: DocumentReference, uid: string, agora: number, res: VercelResponse) => {
+/**
+ * `publicar`: a campanha nova já entra em `adsConfig/atual` na MESMA transação (antes o painel esperava a campanha chegar e
+ * publicava depois; se a aba fechasse no meio, o contrato ficava aprovado e o anúncio fora do app).
+ */
+export const adminAprovar = async (db: Firestore, ref: DocumentReference, uid: string, agora: number, res: VercelResponse, publicar = false) => {
   let resposta: Record<string, unknown> = {};
   try {
     await db.runTransaction(async (tx) => {
       const atual = await lerNaTransacao(tx, ref);
+      // todas as leituras antes de qualquer gravação
+      const inventario = publicar ? await lerCampanhasNaTransacao(db, tx) : null;
       const novoStatus = proximoStatus(atual.status, "aprovar", "admin");
       if (!novoStatus || !atual.anuncio || !atual.pedido) throw new Conflito();
       const datas = datasAoAprovar(atual.pedido, agora);
@@ -217,6 +224,10 @@ export const adminAprovar = async (db: Firestore, ref: DocumentReference, uid: s
       const historico = comHistorico(atual.historico, { em: agora, por: "admin", acao: "aprovou o anúncio", nota: datas.deslocado ? "início ajustado para a aprovação (os dias contratados foram mantidos)" : "campanha criada" });
       tx.update(ref, { status: novoStatus, campanhaId: campanha.id, pedido, tokenExpiresAt: datas.fimMs, aprovadoEm: agora, ajustes: null, atualizadoEm: agora, historico, aprovadoPor: uid });
       resposta = { ok: true, campanhaId: campanha.id, inicioMs: datas.inicioMs, fimMs: datas.fimMs, deslocado: datas.deslocado };
+      if (inventario) {
+        const publicacao = gravarPublicacao(db, tx, [...inventario, { id: campanha.id, ...validada.value }], agora, uid, "aprovar");
+        resposta.publicacao = { anuncios: publicacao.ads.length, foraDaPublicacao: publicacao.skipped.find((item) => item.id === campanha.id)?.reason ?? null };
+      }
     });
   } catch (error) {
     if (error instanceof NaoEncontrado) return responder(res, 404, { error: "Contrato não encontrado." });

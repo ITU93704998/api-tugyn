@@ -10,7 +10,8 @@
  * prévia `convitesTime/<codigo>` (nome, cor, sigla, escudo e detalhes) e mostra até que horas o link vale (1 hora). O
  * botão abre o app em `tugyn://time-convite/<codigo>`, onde a pessoa pede para entrar (o dono aprova).
  */
-import { esc, limpar, type Plataforma } from "./turmaLink";
+import { blocoDasLojas, documentoPublico, esc, escudoHtml, topoHtml, type Plataforma } from "./paginaPublica";
+import { limpar } from "./turmaLink";
 
 export const isValidLinkId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9]{16}$/.test(value);
 
@@ -28,6 +29,8 @@ export interface JogadorPublico {
 export interface TimePublico {
   nome: string;
   cor: string;
+  /** Segunda cor (a sigla do escudo desenhado), ou "". */
+  corSecundaria: string;
   sigla: string;
   /** "Society · Masculino · Recife, PE" (só o que existir). */
   detalhes: string;
@@ -92,7 +95,8 @@ export const timeDoDocumento = (dados: unknown): TimePublico | null => {
       return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId, numero, posicao, capitao: camisa?.capitao === true }] : [];
     })
     .sort((a, b) => Number(b.dono) - Number(a.dono) || (a.numero ?? 100) - (b.numero ?? 100) || a.nome.localeCompare(b.nome, "pt-BR"));
-  return { nome, cor, sigla, detalhes, escudo: fotoPequena(d.escudoUrl, CORTE_ESCUDO), imagem: fotoPequena(d.escudoUrl, CORTE_PREVIA_LINK), jogadores };
+  const corSecundaria = typeof d.corSecundaria === "string" && /^#[0-9A-Fa-f]{6}$/.test(d.corSecundaria) && d.corSecundaria.toLowerCase() !== cor.toLowerCase() ? d.corSecundaria : "";
+  return { nome, cor, corSecundaria, sigla, detalhes, escudo: fotoPequena(d.escudoUrl, CORTE_ESCUDO), imagem: fotoPequena(d.escudoUrl, CORTE_PREVIA_LINK), jogadores };
 };
 
 export const VALIDADE_CONVITE_MS = 60 * 60 * 1000;
@@ -150,17 +154,6 @@ interface PaginaTimeParams {
   paginaUrl?: string | null;
 }
 
-/** Bloco "Ainda não tem o app?" com as lojas do aparelho. */
-const blocoDasLojas = (lojaIos: string | null, lojaAndroid: string | null, plataforma: Plataforma): string => {
-  const lojas: { rotulo: string; url: string }[] = [];
-  if (plataforma !== "android" && lojaIos) lojas.push({ rotulo: "Baixar na App Store", url: lojaIos });
-  if (plataforma !== "ios" && lojaAndroid) lojas.push({ rotulo: "Baixar no Google Play", url: lojaAndroid });
-  return lojas.length
-    ? `<p class="hint">Ainda não tem o app?</p>
-       <div class="store-links">${lojas.map((l) => `<a class="link" href="${esc(l.url)}">${esc(l.rotulo)} <span class="link-arrow">›</span></a>`).join("")}</div>`
-    : `<p class="hint">Ainda não tem o app? Procure por <strong>Tugyn</strong> na App Store ou no Google Play.</p>`;
-};
-
 /** Imagem da prévia do link: o escudo (600x600) quando existe; senão, o ícone do app. */
 const metaDaImagem = (imagem: string, iconUrl: string | null | undefined): string =>
   imagem
@@ -174,10 +167,12 @@ const metaDaImagem = (imagem: string, iconUrl: string | null | undefined): strin
 <meta property="og:image:height" content="512">`
       : "";
 
-const escudoHtml = (t: { escudo: string; cor: string; nome: string; sigla: string }): string =>
-  t.escudo
-    ? `<div class="escudo escudo-img" style="border-color:${esc(t.cor)}"><img src="${esc(t.escudo)}" alt="Escudo do ${esc(t.nome)}" width="72" height="72"></div>`
-    : `<div class="escudo" style="background:${esc(t.cor)}">${esc(t.sigla) || esc((Array.from(t.nome)[0] ?? "?").toUpperCase())}</div>`;
+/** "Society", "Masculino Veterano", "Recife, PE": as pílulas do topo. */
+const chipsDosDetalhes = (detalhes: string): string[] => detalhes.split(" · ").map((x) => x.trim()).filter(Boolean);
+
+/** Topo de "não encontrado" (sem dado nenhum do time). */
+const topoVazio = (titulo: string): string =>
+  topoHtml({ marca: escudoHtml({ escudo: "", cor: "#FE7552", nome: "Tugyn", sigla: "?" }), eyebrow: "Tugyn", titulo });
 
 interface PaginaConviteParams {
   convite: ConvitePublico | null;
@@ -198,29 +193,51 @@ export const renderizarPaginaConvite = ({ convite, codigo, agoraMs, lojaIos, loj
     ? `${convite.detalhes ? `${convite.detalhes}. ` : ""}Toque para pedir para entrar no time pelo app Tugyn. O link vale até ${horaDeBrasilia(convite.expiraEmMs)}.`
     : "Este link de convocação expirou. Peça um novo ao dono do time.";
   const corpo = convite
-    ? `${escudoHtml(convite)}
-  <p class="eyebrow">Convocação para o time</p>
-  <h1>${esc(convite.nome)}</h1>
-  ${convite.detalhes ? `<p class="det">${esc(convite.detalhes)}</p>` : ""}
+    ? `  ${topoHtml({ cor: convite.cor, marca: escudoHtml(convite), eyebrow: `Convocação${convite.sigla ? ` · ${convite.sigla}` : ""}`, titulo: convite.nome, chips: chipsDosDetalhes(convite.detalhes) })}
   ${valido
-    ? `<p class="sub">Peça para entrar pelo app. O dono do time confirma a sua entrada.<br>Link válido até ${esc(horaDeBrasilia(convite.expiraEmMs))}.</p>
+    ? `<div class="faixa"><span class="faixa-icone" aria-hidden="true">⏱</span>Link válido até ${esc(horaDeBrasilia(convite.expiraEmMs))}. Peça para entrar pelo app; o dono do time confirma a sua entrada.</div>
   <a class="btn" href="tugyn://time-convite/${esc(encodeURIComponent(codigo))}">Pedir para entrar no time</a>`
-    : `<p class="sub">Este link expirou (vale 1 hora). Peça um novo ao dono do time.</p>
+    : `<div class="faixa faixa-aviso"><span class="faixa-icone" aria-hidden="true">!</span>Este link expirou (vale 1 hora). Peça um novo ao dono do time.</div>
   <a class="btn" href="tugyn://">Abrir no Tugyn</a>`}`
-    : `<div class="escudo" style="background:#FE7552">?</div>
-  <h1>Link não encontrado</h1>
-  <p>O link pode ter expirado ou sido trocado pelo dono do time.</p>
+    : `  ${topoVazio("Link não encontrado")}
+  <div class="faixa faixa-aviso"><span class="faixa-icone" aria-hidden="true">!</span>O link pode ter expirado ou sido trocado pelo dono do time.</div>
   <a class="btn" href="tugyn://">Abrir no Tugyn</a>`;
-  return documentoHtml({
+  return documentoPublico({
     titulo,
     descricao,
     imagemMeta: metaDaImagem(convite?.imagem ?? "", iconUrl),
     iconUrl,
     paginaUrl,
     conteudo: `${corpo}
-  ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}
-  <p class="footer">Compartilhado pelo app Tugyn</p>`,
+  ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}`,
   });
+};
+
+/** As linhas do elenco, na ordem do app (posição por extenso, como chega em `JogadorPublico.posicao`). */
+const LINHAS: { titulo: string; posicoes: string[] }[] = [
+  { titulo: "Treinador", posicoes: ["Treinador"] },
+  { titulo: "Goleiros", posicoes: ["Goleiro"] },
+  { titulo: "Defesa", posicoes: ["Zagueiro", "Lateral", "Fixo"] },
+  { titulo: "Meio-campo", posicoes: ["Volante", "Meia", "Ala"] },
+  { titulo: "Ataque", posicoes: ["Atacante", "Pivô"] },
+];
+
+/** Separa por linha quando alguém tem posição; sem posições, uma grade só (como no app). */
+const gruposDoElenco = (jogadores: JogadorPublico[]): { titulo: string; itens: JogadorPublico[] }[] => {
+  if (!jogadores.some((j) => j.posicao)) return [{ titulo: "", itens: jogadores }];
+  const grupos = LINHAS.map((l) => ({ titulo: l.titulo, itens: jogadores.filter((j) => l.posicoes.includes(j.posicao)) }));
+  grupos.push({ titulo: "Sem posição", itens: jogadores.filter((j) => !LINHAS.some((l) => l.posicoes.includes(j.posicao))) });
+  return grupos.filter((g) => g.itens.length > 0);
+};
+
+const cartaoDoJogador = (j: JogadorPublico): string => {
+  const inicial = esc((Array.from(j.nome)[0] ?? "?").toUpperCase());
+  return `<li class="jogador">
+      <span class="foto">${inicial}${j.foto ? `<img src="${esc(j.foto)}" alt="" width="64" height="64" loading="lazy">` : ""}${j.capitao ? `<span class="capitao" title="Capitão">C</span>` : ""}${j.numero === null ? "" : `<span class="numero">${esc(String(j.numero).padStart(2, "0"))}</span>`}</span>
+      <span class="nome">${esc(j.nome)}</span>
+      <span class="posicao">${esc(j.posicao || "Sem posição")}${j.capitao ? " · Capitão" : ""}</span>
+      ${j.dono ? `<span class="dono">Dono</span>` : ""}
+    </li>`;
 };
 
 export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaTimeParams): string => {
@@ -230,33 +247,22 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
     ? `${time.detalhes ? `${time.detalhes}. ` : ""}${total} ${total === 1 ? "jogador" : "jogadores"}${total ? `: ${resumoDoElenco(time.jogadores)}` : ""}. Monte o seu time no app Tugyn.`
     : "Monte o seu time no app Tugyn.";
 
-  const download = blocoDasLojas(lojaIos, lojaAndroid, plataforma);
-
-  const inicial = (nome: string) => esc((Array.from(nome)[0] ?? "?").toUpperCase());
   const elenco = time && total
-    ? `<ul class="elenco">${time.jogadores
-        .map(
-          (j) => `<li>
-          <span class="avatar">${inicial(j.nome)}${j.foto ? `<img src="${esc(j.foto)}" alt="" width="40" height="40" loading="lazy">` : ""}</span>
-          <span class="num">${j.numero === null ? "" : esc(String(j.numero))}</span>
-          <span class="nome">${esc(j.nome)}${j.posicao ? `<small>${esc(j.posicao)}</small>` : ""}</span>${j.dono ? `<span class="tag">Dono</span>` : ""}
-        </li>`,
-        )
-        .join("")}</ul>`
-    : `<p>Este time ainda não tem jogadores.</p>`;
+    ? gruposDoElenco(time.jogadores)
+        .map((g) => `<div class="grupo">${g.titulo ? `<p class="grupo-titulo">${esc(g.titulo)} · ${g.itens.length}</p>` : ""}<ul class="grade" role="list">${g.itens.map(cartaoDoJogador).join("")}</ul></div>`)
+        .join("")
+    : `<p class="vazio">Este time ainda não tem jogadores.</p>`;
 
   const corpo = time
-    ? `${escudoHtml(time)}
-  <p class="eyebrow">Time no Tugyn${time.sigla ? ` · ${esc(time.sigla)}` : ""}</p>
-  <h1>${esc(time.nome)}</h1>
-  ${time.detalhes ? `<p class="det">${esc(time.detalhes)}</p>` : ""}
-  <p class="sub">${total} ${total === 1 ? "jogador" : "jogadores"}</p>
-  ${elenco}`
-    : `<div class="escudo" style="background:#FE7552">?</div>
-  <h1>Time não encontrado</h1>
-  <p>O link pode ter mudado ou o time foi apagado.</p>`;
+    ? `  ${topoHtml({ cor: time.cor, marca: escudoHtml(time), eyebrow: `Time no Tugyn${time.sigla ? ` · ${time.sigla}` : ""}`, titulo: time.nome, chips: chipsDosDetalhes(time.detalhes) })}
+  <section class="cartao">
+    <p class="secao">Elenco <span class="contagem">${total}</span><span class="sr">${total} ${total === 1 ? "jogador" : "jogadores"}</span></p>
+    ${elenco}
+  </section>`
+    : `  ${topoVazio("Time não encontrado")}
+  <div class="faixa faixa-aviso"><span class="faixa-icone" aria-hidden="true">!</span>O link pode ter mudado ou o time foi apagado.</div>`;
 
-  return documentoHtml({
+  return documentoPublico({
     titulo,
     descricao,
     imagemMeta: metaDaImagem(time?.imagem ?? "", iconUrl),
@@ -264,78 +270,6 @@ export const renderizarPaginaTime = ({ time, lojaIos, lojaAndroid, plataforma, i
     paginaUrl,
     conteudo: `${corpo}
   <a class="btn" href="tugyn://">Abrir no Tugyn</a>
-  ${download}
-  <p class="footer">Compartilhado pelo app Tugyn</p>`,
+  ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}`,
   });
-};
-
-/** Molde comum das páginas de time (HTML e CSS, sem scripts). */
-const documentoHtml = (p: {
-  titulo: string;
-  descricao: string;
-  imagemMeta: string;
-  iconUrl?: string | null;
-  paginaUrl?: string | null;
-  conteudo: string;
-}): string => {
-  const { titulo, descricao, imagemMeta, iconUrl, paginaUrl, conteudo } = p;
-  return `<!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="robots" content="noindex">
-<title>${esc(titulo)}</title>
-<meta name="description" content="${esc(descricao)}">
-<meta property="og:title" content="${esc(titulo)}">
-<meta property="og:description" content="${esc(descricao)}">
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="Tugyn">
-<meta property="og:locale" content="pt_BR">
-${paginaUrl ? `<meta property="og:url" content="${esc(paginaUrl)}">` : ""}
-${imagemMeta}
-${iconUrl ? `<link rel="icon" type="image/png" href="${esc(iconUrl)}">` : ""}
-<style>
-  :root { --bg:#F2F2F7; --surface:#FFFFFF; --label:#1C1C1E; --secondary:#6E6E73; --tertiary:#A1A1A6;
-    --separator:rgba(60,60,67,0.12); --accent:#FE7552; --shadow:0 1px 2px rgba(0,0,0,0.04),0 8px 24px rgba(0,0,0,0.06); }
-  @media (prefers-color-scheme: dark) { :root { --bg:#000; --surface:#1C1C1E; --label:#F2F2F7; --secondary:#A1A1A6;
-    --tertiary:#6E6E73; --separator:rgba(84,84,88,0.65); --shadow:none; } }
-  * { box-sizing:border-box; }
-  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px 16px;
-    background:var(--bg); color:var(--label); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif; }
-  main { width:100%; max-width:400px; background:var(--surface); border-radius:20px; padding:28px 20px 22px; box-shadow:var(--shadow); text-align:center; }
-  .escudo { width:72px; height:72px; margin:0 auto 14px; border-radius:22px; display:flex; align-items:center; justify-content:center;
-    color:#fff; font-size:32px; font-weight:800; }
-  .eyebrow { font-size:11px; font-weight:700; letter-spacing:1.2px; text-transform:uppercase; color:var(--secondary); margin:0 0 6px; }
-  h1 { font-size:24px; line-height:30px; margin:0 0 4px; overflow-wrap:anywhere; }
-  p { color:var(--secondary); font-size:15px; line-height:21px; margin:0 0 18px; }
-  .sub { font-weight:600; }
-  .elenco { list-style:none; margin:0 0 20px; padding:0; text-align:left; border-top:1px solid var(--separator); }
-  .elenco li { display:flex; align-items:center; gap:12px; padding:10px 2px; border-bottom:1px solid var(--separator); }
-  .avatar { position:relative; flex:none; width:40px; height:40px; border-radius:50%; overflow:hidden; display:flex; align-items:center;
-    justify-content:center; background:rgba(254,117,82,0.14); color:var(--accent); font-weight:800; }
-  .avatar img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-  .nome { flex:1; min-width:0; font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .nome small { display:block; font-size:12px; font-weight:500; color:var(--secondary); }
-  .num { flex:none; width:24px; text-align:center; font-size:15px; font-weight:800; color:var(--accent); }
-  .escudo-img { background:#fff; border:3px solid; overflow:hidden; padding:4px; }
-  .escudo-img img { width:100%; height:100%; object-fit:contain; }
-  .det { margin:0 0 4px; font-size:13px; }
-  .tag { flex:none; font-size:11px; font-weight:700; color:var(--accent); background:rgba(254,117,82,0.12); padding:3px 8px; border-radius:8px; }
-  .btn { display:flex; align-items:center; justify-content:center; min-height:50px; border-radius:14px; background:var(--accent);
-    color:#fff; text-decoration:none; font-size:17px; font-weight:600; }
-  .sub + .btn { margin-top:4px; }
-  .hint { font-size:13px; color:var(--tertiary); margin:18px 0 8px; }
-  .store-links { display:flex; flex-direction:column; gap:4px; }
-  .link { padding:10px 8px; color:var(--accent); text-decoration:none; font-size:15px; font-weight:500; }
-  .link-arrow { opacity:.6; }
-  .footer { margin:16px 0 0; font-size:12px; color:var(--tertiary); }
-</style>
-</head>
-<body>
-<main>
-  ${conteudo}
-</main>
-</body>
-</html>`;
 };

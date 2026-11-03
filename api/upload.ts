@@ -16,11 +16,14 @@ const MAX_UPLOADS_POR_IP_HORA = 80;
 /**
  * Escudo: quadrado de até 512 px. Com "fundo liso", o fundo de cor única (branco, verde...) vira transparente com
  * `e_make_transparent` (transformação comum, aplicada UMA vez no envio; NÃO é a remoção de fundo por IA, que é cara).
- * Salvo em PNG para guardar a transparência.
+ * Salvo em PNG para guardar a transparência. Sem recorte no app: `e_trim` corta as bordas vazias (transparentes ou de
+ * uma cor só), para o escudo ocupar o círculo inteiro.
  */
 const transformacaoDoEscudo = (fundoLiso: boolean) => [
+  ...(fundoLiso ? [{ effect: "make_transparent:15" }] : []),
+  { effect: "trim:10" },
   { width: 512, height: 512, crop: "limit" },
-  ...(fundoLiso ? [{ effect: "make_transparent:15" }] : [{ quality: "auto" }]),
+  ...(fundoLiso ? [] : [{ quality: "auto" }]),
 ];
 
 /** O IP fica só como hash no limitador; o UID continua sendo a chave principal. */
@@ -151,7 +154,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       resource_type: "image",
       allowed_formats: ["jpg", "jpeg", "png", "webp"],
       transformation: ehEscudo ? transformacaoDoEscudo(body.fundoLiso === true) : [{ width: 1080, height: 1080, crop: "limit", quality: "auto" }],
-      ...(ehEscudo && body.fundoLiso === true ? { format: "png" } : {}),
+      // Escudo sempre em PNG: guarda a transparência (do arquivo original ou do "fundo liso").
+      ...(ehEscudo ? { format: "png" } : {}),
       tags: isAdminOnlyBucket(bucket) ? ["anuncio"] : ["uid_" + user.uid],
     });
 

@@ -223,11 +223,12 @@ test('par de times: amistosos com um time que foi apagado não bloqueiam o time 
   assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('sem_acordo'), jogo('aceito')] })), null);
 });
 
-test('resumo público: números do time e só os 2 maiores artilheiros que ainda estão no elenco, sem uid', () => {
+test('resumo público: só os números do time, sem artilheiros', () => {
   const d = { jogos: 3, vitorias: 2, empates: 0, derrotas: 1, golsPro: 7, golsContra: 4, jogadores: { a: { nome: 'Ana', gols: 3 }, b: { nome: 'Bia', gols: 2 }, c: { nome: 'Saiu', gols: 5 }, e: { nome: 'Edu', gols: 1 }, z: { nome: 'Zero', gols: 0 } } };
-  const r = A.resumoPublico(d, ['a', 'b', 'e', 'z']);
+  const r = A.resumoPublico(d);
   assert.equal(r.jogos, 3);
-  assert.equal(JSON.stringify(r.artilheiros), JSON.stringify([{ nome: 'Ana', gols: 3 }, { nome: 'Bia', gols: 2 }]));
-  assert.equal(A.resumoPublico({ jogos: 0 }, []), null);
-  assert.equal(A.resumoPublico(undefined, []), null);
+  assert.equal(r.golsPro, 7);
+  assert.equal(JSON.stringify(r.artilheiros), '[]');
+  assert.equal(A.resumoPublico({ jogos: 0 }), null);
+  assert.equal(A.resumoPublico(undefined), null);
 });

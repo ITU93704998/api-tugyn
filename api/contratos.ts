@@ -22,6 +22,7 @@ import {
 } from "./_lib/contratos";
 import { Conflito, NaoEncontrado, buscarPorToken, lerConfig, lerNaTransacao, prepararContrato, responder } from "./_lib/contratosComuns";
 import { aprovarSolicitacao, excluirSolicitacao, solicitar } from "./_lib/solicitacoes";
+import { excluirCampanha, publicarAnuncios } from "./_lib/publicacaoAnuncios";
 import { adminAprovar, adminModeloEnviar, adminModeloUrl, adminPedirAjustes, clienteEnviarAnuncio, clienteImagem, clientePdf, lerModelo } from "./_lib/contratosFase2";
 import { handleCors } from "./_lib/cors";
 import { dentroDoLimite } from "./_lib/rateLimit";
@@ -31,7 +32,7 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  *
  * O CLIENTE (sem login; o token do link é a chave): `ver`, `configurar`, `comprovante`.
  * O ADMINISTRADOR (login do Firebase com a permissão `admin`): `criar`, `novo_link`, `ver_comprovante`, `confirmar_pagamento`,
- *   `pedir_comprovante`, `cancelar`.
+ *   `pedir_comprovante`, `cancelar`, `aprovar` (com `publicar`), `anuncios_publicar`, `campanha_excluir`.
  *
  * O cliente NUNCA fala com o Firestore: esta rota confere o token e a etapa, RECALCULA o preço e grava (o valor que a tela do cliente mostra é só apoio).
  */
@@ -39,7 +40,7 @@ import { dentroDoLimite } from "./_lib/rateLimit";
 const ACOES_CLIENTE = ["ver", "configurar", "comprovante", "contrato_pdf", "anuncio_imagem", "anuncio_enviar"] as const;
 /** Sem login nem link: a página pública "quero anunciar". Só aceita a solicitação (e com limite por IP). */
 const ACOES_PUBLICAS = ["solicitar"] as const;
-const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "aprovar", "pedir_ajustes"] as const;
+const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "aprovar", "pedir_ajustes", "anuncios_publicar", "campanha_excluir"] as const;
 const ID = /^[A-Za-z0-9]{10,40}$/;
 
 /** Ação da rota → ação do núcleo de etapas (sem `as`: se um nome mudar de um lado, o compilador acusa). */
@@ -141,8 +142,11 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
   if (acao === "criar") {
     const dados = parseCriar(body);
     if (!dados.ok) return responder(res, 400, { error: dados.error });
-    const { ref, codigo, token, doc } = await prepararContrato(db, dados.cliente, uid, agora);
-    await ref.create(doc);
+    const { ref, codigo, token, doc, codigoRef, reservaDoCodigo } = await prepararContrato(db, dados.cliente, uid, agora);
+    const lote = db.batch();
+    lote.create(ref, doc);
+    lote.create(codigoRef, reservaDoCodigo);
+    await lote.commit();
     return responder(res, 200, { id: ref.id, codigo, token, validoAte: doc.tokenExpiresAt });
   }
 
@@ -151,6 +155,14 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
     const solicitacao = idValido(body.id);
     if (!solicitacao) return responder(res, 400, { error: "Solicitação inválida." });
     return acao === "solicitacao_aprovar" ? aprovarSolicitacao(db, solicitacao, uid, agora, res) : excluirSolicitacao(db, solicitacao, res);
+  }
+
+  // Publicação dos anúncios próprios pelo servidor, a partir do inventário atual (ver publicacaoAnuncios.ts).
+  if (acao === "anuncios_publicar") return responder(res, 200, { ...(await publicarAnuncios(db, uid, agora)) });
+  if (acao === "campanha_excluir") {
+    const campanha = idValido(body.id);
+    if (!campanha) return responder(res, 400, { error: "Campanha inválida." });
+    return responder(res, 200, { ...(await excluirCampanha(db, campanha, body.publicar === true, uid, agora)) });
   }
 
   // o contrato em PDF é único (não pertence a um contrato do cliente): não usa id
@@ -174,7 +186,7 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
     return responder(res, 200, { url, expiraEm: expiraEmSegundos * 1000 });
   }
 
-  if (acao === "aprovar") return adminAprovar(db, ref, uid, agora, res);
+  if (acao === "aprovar") return adminAprovar(db, ref, uid, agora, res, body.publicar === true);
   if (acao === "pedir_ajustes") return adminPedirAjustes(db, ref, nota, agora, res);
 
   if (acao === "pedir_comprovante" && nota.length < 3) return responder(res, 400, { error: "Explique ao cliente o que precisa ser reenviado." });

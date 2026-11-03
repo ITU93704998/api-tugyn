@@ -6,7 +6,7 @@ import { defineSecret } from "firebase-functions/params";
 import { type Change, participantEvents, gameEvents } from "./events";
 import { dispatchEvent, enqueueEvent, sweepEvents } from "./outbox";
 import { isSafeUid } from "../../api/_lib/validation";
-import { recuperarAvisosPendentes } from "../../api/_lib/pushEnvio";
+import { consultarRecibos, recuperarAvisosPendentes } from "../../api/_lib/pushEnvio";
 
 if (!getApps().length) initializeApp();
 const db = getFirestore();
@@ -52,4 +52,13 @@ export const retryTurmaNotifications = onSchedule({
   const outbox = await recuperarAvisosPendentes(db, { limit: 3 });
   const events = await sweepEvents(db);
   console.log(JSON.stringify({ evt: "turma_push_sweep", outbox, events }));
+});
+
+// Expo keeps receipts for ~24 h and suggests checking ~15 min after sending; the Vercel cron runs once a day.
+export const checkPushReceipts = onSchedule({
+  region, schedule: "every 15 minutes", timeZone: "America/Sao_Paulo", timeoutSeconds: 60,
+  memory: "256MiB", maxInstances: 1, retryCount: 0, secrets: [expoAccessToken],
+}, async () => {
+  const recibos = await consultarRecibos(db, { limit: 30, prazoAte: Date.now() + 45_000 });
+  console.log(JSON.stringify({ evt: "push_receipts_check", ...recibos }));
 });

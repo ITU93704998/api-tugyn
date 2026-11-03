@@ -83,7 +83,9 @@ export const config = { maxDuration: 60 };
  * Prazo de cada etapa da rotina, contado do início da chamada (a função morre em `maxDuration`). O que não couber fica na
  * fila para a próxima rodada e a resposta sai como não-2xx (ver `problemasDaRotina`).
  */
-const PRAZOS_DA_ROTINA_MS = { apuracao: 30_000, avisos: 38_000, exclusoes: 46_000, midia: 52_000 };
+const PRAZOS_DA_ROTINA_MS = { apuracao: 28_000, avisos: 35_000, exclusoes: 42_000, midia: 47_000, outbox: 51_000, recibos: 54_000, pendencias: 57_000 };
+/** Etapa que não tem pelo menos isso de tempo nem começa (uma chamada externa já em andamento não é interrompida). */
+const FOLGA_MINIMA_MS = 1_500;
 
 type Resultado = { ok: true; body?: Record<string, unknown> } | { ok: false; status: number; code: string; error: string };
 
@@ -563,12 +565,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const exclusoes = await etapa("exclusoes", () => processarExclusoesPendentes(db, inicio + PRAZOS_DA_ROTINA_MS.exclusoes));
       // 4. Reservas de imagem vencidas: confirma as trocas e apaga os envios órfãos (ver `_lib/midiaReservas.ts`).
       const midia = await etapa("midia", () => limparReservasDeMidia(db, inicio + PRAZOS_DA_ROTINA_MS.midia));
-      // Reaproveita o cron diário existente, sem adicionar função ou agendamento de outro plano.
-      const recuperados = await etapa("push_outbox", () => recuperarAvisosPendentes(db, { limit: 3 }));
-      // Recibos do Expo ficam disponíveis por ~24 h: a rotina diária alcança os avisos do dia anterior.
-      await etapa("push_recibos", () => consultarRecibos(db));
+      // As três últimas recebem o prazo que sobra (as anteriores podem ter usado tudo). O que não couber fica para o
+      // worker de 1 minuto (outbox) / de 15 minutos (recibos), em notifications-functions, ou para a próxima rodada.
+      const adiadas: string[] = [];
+      const seCouber = async <T>(nome: string, ate: number, fn: (ate: number) => Promise<T>): Promise<T | null> => {
+        if (Date.now() > ate - FOLGA_MINIMA_MS) {
+          adiadas.push(nome);
+          return null;
+        }
+        return etapa(nome, () => fn(ate));
+      };
+      const recuperados = await seCouber("push_outbox", inicio + PRAZOS_DA_ROTINA_MS.outbox, (ate) => recuperarAvisosPendentes(db, { limit: 3, prazoAte: ate }));
+      const recibos = await seCouber("push_recibos", inicio + PRAZOS_DA_ROTINA_MS.recibos, (ate) => consultarRecibos(db, { prazoAte: ate }));
       // Recálculos de perfil que o app não conseguiu pedir (ou que falharam): pendência durável gravada junto com a partida.
-      await etapa("estatisticas_pendencias", () => processarPendencias(db));
+      const pendencias = await seCouber("estatisticas_pendencias", inicio + PRAZOS_DA_ROTINA_MS.pendencias, (ate) => processarPendencias(db, { prazoMs: Math.max(ate - Date.now(), 0) }));
 
       const resumo = {
         ...(apuracao?.contagem ?? {}),
@@ -578,6 +588,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         exclusoesPendentes: exclusoes?.pendentes ?? 0,
         reservasResolvidas: midia?.resolvidas ?? 0,
         duracaoMs: Date.now() - inicio,
+        // Sem tempo hoje: não é falha (a fila é durável e os workers frequentes também cuidam).
+        etapasAdiadas: adiadas,
       };
       const problemas = problemasDaRotina({
         falhou: apuracao?.contagem.falhou ?? 0,
@@ -591,6 +603,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           ...((exclusoes?.pendentes ?? 0) > 0 ? ["exclusoes_pendentes"] : []),
           ...(midia?.restantes ? ["midia_restante"] : []),
           ...((midia?.falhas ?? 0) > 0 ? ["midia_pendente"] : []),
+          // Falhas por item dessas etapas também contam (antes só a exceção da etapa inteira aparecia).
+          ...((recuperados?.falhas ?? 0) > 0 ? [`push_outbox_falhas:${recuperados?.falhas}`] : []),
+          ...((recibos?.falhas ?? 0) > 0 ? [`push_recibos_falhas:${recibos?.falhas}`] : []),
+          ...((pendencias?.falhas ?? 0) > 0 ? [`estatisticas_falhas:${pendencias?.falhas}`] : []),
           // Sem a credencial de uma conta, nem a limpeza de imagens nem a exclusão de conta terminam.
           ...bucketsSemCredenciais().map((bucket) => `credencial_ausente_${bucket}`),
         ],

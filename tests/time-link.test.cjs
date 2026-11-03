@@ -116,3 +116,17 @@ test("link de convocação: vale 1 hora, abre o app com o código e mostra o esc
   assert.equal(conviteDoDocumento({ nome: "<b>x</b>", criadoEm }).nome, "<b>x</b>");
   assert.equal(renderizarPaginaConvite({ ...base, convite: conviteDoDocumento({ nome: "<b>x</b>", criadoEm }), agoraMs: 0 }).includes("<b>x"), false);
 });
+
+test('elenco separado por linha, com camisa, capitão e escudo desenhado sem imagem', () => {
+  const doc = documento();
+  doc.sigla = 'BRA';
+  doc.corSecundaria = '#FFD700';
+  doc.camisas = { 'uid-ana': { numero: 7, posicao: 'goleiro', capitao: true } };
+  const html = renderizarPaginaTime({ time: timeDoDocumento(doc), lojaIos: null, lojaAndroid: null, plataforma: 'outra' });
+  assert.match(html, /Goleiros · 1/);
+  assert.match(html, /Sem posição · 1/);
+  assert.match(html, /class="capitao"/);
+  assert.match(html, /class="numero">07</);
+  assert.match(html, /<svg[^>]*viewBox="0 0 24 24"/);
+  assert.match(html, /color:#FFD700">BRA</);
+});

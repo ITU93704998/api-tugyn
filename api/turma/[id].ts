@@ -92,8 +92,8 @@ const lerConvite = async (codigo: string): Promise<ConvitePublico | null> => {
 const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
-  // Sem scripts: a página é só HTML e CSS.
-  "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  // Sem scripts: a página é só HTML e CSS. Imagens: as do próprio servidor (ícone) e as do Cloudinary (escudo, fotos, banner).
+  "Content-Security-Policy": "default-src 'none'; img-src 'self' https://res.cloudinary.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
