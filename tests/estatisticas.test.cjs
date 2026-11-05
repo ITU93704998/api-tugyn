@@ -97,3 +97,13 @@ test('valida a lista de jogadores e as novas ações', () => {
   assert.equal(parseGestaoBody({ action: 'estatisticas', turmaId: 't1' }).ok, false);
   assert.equal(parseGestaoBody({ action: 'estatisticas', jogadores: ['ana'] }).ok, false);
 });
+
+test('recálculo: temporário que saiu e foi aprovado de novo depois da escolha não recupera o papel', () => {
+  const H = 3600_000;
+  const agora = Date.UTC(2026, 10, 5, 12);
+  const ts = (ms) => ({ toMillis: () => ms });
+  const turma = { creatorId: 'dono', participantes: ['dono', 'ana', 'beto'], organizadorTemporario: { uid: 'ana', nome: 'Ana', desde: ts(agora - 5 * H) } };
+  assert.equal(jogadoresParaRecalcular('ana', turma, ['beto'], agora, { aprovadoEm: ts(agora - 30 * H) }).ok, true);
+  assert.equal(jogadoresParaRecalcular('ana', turma, ['beto'], agora, {}).ok, true, 'membro antigo sem aprovadoEm');
+  assert.equal(jogadoresParaRecalcular('ana', turma, ['beto'], agora, { aprovadoEm: ts(agora - H) }).code, 'nao_organizador');
+});

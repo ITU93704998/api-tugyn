@@ -10,12 +10,13 @@ import { enviarAviso } from "./_lib/pushEnvio";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { jogadoresParaRecalcular } from "./_lib/estatisticas";
 import { processarPendencias, recalcularDaPartida, recalcularUsuario } from "./_lib/recalculos";
-import { autorizarExclusao, autorizarTransferencia, bannerParaApagar, parseGestaoBody } from "./_lib/turmaGestao";
+import { autorizarExclusao, autorizarTemporario, autorizarTransferencia, bannerParaApagar, parseGestaoBody } from "./_lib/turmaGestao";
 
 /**
  * POST /api/turma-gestao   (corpo: { action, turmaId, ... }, cabeçalho: Authorization: Bearer <login do Firebase>)
  *  - transferir { novoOrganizadorId }   o organizador passa a turma para um membro aprovado (e vira membro comum)
  *  - excluir                            o organizador apaga a turma inteira (só quando ele é o único membro)
+ *  - temporario { membroId | null }     o organizador escolhe (ou encerra) o organizador temporário por 24 h e o avisa
  *  - estatisticas { jogadores }         o organizador, depois de enviar uma partida: recalcula o resumo geral desses jogadores
  *  - estatisticas-proprias (sem turma)  o próprio usuário recalcula o seu resumo geral
  * Pelo servidor (Admin SDK) porque as regras do Firestore não deixam o app trocar o dono, apagar a turma com tudo dentro
@@ -62,6 +63,8 @@ const transferir = async (db: Firestore, uid: string, turmaId: string, novoId: s
       creatorId: novoId,
       creatorName: auth.creatorName,
       creatorPhoto: auth.creatorPhoto,
+      // A delegação era do organizador antigo: termina com a transferência (o novo escolhe, se quiser).
+      organizadorTemporario: FieldValue.delete(),
       updatedAt: FieldValue.serverTimestamp(),
     });
     tx.set(previewRef, { creatorName: auth.creatorName }, { merge: true });
@@ -102,6 +105,55 @@ const transferir = async (db: Firestore, uid: string, turmaId: string, novoId: s
   return { ok: true as const };
 };
 
+/**
+ * Escolhe (ou encerra) o organizador temporário. A hora é a do servidor (o prazo de 24 h conta dela) e o nome vem do
+ * participante salvo. Depois avisa o escolhido por push (melhor esforço: a escolha já está salva). Os outros membros
+ * veem o aviso na aba Avisos do app, a partir do próprio documento da turma (sem push).
+ */
+const definirTemporario = async (db: Firestore, uid: string, turmaId: string, membroId: string | null) => {
+  const turmaRef = db.doc(`turmas/${turmaId}`);
+  const resultado = await db.runTransaction(async (tx) => {
+    const [turmaSnap, participanteSnap] = await Promise.all([
+      tx.get(turmaRef),
+      membroId ? tx.get(db.doc(`turmas/${turmaId}/participantes/${membroId}`)) : Promise.resolve(null),
+    ]);
+    const auth = autorizarTemporario(
+      uid,
+      turmaId,
+      membroId,
+      turmaSnap.exists ? (turmaSnap.data() ?? null) : null,
+      participanteSnap?.exists ? (participanteSnap.data() ?? null) : null,
+    );
+    if (!auth.ok) return auth;
+    tx.update(turmaRef, {
+      organizadorTemporario: auth.membro
+        ? { uid: auth.membro.uid, nome: auth.membro.nome, desde: FieldValue.serverTimestamp() }
+        : FieldValue.delete(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return auth;
+  });
+  if (!resultado.ok) return resultado;
+
+  if (resultado.membro) {
+    try {
+      await enviarAviso(db, {
+        evento: "organizador_temporario",
+        turmaId,
+        // Uma notificação por escolha (escolher a mesma pessoa de novo dentro de 10 min não repete o aviso).
+        dedupeKey: `organizador_temporario_${turmaId}_${resultado.membro.uid}`,
+        dedupeMs: DEDUPE_MS,
+        recipientUids: [resultado.membro.uid],
+        dedupeUid: resultado.membro.uid,
+        draft: resultado.draft,
+      });
+    } catch (erro) {
+      console.warn("[turma-gestao] aviso do temporário não enviado:", (erro as Error)?.message ?? "erro");
+    }
+  }
+  return { ok: true as const };
+};
+
 /** Apaga a turma com tudo dentro (participantes, resumo, partidas, partida de hoje), o código de convite, a prévia e o banner. */
 const excluir = async (db: Firestore, uid: string, turmaId: string) => {
   const turmaRef = db.doc(`turmas/${turmaId}`);
@@ -137,7 +189,11 @@ const excluir = async (db: Firestore, uid: string, turmaId: string) => {
  */
 const estatisticasDaPartida = async (db: Firestore, uid: string, turmaId: string, pedidos: string[]) => {
   const turmaSnap = await db.doc(`turmas/${turmaId}`).get();
-  const auth = jogadoresParaRecalcular(uid, turmaSnap.exists ? (turmaSnap.data() ?? null) : null, pedidos);
+  const turma = turmaSnap.exists ? (turmaSnap.data() ?? null) : null;
+  // Organizador temporário: o próprio participante diz se ele saiu e voltou depois da escolha (1 leitura, só nesse caso).
+  const participante =
+    turma && turma.creatorId !== uid ? ((await db.doc(`turmas/${turmaId}/participantes/${uid}`).get()).data() ?? null) : null;
+  const auth = jogadoresParaRecalcular(uid, turma, pedidos, Date.now(), participante);
   if (!auth.ok) return auth;
   const falhos = await recalcularDaPartida(db, turmaId, auth.jogadores);
   if (falhos.length > 0) {
@@ -207,7 +263,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ? await transferir(db, user.uid, request.turmaId, request.novoOrganizadorId)
         : request.action === "estatisticas"
           ? await estatisticasDaPartida(db, user.uid, request.turmaId, request.jogadores)
-          : await excluir(db, user.uid, request.turmaId);
+          : request.action === "temporario"
+            ? await definirTemporario(db, user.uid, request.turmaId, request.membroId)
+            : await excluir(db, user.uid, request.turmaId);
     if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
 
     // Sucesso parcial: diz QUEM ficou para depois (a pendência durável continua gravada e a rotina do servidor tenta de novo).

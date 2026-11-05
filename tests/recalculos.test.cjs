@@ -118,3 +118,23 @@ test('rotina: falha deixa pendente e tentar de novo é idempotente', async () =>
   assert.equal((await f.r.processarPendencias(f.db, { recalcular })).recalculados, 1);
   assert.equal(f.docs.has('recalculosPendentes/T1'), false);
 });
+
+test('resumo da turma é refeito a partir dos participantes (só números, só quem já está no resumo)', async () => {
+  const f = fixture();
+  f.docs.set('turmas/T1/resumo/atual', { membros: { ana: { nome: 'Ana', urlPhoto: 'a', gols: 99999, jogos: 1 }, bia: { nome: 'Bia', gols: 0 } } });
+  f.docs.set('turmas/T1/participantes/ana', { gols: 3, jogos: 2, assistencias: 1, vitorias: -4 });
+  f.docs.set('turmas/T1/participantes/zeca', { gols: 50 });
+  await f.r.sincronizarResumoDaTurma(f.db, 'T1', ['ana', 'zeca', '../x']);
+  const membros = f.docs.get('turmas/T1/resumo/atual').membros;
+  assert.deepEqual(membros.ana, { nome: 'Ana', urlPhoto: 'a', gols: 3, jogos: 2, assistencias: 1, vitorias: 0 });
+  assert.equal(membros.zeca, undefined, 'não acrescenta ninguém ao resumo');
+  assert.deepEqual(membros.bia, { nome: 'Bia', gols: 0 }, 'quem não foi pedido fica igual');
+});
+
+test('falha no resumo da turma: ninguém sai da fila', async () => {
+  const f = fixture();
+  f.docs.set('recalculosPendentes/T1', { pendentes: { ana: 100 }, atualizadoEm: 100 });
+  const falhos = await f.r.recalcularDaPartida(f.db, 'T1', ['ana'], async () => {}, async () => { throw Error('ocupado'); });
+  assert.deepEqual([...falhos], ['ana']);
+  assert.ok(f.docs.get('recalculosPendentes/T1').pendentes.ana);
+});

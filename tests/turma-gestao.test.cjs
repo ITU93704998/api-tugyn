@@ -9,7 +9,7 @@ require.extensions['.ts'] = (module, filename) => {
   const source = fs.readFileSync(filename, 'utf8');
   module._compile(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, filename);
 };
-const { parseGestaoBody, autorizarTransferencia, autorizarExclusao, bannerParaApagar } = require(path.join(root, 'api/_lib/turmaGestao.ts'));
+const { parseGestaoBody, autorizarTransferencia, autorizarExclusao, autorizarTemporario, bannerParaApagar } = require(path.join(root, 'api/_lib/turmaGestao.ts'));
 if (previousLoader) require.extensions['.ts'] = previousLoader;
 else delete require.extensions['.ts'];
 
@@ -53,4 +53,25 @@ test('banner: apaga só uploads de banner, nunca o id fixo antigo nem outras URL
   assert.equal(bannerParaApagar('https://res.cloudinary.com/c/image/upload/v1/usuarios/dono/profile/profile.jpg'), null);
   assert.equal(bannerParaApagar('https://exemplo.com/turmas/dono/banner/abc.jpg'), null);
   assert.equal(bannerParaApagar('https://res.cloudinary.com/c/image/upload/v1/turmas/dono/banner/../../x.jpg'), null);
+});
+
+test('organizador temporário: só o organizador escolhe um membro aprovado; null encerra', () => {
+  assert.deepEqual(parseGestaoBody({ action: 'temporario', turmaId: 't1', membroId: 'ana' }).value, { action: 'temporario', turmaId: 't1', membroId: 'ana' });
+  assert.deepEqual(parseGestaoBody({ action: 'temporario', turmaId: 't1', membroId: null }).value.membroId, null);
+  for (const membroId of [undefined, '', '../x', 5]) assert.equal(parseGestaoBody({ action: 'temporario', turmaId: 't1', membroId }).ok, false);
+
+  const ok = autorizarTemporario('dono', 't1', 'ana', turma, ana);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.membro, { uid: 'ana', nome: 'Ana' }, 'o nome vem do participante salvo, não do app');
+  assert.deepEqual(ok.draft.data, { tipo: 'organizador_temporario', turmaId: 't1' });
+  assert.match(ok.draft.title, /Futebol/);
+
+  assert.deepEqual(autorizarTemporario('dono', 't1', null, turma, null), { ok: true, membro: null });
+  assert.equal(autorizarTemporario('ana', 't1', 'ana', turma, ana).code, 'nao_organizador');
+  assert.equal(autorizarTemporario('ana', 't1', null, turma, null).code, 'nao_organizador', 'membro não encerra o temporário');
+  assert.equal(autorizarTemporario('dono', 't1', 'dono', turma, ana).code, 'mesmo_organizador');
+  assert.equal(autorizarTemporario('dono', 't1', 'ana', turma, { ...ana, status: 'saiu' }).code, 'nao_membro');
+  assert.equal(autorizarTemporario('dono', 't1', 'zeca', turma, ana).code, 'nao_membro');
+  assert.equal(autorizarTemporario('dono', 't1', 'ana', { ...turma, encerradaPor: 'moderacao' }, ana).code, 'turma_moderada');
+  assert.equal(autorizarTemporario('dono', 't1', 'ana', null, ana).status, 404);
 });

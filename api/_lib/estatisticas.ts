@@ -91,13 +91,16 @@ export const DURACAO_ORGANIZADOR_TEMPORARIO_MS = 24 * 60 * 60 * 1000;
  * Organizador temporário no prazo: escolhido pelo organizador, ainda membro, há menos de 24 h (`desde`, hora do servidor) e
  * turma não encerrada pela moderação. Ele só registra partidas; aqui, só pede o recálculo de quem jogou.
  */
-export const ehOrganizadorTemporario = (uid: string, turma: Dados, agora = Date.now()): boolean => {
+export const ehOrganizadorTemporario = (uid: string, turma: Dados, agora = Date.now(), participante: Dados = null): boolean => {
   const o = turma?.organizadorTemporario as { uid?: unknown; desde?: { toMillis?: () => number } } | null | undefined;
   if (!o || typeof o.uid !== "string" || o.uid !== uid) return false;
   if (!Array.isArray(turma?.participantes) || !turma.participantes.includes(uid)) return false;
   if (turma?.encerradaPor === "moderacao") return false;
   const desde = typeof o.desde?.toMillis === "function" ? o.desde.toMillis() : NaN;
-  return Number.isFinite(desde) && agora < desde + DURACAO_ORGANIZADOR_TEMPORARIO_MS;
+  if (!Number.isFinite(desde) || agora >= desde + DURACAO_ORGANIZADOR_TEMPORARIO_MS) return false;
+  // Saiu (ou foi removido) e foi aprovado de novo DEPOIS da escolha: o papel antigo não volta (precisa de nova escolha).
+  const aprovadoEm = (participante?.aprovadoEm as { toMillis?: () => number } | undefined)?.toMillis?.();
+  return !(typeof aprovadoEm === "number" && aprovadoEm > desde);
 };
 
 /**
@@ -110,9 +113,10 @@ export const jogadoresParaRecalcular = (
   turma: Dados,
   pedidos: string[],
   agora = Date.now(),
+  participante: Dados = null,
 ): { ok: true; jogadores: string[] } | RecalculoNegado => {
   if (!turma) return { ok: false, status: 404, code: "turma_nao_encontrada", error: "Turma não encontrada." };
-  if (turma.creatorId !== uid && !ehOrganizadorTemporario(uid, turma, agora)) {
+  if (turma.creatorId !== uid && !ehOrganizadorTemporario(uid, turma, agora, participante)) {
     return { ok: false, status: 403, code: "nao_organizador", error: "Só o organizador pode fazer isso." };
   }
   const membros = new Set(Array.isArray(turma.participantes) ? turma.participantes.filter((v) => typeof v === "string") : []);

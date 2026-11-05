@@ -14,6 +14,37 @@ import { isSafeUid } from "./validation";
  */
 
 export const PENDENCIAS = "recalculosPendentes";
+/** Números de cada membro copiados para o resumo da turma (`turmas/{id}/resumo/atual.membros.{uid}`). */
+const CAMPOS_RESUMO = ["jogos", "gols", "assistencias", "vitorias"] as const;
+const inteiro = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+
+/**
+ * Refaz no resumo da turma os números destes membros a partir dos documentos oficiais deles (participantes). É o que vale
+ * para a partida enviada pelo organizador temporário (que não grava no resumo): o resumo nunca recebe números arbitrários
+ * do app dele. Idempotente; só mexe em quem já está no resumo (não acrescenta nem tira ninguém, nem muda nome/foto).
+ */
+export const sincronizarResumoDaTurma = async (db: Firestore, turmaId: string, uids: string[]): Promise<void> => {
+  const alvo = [...new Set(uids)].filter(isSafeUid);
+  if (!alvo.length || !isSafeUid(turmaId)) return;
+  const resumoRef = db.doc(`turmas/${turmaId}/resumo/atual`);
+  await db.runTransaction(async (tx) => {
+    const resumo = await tx.get(resumoRef);
+    if (!resumo.exists) return;
+    const membros = (resumo.get("membros") ?? {}) as Record<string, unknown>;
+    const presentes = alvo.filter((uid) => typeof membros[uid] === "object" && membros[uid] !== null);
+    if (!presentes.length) return;
+    const participantes = await Promise.all(presentes.map((uid) => tx.get(db.doc(`turmas/${turmaId}/participantes/${uid}`))));
+    const update: Record<string, unknown> = {};
+    participantes.forEach((p, i) => {
+      if (!p.exists) return;
+      for (const campo of CAMPOS_RESUMO) update[`membros.${presentes[i]}.${campo}`] = inteiro(p.get(campo));
+    });
+    if (!Object.keys(update).length) return;
+    update.atualizadoEm = FieldValue.serverTimestamp();
+    tx.update(resumoRef, update);
+  });
+};
+
 /** Quantos jogadores são recalculados ao mesmo tempo (cada um = 1 consulta + 1 leitura por turma + 1 escrita). */
 const RECALCULOS_SIMULTANEOS = 8;
 
@@ -102,9 +133,17 @@ export const recalcularDaPartida = async (
   turmaId: string,
   jogadores: string[],
   recalcular: typeof recalcularUsuario = recalcularUsuario,
+  sincronizarResumo: typeof sincronizarResumoDaTurma = sincronizarResumoDaTurma,
 ): Promise<string[]> => {
   const antes = await db.doc(`${PENDENCIAS}/${turmaId}`).get();
   const marcas = marcasDe(antes.exists ? antes.data() : undefined);
+  // Resumo da turma primeiro: se falhar, ninguém sai da fila (a rotina tenta de novo, resumo e perfil).
+  try {
+    await sincronizarResumo(db, turmaId, jogadores);
+  } catch (erro) {
+    console.warn(JSON.stringify({ evt: "resumo_turma_falhou", turmaId, message: (erro as Error)?.message ?? "erro" }));
+    return [...jogadores];
+  }
   const falhos = await recalcularVarios(db, jogadores, recalcular);
   const atendidas = new Map([...marcas].filter(([uid]) => jogadores.includes(uid) && !falhos.includes(uid)));
   await limparAtendidas(db, turmaId, atendidas);
@@ -127,7 +166,13 @@ export interface ResultadoPendencias {
  */
 export const processarPendencias = async (
   db: Firestore,
-  opcoes: { limite?: number; agora?: () => number; recalcular?: typeof recalcularUsuario; prazoMs?: number } = {},
+  opcoes: {
+    limite?: number;
+    agora?: () => number;
+    recalcular?: typeof recalcularUsuario;
+    sincronizarResumo?: typeof sincronizarResumoDaTurma;
+    prazoMs?: number;
+  } = {},
 ): Promise<ResultadoPendencias> => {
   const agora = opcoes.agora ?? Date.now;
   const limite = Math.min(Math.max(opcoes.limite ?? 20, 1), 50);
@@ -143,6 +188,8 @@ export const processarPendencias = async (
       const membros = new Set(turma.exists && Array.isArray(turma.get("participantes")) ? (turma.get("participantes") as unknown[]) : []);
       const alvo = [...marcas.keys()].filter((uid) => membros.has(uid));
       resultado.ignorados += marcas.size - alvo.length;
+      // Falha no resumo da turma: a turma inteira fica na fila (o catch abaixo conta a falha).
+      await (opcoes.sincronizarResumo ?? sincronizarResumoDaTurma)(db, doc.id, alvo);
       const falhos = await recalcularVarios(db, alvo, opcoes.recalcular);
       resultado.recalculados += alvo.length - falhos.length;
       resultado.falhas += falhos.length;

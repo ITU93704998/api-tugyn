@@ -10,11 +10,13 @@ import { isSafeUid } from "./validation";
  *  - excluir:    só o organizador e só quando ele é o único membro (não apaga gols e jogos de outras pessoas).
  *  - estatisticas:          depois de enviar uma partida, o organizador pede o recálculo do resumo geral dos jogadores dela.
  *  - estatisticas-proprias: o próprio usuário pede o recálculo do seu resumo (ao abrir o perfil).
+ *  - temporario:  o organizador escolhe (ou encerra, com null) um membro aprovado como organizador temporário por 24 h.
  */
 
 export type GestaoRequest =
   | { action: "transferir"; turmaId: string; novoOrganizadorId: string }
   | { action: "excluir"; turmaId: string }
+  | { action: "temporario"; turmaId: string; membroId: string | null }
   | { action: "estatisticas"; turmaId: string; jogadores: string[] }
   | { action: "estatisticas-proprias" };
 
@@ -31,6 +33,10 @@ export const parseGestaoBody = (body: unknown): GestaoParse => {
     return { ok: true, value: { action: "estatisticas", turmaId: b.turmaId, jogadores } };
   }
   if (b.action === "excluir") return { ok: true, value: { action: "excluir", turmaId: b.turmaId } };
+  if (b.action === "temporario") {
+    if (b.membroId !== null && !isSafeUid(b.membroId)) return { ok: false, error: "Membro inválido." };
+    return { ok: true, value: { action: "temporario", turmaId: b.turmaId, membroId: b.membroId } };
+  }
   if (b.action === "transferir") {
     if (!isSafeUid(b.novoOrganizadorId)) return { ok: false, error: "Membro inválido." };
     return { ok: true, value: { action: "transferir", turmaId: b.turmaId, novoOrganizadorId: b.novoOrganizadorId } };
@@ -82,6 +88,45 @@ export const autorizarTransferencia = (
       title: `Você agora organiza a turma ${nomeTurma}`,
       body: "A organização foi passada para você. Toque para abrir a turma.",
       data: { tipo: "organizacao_transferida", turmaId },
+    },
+  };
+};
+
+export type Temporario =
+  | { ok: true; membro: null }
+  | { ok: true; membro: { uid: string; nome: string }; draft: PushDraft }
+  | Negado;
+
+/**
+ * Pode escolher este organizador temporário? Só o organizador, numa turma não encerrada pela moderação, e só um membro
+ * APROVADO que não seja ele mesmo. O nome vem do participante salvo (nunca do app). `membroId` null = encerrar.
+ */
+export const autorizarTemporario = (
+  uid: string,
+  turmaId: string,
+  membroId: string | null,
+  turma: Dados,
+  participante: Dados,
+): Temporario => {
+  const negado = exigirOrganizador(uid, turma);
+  if (negado) return negado;
+  if (turma?.encerradaPor === "moderacao") {
+    return { ok: false, status: 409, code: "turma_moderada", error: "Esta turma foi encerrada pela moderação." };
+  }
+  if (membroId === null) return { ok: true, membro: null };
+  if (membroId === uid) return { ok: false, status: 409, code: "mesmo_organizador", error: "Você já é o organizador." };
+  if (!listaDe(turma?.participantes).includes(membroId) || participante?.status !== "aprovado") {
+    return { ok: false, status: 409, code: "nao_membro", error: "Escolha um membro aprovado da turma." };
+  }
+  const nome = texto(participante?.nome, NOME_MAX) || "Jogador";
+  const nomeTurma = texto(turma?.nome, NOME_MAX) || "sua turma";
+  return {
+    ok: true,
+    membro: { uid: membroId, nome },
+    draft: {
+      title: `Você é o organizador temporário de ${nomeTurma}`,
+      body: "Por 24 horas, você cria as partidas da turma e envia os resultados pela sua conta. Toque para abrir a turma.",
+      data: { tipo: "organizador_temporario", turmaId },
     },
   };
 };

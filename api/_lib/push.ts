@@ -164,6 +164,7 @@ export interface PushDraft {
       | "partida_aberta"
       | "presenca_confirmada"
       | "organizacao_transferida"
+      | "organizador_temporario"
       | "desafio"
       | "time_convocacao"
       | "time_pedido"
