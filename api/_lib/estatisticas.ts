@@ -84,17 +84,35 @@ export const somarEstatisticas = (turmas: Dados[], participantes: Dados[], agora
 
 export type RecalculoNegado = { ok: false; status: 403 | 404; code: string; error: string };
 
+/** Prazo do organizador temporário da turma (o mesmo das regras do Firestore e do app). */
+export const DURACAO_ORGANIZADOR_TEMPORARIO_MS = 24 * 60 * 60 * 1000;
+
 /**
- * Depois de enviar uma partida, o organizador pede o recálculo de quem teve números alterados. Só o organizador da turma, e só
- * para quem é membro dela (o pedido nunca escolhe números: o servidor só refaz a soma do que já está gravado).
+ * Organizador temporário no prazo: escolhido pelo organizador, ainda membro, há menos de 24 h (`desde`, hora do servidor) e
+ * turma não encerrada pela moderação. Ele só registra partidas; aqui, só pede o recálculo de quem jogou.
+ */
+export const ehOrganizadorTemporario = (uid: string, turma: Dados, agora = Date.now()): boolean => {
+  const o = turma?.organizadorTemporario as { uid?: unknown; desde?: { toMillis?: () => number } } | null | undefined;
+  if (!o || typeof o.uid !== "string" || o.uid !== uid) return false;
+  if (!Array.isArray(turma?.participantes) || !turma.participantes.includes(uid)) return false;
+  if (turma?.encerradaPor === "moderacao") return false;
+  const desde = typeof o.desde?.toMillis === "function" ? o.desde.toMillis() : NaN;
+  return Number.isFinite(desde) && agora < desde + DURACAO_ORGANIZADOR_TEMPORARIO_MS;
+};
+
+/**
+ * Depois de enviar uma partida, quem a enviou pede o recálculo de quem teve números alterados. Só o organizador da turma (ou o
+ * organizador temporário no prazo), e só para quem é membro dela (o pedido nunca escolhe números: o servidor só refaz a soma do
+ * que já está gravado).
  */
 export const jogadoresParaRecalcular = (
   uid: string,
   turma: Dados,
   pedidos: string[],
+  agora = Date.now(),
 ): { ok: true; jogadores: string[] } | RecalculoNegado => {
   if (!turma) return { ok: false, status: 404, code: "turma_nao_encontrada", error: "Turma não encontrada." };
-  if (turma.creatorId !== uid) {
+  if (turma.creatorId !== uid && !ehOrganizadorTemporario(uid, turma, agora)) {
     return { ok: false, status: 403, code: "nao_organizador", error: "Só o organizador pode fazer isso." };
   }
   const membros = new Set(Array.isArray(turma.participantes) ? turma.participantes.filter((v) => typeof v === "string") : []);

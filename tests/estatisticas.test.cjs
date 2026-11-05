@@ -67,6 +67,24 @@ test('recálculo da partida: só o organizador e só membros da turma', () => {
   assert.equal(jogadoresParaRecalcular('dono', null, ['ana']).status, 404);
 });
 
+test('recálculo da partida: organizador temporário só no prazo de 24 h e ainda membro', () => {
+  const H = 3600_000;
+  const agora = Date.UTC(2026, 10, 5, 12);
+  const ts = (ms) => ({ toMillis: () => ms });
+  const turma = (extra = {}) => ({
+    creatorId: 'dono', participantes: ['dono', 'ana', 'beto'],
+    organizadorTemporario: { uid: 'ana', nome: 'Ana', desde: ts(agora - 2 * H) }, ...extra,
+  });
+  assert.deepEqual(jogadoresParaRecalcular('ana', turma(), ['beto', 'zeca'], agora), { ok: true, jogadores: ['beto'] });
+  assert.equal(jogadoresParaRecalcular('beto', turma(), ['beto'], agora).code, 'nao_organizador');
+  const vencido = turma({ organizadorTemporario: { uid: 'ana', nome: 'Ana', desde: ts(agora - 25 * H) } });
+  assert.equal(jogadoresParaRecalcular('ana', vencido, ['beto'], agora).code, 'nao_organizador');
+  assert.equal(jogadoresParaRecalcular('ana', turma({ participantes: ['dono', 'beto'] }), ['beto'], agora).code, 'nao_organizador');
+  assert.equal(jogadoresParaRecalcular('ana', turma({ encerradaPor: 'moderacao' }), ['beto'], agora).code, 'nao_organizador');
+  assert.equal(jogadoresParaRecalcular('ana', turma({ organizadorTemporario: null }), ['beto'], agora).code, 'nao_organizador');
+  assert.equal(jogadoresParaRecalcular('ana', turma({ organizadorTemporario: { uid: 'ana', desde: 'ontem' } }), ['beto'], agora).code, 'nao_organizador');
+});
+
 test('valida a lista de jogadores e as novas ações', () => {
   assert.deepEqual(parseJogadores(['a', 'b', 'a']), ['a', 'b']);
   assert.equal(parseJogadores([]), null);
