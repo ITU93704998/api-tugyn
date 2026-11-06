@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { handleAdminUsuarios } from "./_lib/adminUsuarios";
 import { handleContacts } from "./_lib/contatos";
 import { handleModeracao } from "./_lib/moderacao";
 import { handleNotificacoes } from "./_lib/notificacoesGerais";
@@ -22,6 +23,8 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
   if (req.query?.resource === "moderacao") return handleModeracao(req, res);
   // Notificações do painel para os usuários (Tugyn APP › Notificações): só administradores.
   if (req.query?.resource === "notificacoes") return handleNotificacoes(req, res);
+  // Usuários e estatísticas do painel (Tugyn APP › Plataforma): só administradores.
+  if (req.query?.resource === "usuarios") return handleAdminUsuarios(req, res);
   // Pedido de revisão de conta suspensa (app e site, SEM login: a conta suspensa não entra).
   if (req.query?.resource === "revisao") return handleRevisao(req, res);
   if (req.method !== "GET") {
