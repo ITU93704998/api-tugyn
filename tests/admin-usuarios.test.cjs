@@ -17,7 +17,8 @@ const DIA = 86_400_000;
 const AGORA = Date.parse('2026-11-05T15:00:00Z');
 
 /** Firestore em memória: só o que o módulo usa (where ==, >=, <, array-contains; limit; count; collectionGroup). */
-function fakeDb(initial, { falharContagem } = {}) {
+function fakeDb(initial, options = {}) {
+  const { falharContagem } = options;
   const docs = new Map(Object.entries(initial).map(([k, v]) => [k, { ...v }]));
   let seq = 0;
   const valor = v => (v instanceof Date ? v.getTime() : v && typeof v.toMillis === 'function' ? v.toMillis() : v);
@@ -34,8 +35,9 @@ function fakeDb(initial, { falharContagem } = {}) {
     key,
     get: async () => {
       const d = docs.get(key);
-      return { id: key.split('/').pop(), exists: !!d, data: () => (d ? { ...d } : undefined) };
+      return { id: key.split('/').pop(), exists: !!d, data: () => (d ? JSON.parse(JSON.stringify(d)) : undefined) };
     },
+    set: async data => { if (options.falharGravar) throw Error('gravar'); docs.set(key, JSON.parse(JSON.stringify(data, (_k, v) => (v === SERVER_TS ? AGORA : v)))); },
   });
   const consulta = (casa, nome) => {
     const filtros = [];
@@ -107,9 +109,9 @@ function fixture(options = {}) {
     'firebase-admin/firestore': { getFirestore: () => db, FieldValue: { serverTimestamp: () => SERVER_TS } },
     './auth': { getFirebaseApp: () => ({}), requireUser: async (_, res) => { if (options.anonymous) { res.status(401).json({ error: 'x' }); return null; } return { uid: 'admin-uid', admin: !options.nonAdmin }; } },
     './cors': { handleCors: () => false },
-    './mapaUsuarios': { gerarMapa: async () => ({ perfis: 0 }), lerMapa: async () => null },
+    './mapaUsuarios': { RecusaMapa: class extends Error {}, gerarMapa: async () => ({ tipo: 'pronto', mapa: { perfis: 0 } }), lerMapa: async () => null },
     './moderacao': { consultar: async (_db, tipo, id, comDenuncias) => { consultas.push([tipo, id, comDenuncias]); return { tipo, id, situacao: 'ativa', historico: [], denuncias: [] }; } },
-    './rateLimit': { dentroDoLimite: async () => !options.limited },
+    './rateLimit': { dentroDoLimite: async (_uid, chave) => !(options.limited === true || options.limited === chave) },
     './validation': { isSafeUid: v => typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(v) },
   });
   mod.limparEstatisticasGuardadas();
@@ -244,6 +246,42 @@ test('estatísticas: contagens, contas paginadas, contagem que falha vira null e
   await f.request({ action: 'estatisticas', atualizar: true });
   assert.equal(f.listagens(), 2);
   assert.equal(f.acessos().length, 0);
+});
+
+test('estatísticas salvas: abrir lê só o documento (sem Auth, sem contagens); atualizar refaz e salva', async () => {
+  const f = fixture();
+  const primeira = (await f.request({ action: 'estatisticas' })).body;
+  assert.equal(f.listagens(), 1, 'nunca calculadas: calcula uma vez');
+  const salvo = f.docs.get('sistema/estatisticas');
+  assert.equal(salvo.geradoEm, primeira.geradoEm);
+  assert.equal(salvo.salvoEm, AGORA);
+
+  // "Instância nova" (função fria) com o documento salvo: nada de Auth nem contagens.
+  const fria = fixture({ docs: { 'sistema/estatisticas': { ...salvo, contas: { total: 99, completo: true } } } });
+  const aberta = (await fria.request({ action: 'estatisticas' })).body;
+  assert.equal(aberta.contas.total, 99);
+  assert.equal(aberta.salvoEm, undefined);
+  assert.equal(fria.listagens(), 0);
+
+  // Atualizar com os salvos de mais de 1 minuto: recalcula e grava por cima.
+  const velha = fixture({ docs: { 'sistema/estatisticas': { ...salvo, geradoEm: Date.now() - 5 * 60_000, contas: { total: 99, completo: true } } } });
+  const nova = (await velha.request({ action: 'estatisticas', atualizar: true })).body;
+  assert.equal(nova.contas.total, 3);
+  assert.equal(velha.listagens(), 1);
+  assert.equal(velha.docs.get('sistema/estatisticas').contas.total, 3);
+
+  // Documento inválido conta como "nunca calculadas"; falha ao gravar não perde os números.
+  const ruim = fixture({ falharGravar: true, docs: { 'sistema/estatisticas': { geradoEm: 'x' } } });
+  const r = await ruim.request({ action: 'estatisticas' });
+  assert.equal(r.statusCode, 200);
+  assert.equal(r.body.contas.total, 3);
+
+  // Limite de atualizações por hora.
+  const limitada = fixture({ limited: 'admin-estatisticas' });
+  const negada = await limitada.request({ action: 'estatisticas', atualizar: true });
+  assert.equal(negada.statusCode, 429);
+  assert.match(negada.body.error, /20 vezes/);
+  assert.equal((await limitada.request({ action: 'estatisticas' })).statusCode, 200, 'abrir não conta no limite');
 });
 
 const UID_LONGO = 'aB3dE5fG7hI9jK1lM3nO5pQ7rS9t';

@@ -3,7 +3,7 @@ import { getAuth, type Auth, type UserRecord } from "firebase-admin/auth";
 import { FieldValue, getFirestore, type Firestore, type Query } from "firebase-admin/firestore";
 import { getFirebaseApp, requireUser } from "./auth";
 import { handleCors } from "./cors";
-import { gerarMapa, lerMapa } from "./mapaUsuarios";
+import { RecusaMapa, gerarMapa, lerMapa } from "./mapaUsuarios";
 import { consultar, type EstadoDoAlvo } from "./moderacao";
 import { dentroDoLimite } from "./rateLimit";
 import { isSafeUid } from "./validation";
@@ -16,9 +16,13 @@ import { isSafeUid } from "./validation";
  *  ficha        { id }     → perfil, conta (e-mail, criação, último acesso, provedores), turmas, times, pedido de revisão
  *                            e a situação de moderação (histórico e denúncias). Cada ficha aberta fica em `adminAcessos`.
  *  mapa         {}         → o último mapa de usuários gerado (totais por estado e cidade; 1 leitura). null = nunca gerado.
- *  gerar-mapa   {}         → lê a localização dos perfis e grava o mapa novo (1 leitura por perfil; até 3 por hora).
- *  estatisticas { atualizar? } → números da plataforma (contagens do Firestore + leitura das contas no Auth). Guardados por
- *                            10 min nesta instância; `atualizar` refaz se a última leitura tiver mais de 1 min.
+ *  gerar-mapa   {}         → lê a localização dos perfis e grava o mapa novo (1 leitura por perfil). Uma geração por vez na
+ *                            plataforma (409), mapa de menos de 10 min volta sem varrer ({ recente: true }), geração nova
+ *                            até 3 por hora por administrador (429); base grande: { andamento: { lidos } } e o próximo
+ *                            clique continua de onde parou.
+ *  estatisticas { atualizar? } → números da plataforma. Sem `atualizar`: devolve os SALVOS em `sistema/estatisticas`
+ *                            (1 leitura; só calcula se nunca foram calculados). Com `atualizar` (botão do painel): refaz
+ *                            as contagens do Firestore + a leitura das contas no Auth e salva, se os salvos tiverem mais de 1 min.
  *
  * `adminAcessos/{id}` = { adminUid, alvoId, tipo: "ficha" | "busca-email", em }: quem consultou dados pessoais e quando.
  * Clientes não leem nem gravam essa coleção (as regras do Firestore negam tudo que não está liberado).
@@ -34,7 +38,8 @@ const DIA_MS = 86_400_000;
 /** Leitura das contas no Auth: 1.000 por página, até 50 páginas (50 mil contas) por cálculo. */
 const AUTH_PAGINA = 1000;
 const AUTH_PAGINAS_MAX = 50;
-const CACHE_MS = 10 * 60_000;
+/** Onde ficam as últimas estatísticas calculadas: abrir a tela lê só este documento. */
+export const DOC_ESTATISTICAS = "sistema/estatisticas";
 const ATUALIZAR_MIN_MS = 60_000;
 const FUSO = "America/Sao_Paulo";
 
@@ -370,22 +375,39 @@ export async function calcularEstatisticas(db: Firestore, auth: Auth, agora = Da
   };
 }
 
-let guardadas: Estatisticas | null = null;
 /** Cálculo em andamento: pedidos que chegam juntos esperam o mesmo (uma varredura do Auth por vez nesta instância). */
 let emAndamento: Promise<Estatisticas> | null = null;
 /** Só para os testes. */
 export const limparEstatisticasGuardadas = (): void => {
-  guardadas = null;
   emAndamento = null;
 };
 
+/** As últimas estatísticas salvas (null = nunca calculadas ou documento inválido). */
+async function lerSalvas(db: Firestore): Promise<Estatisticas | null> {
+  const snap = await db.doc(DOC_ESTATISTICAS).get();
+  if (!snap.exists) return null;
+  const { salvoEm: _salvoEm, desatualizado: _desatualizado, ...d } = (snap.data() ?? {}) as Dados;
+  const cad = d.cadastros as Dados | undefined;
+  return typeof d.geradoEm === "number" && typeof d.contas === "object" && d.contas !== null && typeof d.ativos === "object" && d.ativos !== null && Array.isArray(cad?.porDia)
+    ? (d as unknown as Estatisticas)
+    : null;
+}
+
 async function estatisticas(db: Firestore, auth: Auth, atualizar: boolean): Promise<Estatisticas> {
-  const agora = Date.now();
-  const idade = guardadas ? agora - guardadas.geradoEm : Infinity;
-  if (guardadas && idade < CACHE_MS && !(atualizar && idade >= ATUALIZAR_MIN_MS)) return guardadas;
+  const salvas = await lerSalvas(db);
+  // Abrir a tela: os números salvos (1 leitura). Atualizar logo depois de um cálculo também não refaz.
+  if (salvas && (!atualizar || Date.now() - salvas.geradoEm < ATUALIZAR_MIN_MS)) return salvas;
   if (!emAndamento) {
-    emAndamento = calcularEstatisticas(db, auth, agora)
-      .then((novas) => (guardadas = novas))
+    emAndamento = calcularEstatisticas(db, auth, Date.now())
+      .then(async (novas) => {
+        try {
+          await db.doc(DOC_ESTATISTICAS).set({ ...novas, salvoEm: FieldValue.serverTimestamp() });
+        } catch (erro) {
+          // Os números valem mesmo sem salvar; a próxima abertura mostra os anteriores.
+          console.error(JSON.stringify({ evt: "admin_estatisticas_nao_salvas", message: (erro as Error)?.message ?? String(erro) }));
+        }
+        return novas;
+      })
       .finally(() => {
         emAndamento = null;
       });
@@ -393,9 +415,9 @@ async function estatisticas(db: Firestore, auth: Auth, atualizar: boolean): Prom
   try {
     return await emAndamento;
   } catch (erro) {
-    if (!guardadas) throw erro;
+    if (!salvas) throw erro;
     console.error(JSON.stringify({ evt: "admin_estatisticas_falhou", message: (erro as Error)?.message ?? String(erro) }));
-    return { ...guardadas, desatualizado: true };
+    return { ...salvas, desatualizado: true };
   }
 }
 
@@ -429,17 +451,20 @@ export async function handleAdminUsuarios(req: VercelRequest, res: VercelRespons
     }
     if (body.action === "mapa") return res.status(200).json({ mapa: await lerMapa(db) });
     if (body.action === "gerar-mapa") {
-      if (!(await dentroDoLimite(user.uid, "admin-mapa", 3, 3600))) {
-        return res.status(429).json({ error: "O mapa já foi gerado 3 vezes na última hora. Tente de novo mais tarde (o último continua na tela)." });
-      }
-      return res.status(200).json({ mapa: await gerarMapa(db, user.uid) });
+      const r = await gerarMapa(db, user.uid, { podeIniciar: () => dentroDoLimite(user.uid, "admin-mapa", 3, 3600) });
+      if (r.tipo === "andamento") return res.status(200).json({ mapa: r.mapa, andamento: { lidos: r.lidos } });
+      return res.status(200).json({ mapa: r.mapa, ...(r.tipo === "recente" ? { recente: true } : {}) });
     }
     if (body.action === "estatisticas") {
-      return res.status(200).json(await estatisticas(db, auth, body.atualizar === true));
+      const atualizar = body.atualizar === true;
+      if (atualizar && !(await dentroDoLimite(user.uid, "admin-estatisticas", 20, 3600))) {
+        return res.status(429).json({ error: "As estatísticas já foram atualizadas 20 vezes na última hora. Os números salvos continuam na tela." });
+      }
+      return res.status(200).json(await estatisticas(db, auth, atualizar));
     }
     return res.status(400).json({ error: "Ação inválida." });
   } catch (erro) {
-    if (erro instanceof Recusa) return res.status(erro.status).json({ error: erro.message });
+    if (erro instanceof Recusa || erro instanceof RecusaMapa) return res.status(erro.status).json({ error: erro.message });
     console.error(JSON.stringify({ evt: "admin_usuarios_falhou", acao: String(body.action).slice(0, 20), message: (erro as Error)?.message ?? String(erro) }));
     return res.status(503).json({ error: "Não foi possível concluir. Tente novamente." });
   }
