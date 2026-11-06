@@ -1,11 +1,13 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
+import { getFirestore } from "firebase-admin/firestore";
 import { verificarAppCheck } from "./_lib/appCheck";
-import { requireUser } from "./_lib/auth";
+import { getFirebaseApp, requireUser } from "./_lib/auth";
 import { handleCors } from "./_lib/cors";
 import { getAccount, isAdminOnlyBucket } from "./_lib/config";
+import { COLECAO_CAMPANHAS } from "./_lib/publicacaoAnuncios";
 import { dentroDoLimite } from "./_lib/rateLimit";
-import { parseBucket, parseOwnedPublicId } from "./_lib/validation";
+import { parseBannerDeAnuncio, parseBucket, parseOwnedPublicId, urlUsaImagem } from "./_lib/validation";
 
 const MAX_EXCLUSOES_POR_HORA = 60;
 
@@ -36,9 +38,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(403).json({ error: "Somente administradores apagam imagens de anúncios." });
   }
 
-  // Só é possível apagar o que está DENTRO da pasta do próprio usuário (`<bucket>/<uid>/...`).
-  const publicId = parseOwnedPublicId(body.public_id, bucket, user.uid);
-  if (!publicId) return res.status(403).json({ error: "Você não pode apagar esta imagem." });
+  let publicId: string | null;
+  if (isAdminOnlyBucket(bucket)) {
+    // Banners de anúncio: a pasta é só de administradores, então QUALQUER administrador apaga (o banner pode ter sido enviado
+    // por outro administrador ou pela mesma pessoa em outra conta). Ficam de fora a imagem do contrato e a que ainda está em uso.
+    const banner = parseBannerDeAnuncio(body.public_id);
+    if (banner === "contrato") {
+      return res.status(403).json({ error: "Esta é a imagem de um contrato (o banner aprovado pelo cliente): ela não é apagada pelo painel." });
+    }
+    if (!banner) return res.status(400).json({ error: "Imagem inválida." });
+    try {
+      const campanhas = await getFirestore(getFirebaseApp()).collection(COLECAO_CAMPANHAS).select("imageUrl").get();
+      if (campanhas.docs.some((doc) => urlUsaImagem(doc.get("imageUrl"), banner))) {
+        return res.status(409).json({ error: "Outra campanha ainda usa esta imagem: ela foi mantida." });
+      }
+    } catch (error) {
+      console.error("[delete] não foi possível conferir as campanhas:", error);
+      return res.status(503).json({ error: "Não foi possível conferir se a imagem está em uso. Tente novamente." });
+    }
+    publicId = banner;
+  } else {
+    // Demais imagens: só o que está DENTRO da pasta do próprio usuário (`<bucket>/<uid>/...`).
+    publicId = parseOwnedPublicId(body.public_id, bucket, user.uid);
+    if (!publicId) return res.status(403).json({ error: "Você não pode apagar esta imagem." });
+  }
 
   const account = getAccount(bucket);
   if (!account) {

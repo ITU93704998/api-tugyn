@@ -99,3 +99,17 @@ export const parseOwnedPublicId = (value: unknown, bucket: Bucket, uid: string):
   const ownPrefix = `${bucket}/${uid}/`;
   return value.startsWith(ownPrefix) && value.length > ownPrefix.length ? value : null;
 };
+
+/**
+ * Banner de anúncio que QUALQUER administrador pode apagar: `anuncios/<uid de quem enviou>/<pasta>/<nome>`.
+ * A pasta `contratos` fica de fora (é o registro do banner aprovado pelo cliente): devolve "contrato".
+ */
+export const parseBannerDeAnuncio = (value: unknown): string | "contrato" | null => {
+  if (typeof value !== "string" || value.length > 200) return null;
+  const m = /^anuncios\/([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,64})\/([A-Za-z0-9_-]{1,128})$/.exec(value);
+  if (!m) return null;
+  return m[2] === "contratos" ? "contrato" : value;
+};
+
+/** A URL (de uma campanha) aponta para esta imagem? Funciona com versão e transformações no caminho. */
+export const urlUsaImagem = (url: unknown, publicId: string): boolean => typeof url === "string" && url.includes(`/${publicId}.`);
