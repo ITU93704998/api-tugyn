@@ -45,6 +45,60 @@ export const sincronizarResumoDaTurma = async (db: Firestore, turmaId: string, u
   });
 };
 
+/** Limite de membros de uma turma (o mesmo do app e das regras). */
+export const MAX_MEMBROS_RESUMO = 500;
+const textoLimitado = (v: unknown, max: number): string => (typeof v === "string" ? v.slice(0, max) : "");
+
+export interface MembroDoResumo {
+  nome: string;
+  urlPhoto: string;
+  jogos: number;
+  gols: number;
+  assistencias: number;
+  vitorias: number;
+}
+
+/**
+ * Mapa `membros` do resumo a partir dos documentos OFICIAIS: só quem está em `turma.participantes` E tem o participante
+ * "aprovado", com nome/foto do próprio participante e os números dele (nada vem do app). No máximo 500.
+ */
+export const membrosDoResumo = (
+  participantesDaTurma: unknown,
+  docs: { id: string; data: Record<string, unknown> }[],
+): Record<string, MembroDoResumo> => {
+  const naTurma = new Set(Array.isArray(participantesDaTurma) ? participantesDaTurma.filter((v): v is string => typeof v === "string") : []);
+  const membros: Record<string, MembroDoResumo> = {};
+  for (const { id, data } of docs) {
+    if (Object.keys(membros).length >= MAX_MEMBROS_RESUMO) break;
+    if (!isSafeUid(id) || !naTurma.has(id) || data.status !== "aprovado") continue;
+    membros[id] = {
+      nome: textoLimitado(data.nome, 80),
+      urlPhoto: textoLimitado(data.urlPhoto, 500),
+      jogos: inteiro(data.jogos),
+      gols: inteiro(data.gols),
+      assistencias: inteiro(data.assistencias),
+      vitorias: inteiro(data.vitorias),
+    };
+  }
+  return membros;
+};
+
+/**
+ * Reconstrói o resumo inteiro da turma no SERVIDOR (o app não grava mais o resumo completo: as regras só aceitam dele
+ * entrar/sair um membro por vez, conferido contra o participante). Usado pela auto-correção quando o resumo diverge
+ * ou não existe. Idempotente.
+ */
+export const reconstruirResumoDaTurma = async (db: Firestore, turmaId: string, participantesDaTurma: unknown): Promise<number> => {
+  const snap = await db
+    .collection(`turmas/${turmaId}/participantes`)
+    .where("status", "==", "aprovado")
+    .limit(MAX_MEMBROS_RESUMO + 50)
+    .get();
+  const membros = membrosDoResumo(participantesDaTurma, snap.docs.map((d) => ({ id: d.id, data: d.data() ?? {} })));
+  await db.doc(`turmas/${turmaId}/resumo/atual`).set({ versao: 1, membros, atualizadoEm: FieldValue.serverTimestamp() });
+  return Object.keys(membros).length;
+};
+
 /** Quantos jogadores são recalculados ao mesmo tempo (cada um = 1 consulta + 1 leitura por turma + 1 escrita). */
 const RECALCULOS_SIMULTANEOS = 8;
 

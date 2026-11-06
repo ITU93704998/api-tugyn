@@ -285,3 +285,22 @@ test('time_link: link que não existe mais → 404', async () => {
   assert.equal(r.ok, false);
   assert.equal(r.status, 404);
 });
+
+test('LIB-03: a busca do par só filtra status que nunca bloqueiam; histórico longo não esconde jogo ativo', () => {
+  const TODOS = ['pendente', 'aceito', 'recusado', 'cancelado', 'placar', 'finalizado', 'sem_acordo', 'sem_placar'];
+  const instantes = [AGORA - 30 * 24 * 3600_000, AGORA - 2 * 3600_000, AGORA + 3600_000, AGORA + 10 * 24 * 3600_000];
+  const propostas = [undefined, { porTimeId: 'dono_1', golsDe: 1, golsPara: 0, rodada: 1, venceEm: Timestamp.fromMillis(AGORA + 60_000) }];
+  // Todo status que, em algum momento, impede a proposta precisa estar entre os buscados.
+  for (const status of TODOS) {
+    const bloqueia = instantes.some((q) => propostas.some((proposta) => A.motivoParaNaoPropor(cenario({
+      comEle: [{ de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' }, status, quando: Timestamp.fromMillis(q), ...(proposta ? { proposta } : {}) }],
+    })) !== null));
+    if (bloqueia) assert.ok(A.STATUS_QUE_BLOQUEIAM.includes(status), `${status} bloqueia mas não é buscado`);
+  }
+  assert.ok(!A.STATUS_QUE_BLOQUEIAM.includes('finalizado'));
+  // 150 jogos encerrados + 1 aceito: o ativo continua bloqueando.
+  const antigos = Array.from({ length: 150 }, () => ({ de: { timeId: 'dono_1' }, para: { timeId: 'rival_1' }, status: 'finalizado', quando: Timestamp.fromMillis(AGORA - 40 * 24 * 3600_000) }));
+  const ativo = { de: { timeId: 'rival_1' }, para: { timeId: 'dono_1' }, status: 'aceito', quando: Timestamp.fromMillis(AGORA + 3600_000) };
+  const filtrados = [...antigos, ativo].filter((a) => A.STATUS_QUE_BLOQUEIAM.includes(a.status));
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: filtrados })).code, 'em-andamento');
+});

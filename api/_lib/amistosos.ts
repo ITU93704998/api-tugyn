@@ -242,6 +242,15 @@ export interface CenarioProposta {
 type Negado = { ok: false; status: number; code: string; error: string };
 const negar = (status: number, code: string, error: string): Negado => ({ ok: false, status, code, error });
 
+/**
+ * Status que podem impedir um novo amistoso entre o mesmo par: "sem_acordo" (para sempre) e os que podem estar em
+ * andamento ("pendente", "aceito", "placar"; o prazo de cada um é conferido em `emAndamento`). A busca do par filtra
+ * só por eles, para que um histórico longo de jogos encerrados não esconda um jogo ativo (auditoria LIB-03).
+ */
+export const STATUS_QUE_BLOQUEIAM: StatusAmistoso[] = ["pendente", "aceito", "placar", "sem_acordo"];
+/** Máximo lido por lado do par; os bloqueantes ainda não apurados de um par são poucos (um ativo por vez). */
+export const LIMITE_BUSCA_DO_PAR = 200;
+
 export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
   if (!c.meu || c.meu.donoId !== c.uid) return negar(403, "nao-dono", "Só o dono do time marca amistosos.");
   if (!c.adversario) return negar(404, "time-inexistente", "Este time não existe mais.");
@@ -462,8 +471,8 @@ const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { 
     const meus = db.collection(`times/${p.timeId}/${SUB_AMISTOSOS}`);
     const [pendentes, enviados, recebidos] = await Promise.all([
       tx.get(meus.where("status", "==", "pendente").limit(50)),
-      tx.get(meus.where("para.timeId", "==", p.adversarioId).limit(100)),
-      tx.get(meus.where("de.timeId", "==", p.adversarioId).limit(100)),
+      tx.get(meus.where("para.timeId", "==", p.adversarioId).where("status", "in", STATUS_QUE_BLOQUEIAM).limit(LIMITE_BUSCA_DO_PAR)),
+      tx.get(meus.where("de.timeId", "==", p.adversarioId).where("status", "in", STATUS_QUE_BLOQUEIAM).limit(LIMITE_BUSCA_DO_PAR)),
     ]);
     const negado = motivoParaNaoPropor({
       uid,

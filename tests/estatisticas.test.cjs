@@ -95,6 +95,8 @@ test('valida a lista de jogadores e as novas ações', () => {
   assert.deepEqual(parseGestaoBody({ action: 'estatisticas-proprias', uid: 'outro' }), { ok: true, value: { action: 'estatisticas-proprias' } });
   assert.deepEqual(parseGestaoBody({ action: 'estatisticas', turmaId: 't1', jogadores: ['ana'] }).value, { action: 'estatisticas', turmaId: 't1', jogadores: ['ana'] });
   assert.equal(parseGestaoBody({ action: 'estatisticas', turmaId: 't1' }).ok, false);
+  assert.deepEqual({ ...parseGestaoBody({ action: 'resumo', turmaId: 't1' }).value }, { action: 'resumo', turmaId: 't1' });
+  assert.equal(parseGestaoBody({ action: 'resumo', turmaId: 'a/b' }).ok, false);
   assert.equal(parseGestaoBody({ action: 'estatisticas', jogadores: ['ana'] }).ok, false);
 });
 

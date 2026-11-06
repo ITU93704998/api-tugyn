@@ -18,7 +18,8 @@ export type GestaoRequest =
   | { action: "excluir"; turmaId: string }
   | { action: "temporario"; turmaId: string; membroId: string | null }
   | { action: "estatisticas"; turmaId: string; jogadores: string[] }
-  | { action: "estatisticas-proprias" };
+  | { action: "estatisticas-proprias" }
+  | { action: "resumo"; turmaId: string };
 
 export type GestaoParse = { ok: true; value: GestaoRequest } | { ok: false; error: string };
 
@@ -33,6 +34,7 @@ export const parseGestaoBody = (body: unknown): GestaoParse => {
     return { ok: true, value: { action: "estatisticas", turmaId: b.turmaId, jogadores } };
   }
   if (b.action === "excluir") return { ok: true, value: { action: "excluir", turmaId: b.turmaId } };
+  if (b.action === "resumo") return { ok: true, value: { action: "resumo", turmaId: b.turmaId } };
   if (b.action === "temporario") {
     if (b.membroId !== null && !isSafeUid(b.membroId)) return { ok: false, error: "Membro inválido." };
     return { ok: true, value: { action: "temporario", turmaId: b.turmaId, membroId: b.membroId } };
@@ -53,7 +55,7 @@ const listaDe = (valor: unknown): string[] => (Array.isArray(valor) ? valor.filt
 const NOME_MAX = 80;
 const texto = (valor: unknown, max: number): string => (typeof valor === "string" ? valor.trim().slice(0, max) : "");
 
-const exigirOrganizador = (uid: string, turma: Dados): Negado | null => {
+export const exigirOrganizador = (uid: string, turma: Dados): Negado | null => {
   if (!turma) return { ok: false, status: 404, code: "turma_nao_encontrada", error: "Turma não encontrada." };
   if (turma.creatorId !== uid) {
     return { ok: false, status: 403, code: "nao_organizador", error: "Só o organizador pode fazer isso." };

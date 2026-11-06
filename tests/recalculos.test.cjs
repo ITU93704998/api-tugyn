@@ -138,3 +138,25 @@ test('falha no resumo da turma: ninguém sai da fila', async () => {
   assert.deepEqual([...falhos], ['ana']);
   assert.ok(f.docs.get('recalculosPendentes/T1').pendentes.ana);
 });
+
+test('resumo reconstruído no servidor: só aprovados que estão na turma, números e nome do próprio participante', () => {
+  const { r } = fixture();
+  const membros = r.membrosDoResumo(['ana', 'bia', 'cris', 'x.y'], [
+    { id: 'ana', data: { status: 'aprovado', nome: 'Ana', urlPhoto: 'u', jogos: 3, gols: 2, assistencias: 1, vitorias: 1 } },
+    { id: 'bia', data: { status: 'saiu', nome: 'Bia', gols: 50 } },
+    { id: 'dan', data: { status: 'aprovado', nome: 'Dan', gols: 9 } }, // não está em turma.participantes
+    { id: 'cris', data: { status: 'aprovado', nome: 'C'.repeat(200), gols: -5, jogos: 2.7, assistencias: 'x' } },
+    { id: 'x.y', data: { status: 'aprovado', nome: 'Ponto' } },
+  ]);
+  assert.deepEqual(Object.keys(membros).sort(), ['ana', 'cris']);
+  assert.deepEqual({ ...membros.ana }, { nome: 'Ana', urlPhoto: 'u', jogos: 3, gols: 2, assistencias: 1, vitorias: 1 });
+  assert.equal(membros.cris.nome.length, 80);
+  assert.deepEqual([membros.cris.gols, membros.cris.jogos, membros.cris.assistencias], [0, 2, 0]);
+});
+
+test('resumo reconstruído: no máximo 500 membros', () => {
+  const { r } = fixture();
+  const ids = Array.from({ length: 520 }, (_, i) => `m${i}`);
+  const membros = r.membrosDoResumo(ids, ids.map((id) => ({ id, data: { status: 'aprovado', nome: id } })));
+  assert.equal(Object.keys(membros).length, 500);
+});

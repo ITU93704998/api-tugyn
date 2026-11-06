@@ -9,8 +9,9 @@ import { DEDUPE_MS } from "./_lib/push";
 import { enviarAviso } from "./_lib/pushEnvio";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { jogadoresParaRecalcular } from "./_lib/estatisticas";
-import { processarPendencias, recalcularDaPartida, recalcularUsuario } from "./_lib/recalculos";
-import { autorizarExclusao, autorizarTemporario, autorizarTransferencia, bannerParaApagar, parseGestaoBody } from "./_lib/turmaGestao";
+import { processarPendencias, recalcularDaPartida, recalcularUsuario, reconstruirResumoDaTurma } from "./_lib/recalculos";
+import { enviarPartida, parsePartidaEnviada } from "./_lib/partidaEnvio";
+import { autorizarExclusao, autorizarTemporario, autorizarTransferencia, bannerParaApagar, exigirOrganizador, parseGestaoBody } from "./_lib/turmaGestao";
 
 /**
  * POST /api/turma-gestao   (corpo: { action, turmaId, ... }, cabeçalho: Authorization: Bearer <login do Firebase>)
@@ -19,6 +20,10 @@ import { autorizarExclusao, autorizarTemporario, autorizarTransferencia, bannerP
  *  - temporario { membroId | null }     o organizador escolhe (ou encerra) o organizador temporário por 24 h e o avisa
  *  - estatisticas { jogadores }         o organizador, depois de enviar uma partida: recalcula o resumo geral desses jogadores
  *  - estatisticas-proprias (sem turma)  o próprio usuário recalcula o seu resumo geral
+ *  - partida { partidaId, partida, jogadores }  o organizador (ou o temporário no prazo) envia a partida: o servidor valida a
+ *                                       lista, aplica só a diferença nos números dos membros e grava tudo numa transação
+ *  - resumo                             o organizador pede a reconstrução do resumo da turma (auto-correção): o servidor o
+ *                                       refaz a partir dos participantes aprovados (o app não grava mais o resumo inteiro)
  * Pelo servidor (Admin SDK) porque as regras do Firestore não deixam o app trocar o dono, apagar a turma com tudo dentro
  * nem gravar o resumo geral (`users/{uid}.estatisticas`) de ninguém.
  */
@@ -29,6 +34,8 @@ export const config = { maxDuration: 60 };
 const LIMITE_POR_HORA = 20;
 /** Recálculo do resumo: um por partida enviada (e reenvios), mais a abertura do próprio perfil. */
 const LIMITE_ESTATISTICAS_POR_HORA = 60;
+/** Envios de partida (cada correção conta): folga para um dia de várias partidas e reenvios. */
+const LIMITE_PARTIDAS_POR_HORA = 120;
 /** Uma transação/lote do Firestore aceita até 500 escritas: sobra margem para a turma e a prévia. */
 const ESCRITAS_POR_LOTE = 450;
 
@@ -202,6 +209,16 @@ const estatisticasDaPartida = async (db: Firestore, uid: string, turmaId: string
   return { ok: true as const, falhos };
 };
 
+/** Reconstrução do resumo da turma pedida pelo organizador (auto-correção do app). */
+const reconstruirResumo = async (db: Firestore, uid: string, turmaId: string) => {
+  const turmaSnap = await db.doc(`turmas/${turmaId}`).get();
+  const turma = turmaSnap.exists ? (turmaSnap.data() ?? null) : null;
+  const negado = exigirOrganizador(uid, turma);
+  if (negado) return negado;
+  await reconstruirResumoDaTurma(db, turmaId, turma?.participantes);
+  return { ok: true as const };
+};
+
 /** Só o scheduler do servidor (`Authorization: Bearer <CRON_SECRET>`), nunca um login de usuário. */
 const ehRotinaAutorizada = (req: VercelRequest): boolean => {
   const segredo = process.env.CRON_SECRET;
@@ -231,6 +248,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const user = await requireUser(req, res, "turma-gestao");
   if (!user) return;
   if (!(await verificarAppCheck(req, res, "turma-gestao"))) return;
+
+  // Envio da partida: corpo e limite próprios (lista de jogadores), mesma autenticação e App Check.
+  if ((req.body as { action?: unknown } | undefined)?.action === "partida") {
+    return enviarPartidaRota(req, res, user.uid);
+  }
 
   const parsed = parseGestaoBody(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });
@@ -265,7 +287,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           ? await estatisticasDaPartida(db, user.uid, request.turmaId, request.jogadores)
           : request.action === "temporario"
             ? await definirTemporario(db, user.uid, request.turmaId, request.membroId)
-            : await excluir(db, user.uid, request.turmaId);
+            : request.action === "resumo"
+              ? await reconstruirResumo(db, user.uid, request.turmaId)
+              : await excluir(db, user.uid, request.turmaId);
     if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
 
     // Sucesso parcial: diz QUEM ficou para depois (a pendência durável continua gravada e a rotina do servidor tenta de novo).
@@ -278,5 +302,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (erro) {
     console.error(JSON.stringify({ evt: "turma_gestao_failed", action: request.action, message: (erro as Error)?.message ?? String(erro) }));
     return res.status(502).json({ error: "Não foi possível concluir agora. Tente novamente." });
+  }
+}
+
+async function enviarPartidaRota(req: VercelRequest, res: VercelResponse, uid: string) {
+  res.setHeader("Cache-Control", "no-store");
+  const parsed = parsePartidaEnviada((req.body ?? {}) as Record<string, unknown>);
+  if (!parsed.ok) return res.status(parsed.status).json({ code: parsed.code, error: parsed.error });
+  if (!(await dentroDoLimite(uid, "enviar-partida", LIMITE_PARTIDAS_POR_HORA, 3600))) {
+    return res.status(429).json({ error: "Muitos envios seguidos. Tente novamente mais tarde." });
+  }
+  try {
+    const db = getFirestore(getFirebaseApp());
+    const resultado = await enviarPartida(db, uid, parsed.value);
+    if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
+    // Resumo geral do perfil de quem mudou (a pendência gravada na transação garante o recálculo se isto falhar).
+    let pendentes: string[] = [];
+    if (resultado.participantesAlterados.length) {
+      pendentes = await recalcularDaPartida(db, parsed.value.turmaId, resultado.participantesAlterados).catch(() => resultado.participantesAlterados);
+    }
+    console.log(JSON.stringify({ evt: "turma_partida", turmaId: parsed.value.turmaId, alterado: resultado.alterado, jogadores: resultado.participantesAlterados.length }));
+    return res.status(200).json({
+      success: true,
+      atualizacao: resultado.atualizacao,
+      alterado: resultado.alterado,
+      participantesAlterados: resultado.participantesAlterados,
+      corrigivelAte: resultado.corrigivelAte,
+      ...(pendentes.length ? { pendentes } : {}),
+    });
+  } catch (erro) {
+    console.error(JSON.stringify({ evt: "turma_partida_falhou", message: (erro as Error)?.message ?? String(erro) }));
+    return res.status(502).json({ error: "Não foi possível enviar agora. A partida continua salva no aparelho: tente de novo." });
   }
 }
