@@ -107,6 +107,7 @@ function fixture(options = {}) {
     'firebase-admin/firestore': { getFirestore: () => db, FieldValue: { serverTimestamp: () => SERVER_TS } },
     './auth': { getFirebaseApp: () => ({}), requireUser: async (_, res) => { if (options.anonymous) { res.status(401).json({ error: 'x' }); return null; } return { uid: 'admin-uid', admin: !options.nonAdmin }; } },
     './cors': { handleCors: () => false },
+    './mapaUsuarios': { gerarMapa: async () => ({ perfis: 0 }), lerMapa: async () => null },
     './moderacao': { consultar: async (_db, tipo, id, comDenuncias) => { consultas.push([tipo, id, comDenuncias]); return { tipo, id, situacao: 'ativa', historico: [], denuncias: [] }; } },
     './rateLimit': { dentroDoLimite: async () => !options.limited },
     './validation': { isSafeUid: v => typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(v) },

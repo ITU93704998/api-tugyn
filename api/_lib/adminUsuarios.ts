@@ -3,6 +3,7 @@ import { getAuth, type Auth, type UserRecord } from "firebase-admin/auth";
 import { FieldValue, getFirestore, type Firestore, type Query } from "firebase-admin/firestore";
 import { getFirebaseApp, requireUser } from "./auth";
 import { handleCors } from "./cors";
+import { gerarMapa, lerMapa } from "./mapaUsuarios";
 import { consultar, type EstadoDoAlvo } from "./moderacao";
 import { dentroDoLimite } from "./rateLimit";
 import { isSafeUid } from "./validation";
@@ -14,6 +15,8 @@ import { isSafeUid } from "./validation";
  *                            Termo com formato de uid: a conta. Senão: começo do @ ou do nome (sem diferenciar maiúsculas).
  *  ficha        { id }     → perfil, conta (e-mail, criação, último acesso, provedores), turmas, times, pedido de revisão
  *                            e a situação de moderação (histórico e denúncias). Cada ficha aberta fica em `adminAcessos`.
+ *  mapa         {}         → o último mapa de usuários gerado (totais por estado e cidade; 1 leitura). null = nunca gerado.
+ *  gerar-mapa   {}         → lê a localização dos perfis e grava o mapa novo (1 leitura por perfil; até 3 por hora).
  *  estatisticas { atualizar? } → números da plataforma (contagens do Firestore + leitura das contas no Auth). Guardados por
  *                            10 min nesta instância; `atualizar` refaz se a última leitura tiver mais de 1 min.
  *
@@ -423,6 +426,13 @@ export async function handleAdminUsuarios(req: VercelRequest, res: VercelRespons
     if (body.action === "ficha") {
       if (!isSafeUid(body.id)) return res.status(400).json({ error: "Identificador inválido." });
       return res.status(200).json(await ficha(db, auth, body.id, user.uid));
+    }
+    if (body.action === "mapa") return res.status(200).json({ mapa: await lerMapa(db) });
+    if (body.action === "gerar-mapa") {
+      if (!(await dentroDoLimite(user.uid, "admin-mapa", 3, 3600))) {
+        return res.status(429).json({ error: "O mapa já foi gerado 3 vezes na última hora. Tente de novo mais tarde (o último continua na tela)." });
+      }
+      return res.status(200).json({ mapa: await gerarMapa(db, user.uid) });
     }
     if (body.action === "estatisticas") {
       return res.status(200).json(await estatisticas(db, auth, body.atualizar === true));

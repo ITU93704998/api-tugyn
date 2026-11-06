@@ -6,6 +6,9 @@ import { handleNotificacoes } from "./_lib/notificacoesGerais";
 import { handleRevisao } from "./_lib/revisao";
 import { getFirestore } from "firebase-admin/firestore";
 import { handleAdminSistema } from "./_lib/adminSistema";
+import { handleAdminSuporte } from "./_lib/adminSuporte";
+import { handleAdminCustos } from "./_lib/custos";
+import { handleRelato } from "./_lib/relatos";
 import { getFirebaseApp } from "./_lib/auth";
 import { CONFIG_PADRAO, aplicarConfigRemota, lerConfig } from "./_lib/sistema";
 import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from "./_lib/version";
@@ -33,6 +36,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.query?.resource === "usuarios") return handleAdminUsuarios(req, res);
   // Saúde do sistema e configuração remota do app (Tugyn APP › Plataforma): só administradores.
   if (req.query?.resource === "sistema") return handleAdminSistema(req, res);
+  // Ferramentas de suporte (turmas, sessões, exclusões, caixa de relatos) e custos/cotas: só administradores.
+  if (req.query?.resource === "suporte") return handleAdminSuporte(req, res);
+  if (req.query?.resource === "custos") return handleAdminCustos(req, res);
+  // Relato de problema enviado pelo app (com login).
+  if (req.query?.resource === "relato") return handleRelato(req, res);
   // Pedido de revisão de conta suspensa (app e site, SEM login: a conta suspensa não entra).
   if (req.query?.resource === "revisao") return handleRevisao(req, res);
   if (req.method !== "GET") {

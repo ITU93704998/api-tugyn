@@ -22,6 +22,7 @@ export const ACOES_DA_API = [
   "moderacao",
   "notificacoes",
   "excluir-conta",
+  "relato",
 ] as const;
 export type AcaoDaApi = (typeof ACOES_DA_API)[number];
 

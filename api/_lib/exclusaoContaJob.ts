@@ -38,6 +38,7 @@ const EXTRA_COLLECTIONS: { collection: string; field: string }[] = [
   { collection: "times", field: "donoId" }, // times que ele montou (os dos outros: etapa "times" de accountDeletion)
   { collection: "convitesTime", field: "donoId" }, // prévias dos links de convocação dos times dele
   { collection: "chavesTime", field: "donoId" }, // chaves públicas dos times dele (garantia: a etapa "amistosos" já apaga)
+  { collection: "relatos", field: "uid" }, // relatos de problema enviados pelo app (api/_lib/relatos.ts)
   { collection: "versoesApp", field: "uid" }, // última versão do app vista pela API (api/_lib/sistema.ts)
 ];
 
@@ -273,6 +274,8 @@ export const processarExclusoesPendentes = async (db: Firestore, prazoMs: number
     processar: async (doc) => {
       const job = { estado: doc.get("estado"), atualizadaEmMs: timestampMillis(doc.get("atualizadaEm")) };
       if (!deveProcessar(job, agora)) return; // em andamento agora (a pessoa ainda pode estar no meio)
+      // Retomada pelo painel em curso (reserva de 5 min em `retomadaAte`): não corre junto.
+      if ((timestampMillis(doc.get("retomadaAte")) ?? 0) > agora) return;
       try {
         if (await processarJob(db, doc.id)) concluidas += 1;
         else pendentes += 1;
