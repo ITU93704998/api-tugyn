@@ -7,6 +7,7 @@ import { type Change, participantEvents, gameEvents } from "./events";
 import { dispatchEvent, enqueueEvent, sweepEvents } from "./outbox";
 import { isSafeUid } from "../../api/_lib/validation";
 import { consultarRecibos, recuperarAvisosPendentes } from "../../api/_lib/pushEnvio";
+import { registrarRotina } from "../../api/_lib/sistema";
 
 if (!getApps().length) initializeApp();
 const db = getFirestore();
@@ -48,10 +49,19 @@ export const retryTurmaNotifications = onSchedule({
   region, schedule: "every 1 minutes", timeZone: "America/Sao_Paulo", timeoutSeconds: 60,
   memory: "256MiB", maxInstances: 1, retryCount: 0, secrets: [expoAccessToken],
 }, async () => {
-  // NOT-02 also covers API notifications without a turma event ledger (for example, challenges).
-  const outbox = await recuperarAvisosPendentes(db, { limit: 3 });
-  const events = await sweepEvents(db);
-  console.log(JSON.stringify({ evt: "turma_push_sweep", outbox, events }));
+  const inicio = Date.now();
+  try {
+    // NOT-02 also covers API notifications without a turma event ledger (for example, challenges).
+    const outbox = await recuperarAvisosPendentes(db, { limit: 3 });
+    const events = await sweepEvents(db);
+    console.log(JSON.stringify({ evt: "turma_push_sweep", outbox, events }));
+    const falhas = Number((outbox as { falhas?: unknown } | null)?.falhas ?? 0) || 0;
+    // Heartbeat for the admin panel (Saúde do sistema): last run, ok, duration.
+    await registrarRotina(db, "push_reenvio", { ok: falhas === 0, duracaoMs: Date.now() - inicio, problemas: falhas ? [`falhas:${falhas}`] : [], resumo: { ...(outbox as object) } as Record<string, unknown> });
+  } catch (erro) {
+    await registrarRotina(db, "push_reenvio", { ok: false, duracaoMs: Date.now() - inicio, problemas: ["falha_geral"] });
+    throw erro;
+  }
 });
 
 // Expo keeps receipts for ~24 h and suggests checking ~15 min after sending; the Vercel cron runs once a day.
@@ -59,6 +69,14 @@ export const checkPushReceipts = onSchedule({
   region, schedule: "every 15 minutes", timeZone: "America/Sao_Paulo", timeoutSeconds: 60,
   memory: "256MiB", maxInstances: 1, retryCount: 0, secrets: [expoAccessToken],
 }, async () => {
-  const recibos = await consultarRecibos(db, { limit: 30, prazoAte: Date.now() + 45_000 });
-  console.log(JSON.stringify({ evt: "push_receipts_check", ...recibos }));
+  const inicio = Date.now();
+  try {
+    const recibos = await consultarRecibos(db, { limit: 30, prazoAte: Date.now() + 45_000 });
+    console.log(JSON.stringify({ evt: "push_receipts_check", ...recibos }));
+    const falhas = Number((recibos as { falhas?: unknown } | null)?.falhas ?? 0) || 0;
+    await registrarRotina(db, "push_recibos", { ok: falhas === 0, duracaoMs: Date.now() - inicio, problemas: falhas ? [`falhas:${falhas}`] : [], resumo: { ...(recibos as object) } as Record<string, unknown> });
+  } catch (erro) {
+    await registrarRotina(db, "push_recibos", { ok: false, duracaoMs: Date.now() - inicio, problemas: ["falha_geral"] });
+    throw erro;
+  }
 });

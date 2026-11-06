@@ -3,6 +3,7 @@ import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
 import { type AcaoDaApi, RESPOSTA_SUSPENSA, acaoPermitida } from "./suspensao";
+import { registrarVersaoDoApp } from "./sistema";
 import { isSafeUid } from "./validation";
 
 export const getFirebaseApp = (): App => {
@@ -111,5 +112,7 @@ export const requireUser = async (
     res.status(403).json(RESPOSTA_SUSPENSA);
     return null;
   }
+  // Versão do app (cabeçalhos X-App-Version/X-App-Platform), no máximo 1 vez por dia: distribuição no painel.
+  await registrarVersaoDoApp(getFirestore(app), user.uid, req);
   return user;
 };

@@ -47,6 +47,7 @@ import { processarExclusoesPendentes } from "./_lib/exclusaoContaJob";
 import { limparReservasDeMidia } from "./_lib/midiaReservasJob";
 import { processarPendencias } from "./_lib/recalculos";
 import { dentroDoLimite } from "./_lib/rateLimit";
+import { FUNCAO_DESLIGADA, lerConfig, registrarRotina } from "./_lib/sistema";
 
 /**
  * POST /api/desafios   (corpo: { action, ... }, cabeçalho: Authorization: Bearer <login do Firebase>)
@@ -501,9 +502,23 @@ const executar = (db: Firestore, uid: string, pedido: DesafioRequest): Promise<R
 };
 
 /** Chave dos times e amistosos: mesma autenticação e App Check dos desafios, limite e log próprios. */
+/** Interruptor do painel (`sistema/config.funcoes`). Se a leitura falhar, considera ligada. */
+const funcaoLigada = async (funcao: "desafios" | "amistosos"): Promise<boolean> => {
+  try {
+    return (await lerConfig(getFirestore(getFirebaseApp()))).funcoes[funcao];
+  } catch {
+    return true;
+  }
+};
+
 const tratarAmistoso = async (req: VercelRequest, res: VercelResponse, uid: string) => {
   const parsed = parseAmistosoBody(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  // Desligado pelo painel: não marca nem aceita amistoso novo (placar, cancelar e apurar continuam).
+  const novo = parsed.value.action === "amistoso_propor" || (parsed.value.action === "amistoso_responder" && parsed.value.aceitar);
+  if (novo && !(await funcaoLigada("amistosos"))) {
+    return res.status(409).json({ code: "funcao_desligada", error: FUNCAO_DESLIGADA.amistosos });
+  }
   if (!(await dentroDoLimite(uid, "amistosos", LIMITE_AMISTOSOS_POR_HORA, 3600))) {
     return res.status(429).json({ error: "Muitas tentativas. Tente novamente mais tarde." });
   }
@@ -612,6 +627,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ],
       });
       console.log(JSON.stringify({ evt: "push_outbox_daily_recovery", ...(recuperados ?? {}) }));
+      await registrarRotina(db, "rotina_diaria", {
+        ok: problemas.length === 0,
+        duracaoMs: Date.now() - inicio,
+        problemas,
+        resumo: { reavisos: resumo.reavisos, exclusoesPendentes: resumo.exclusoesPendentes, atrasoMaxMs: resumo.atrasoMaxMs },
+      });
       if (problemas.length) {
         // Sucesso parcial NÃO responde 200: a Vercel registra a execução como falha e o log traz o motivo.
         console.error(JSON.stringify({ evt: "desafios_rotina_incompleta", problemas, ...resumo }));
@@ -621,6 +642,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ success: true, ...resumo });
     } catch (erro) {
       console.error(JSON.stringify({ evt: "desafios_rotina_falhou", message: (erro as Error)?.message ?? String(erro) }));
+      try {
+        await registrarRotina(getFirestore(getFirebaseApp()), "rotina_diaria", { ok: false, duracaoMs: Date.now() - inicio, problemas: ["falha_geral"] });
+      } catch {
+        // sem Firestore: só o log acima
+      }
       return res.status(500).json({ error: "Falha na rotina." });
     }
   }
@@ -638,6 +664,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const parsed = parseDesafioBody(req.body);
   if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  // Interruptor do painel: desligado, não começa desafio novo (cancelar, recusar e apurar continuam).
+  const compromissoNovo = parsed.value.action === "criar" || (parsed.value.action === "responder" && parsed.value.aceitar);
+  if (compromissoNovo && !(await funcaoLigada("desafios"))) {
+    return res.status(409).json({ code: "funcao_desligada", error: FUNCAO_DESLIGADA.desafios });
+  }
 
   if (!(await dentroDoLimite(user.uid, "desafios", LIMITE_POR_HORA, 3600))) {
     return res.status(429).json({ error: "Muitas tentativas. Tente novamente mais tarde." });

@@ -8,6 +8,7 @@ import { getAccount } from "./_lib/config";
 import { DEDUPE_MS } from "./_lib/push";
 import { enviarAviso } from "./_lib/pushEnvio";
 import { dentroDoLimite } from "./_lib/rateLimit";
+import { registrarRotina } from "./_lib/sistema";
 import { jogadoresParaRecalcular } from "./_lib/estatisticas";
 import { processarPendencias, recalcularDaPartida, recalcularUsuario, reconstruirResumoDaTurma } from "./_lib/recalculos";
 import { enviarPartida, parsePartidaEnviada } from "./_lib/partidaEnvio";
@@ -233,10 +234,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method === "GET") {
     res.setHeader("Cache-Control", "no-store");
     if (!ehRotinaAutorizada(req)) return res.status(401).json({ error: "Não autorizado." });
+    const inicio = Date.now();
     try {
-      return res.status(200).json({ ok: true, ...(await processarPendencias(getFirestore(getFirebaseApp()))) });
+      const db = getFirestore(getFirebaseApp());
+      const r = await processarPendencias(db);
+      await registrarRotina(db, "pendencias_estatisticas", { ok: r.falhas === 0, duracaoMs: Date.now() - inicio, problemas: r.falhas ? [`falhas:${r.falhas}`] : [], resumo: { ...r } });
+      return res.status(200).json({ ok: true, ...r });
     } catch {
       console.error(JSON.stringify({ evt: "estatisticas_pendencias_falhou" }));
+      try {
+        await registrarRotina(getFirestore(getFirebaseApp()), "pendencias_estatisticas", { ok: false, duracaoMs: Date.now() - inicio, problemas: ["falha_geral"] });
+      } catch {
+        // sem Firestore
+      }
       return res.status(503).json({ error: "Não foi possível processar agora." });
     }
   }
