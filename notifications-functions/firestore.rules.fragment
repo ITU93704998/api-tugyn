@@ -4,3 +4,7 @@ match /turmaPushEvents/{eventId} {
   allow read, write: if false;
 }
 // A broad allow in another overlapping match still grants access and must be reviewed.
+
+// Tokens e fila de Live Activities: acesso exclusivo pelo Admin SDK.
+match /liveActivitySubscriptions/{id} { allow read, write: if false; }
+match /liveActivityGames/{id} { allow read, write: if false; }

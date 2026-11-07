@@ -27,7 +27,7 @@ test('config remota: campo inválido volta ao padrão e nunca desliga nada por e
   assert.deepEqual({ ...c.versoes.android }, { min: null, latest: '5.4.1' });
   assert.equal(c.aviso, 'Manutenção às 22h');
   assert.equal(c.mensagemAtualizacao, null);
-  assert.deepEqual({ ...c.funcoes }, { desafios: false, amistosos: true, anuncios: true }, 'só false explícito desliga');
+  assert.deepEqual({ ...c.funcoes }, { desafios: false, amistosos: true, anuncios: true, acompanharConfirmacoes: true }, 'só false explícito desliga');
 });
 
 test('política pública: painel vale por cima da Vercel; mínima maior que a recente é rebaixada', () => {
@@ -116,7 +116,7 @@ test('distribuição de versões: 30 e 7 dias por plataforma, mais nova primeiro
 });
 
 test('salvar config: valida versões, mínima ≤ recente, tamanhos e interruptores', () => {
-  const ok = { versoes: { ios: { min: '5.4', latest: '5.4' }, android: { min: '', latest: null } }, mensagemAtualizacao: ' Atualize ', aviso: null, funcoes: { desafios: true, amistosos: false, anuncios: true } };
+  const ok = { versoes: { ios: { min: '5.4', latest: '5.4' }, android: { min: '', latest: null } }, mensagemAtualizacao: ' Atualize ', aviso: null, funcoes: { desafios: true, amistosos: false, anuncios: true, acompanharConfirmacoes: true } };
   const r = A.parseConfigEnviada(ok);
   assert.equal(r.ok, true);
   assert.deepEqual({ ...r.value.versoes.android }, { min: null, latest: null });

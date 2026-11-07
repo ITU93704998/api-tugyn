@@ -14,6 +14,7 @@ export const ACOES_DA_API = [
   "avaliar",
   "desafiar",
   "push",
+  "live-activity",
   "turma-gestao",
   "upload",
   "apagar-midia",

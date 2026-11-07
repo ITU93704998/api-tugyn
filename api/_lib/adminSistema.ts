@@ -277,11 +277,18 @@ const configDaVercel = () => {
   };
 };
 
-const salvarConfig = async (db: Firestore, uid: string, nova: ConfigSistema): Promise<ConfigSistema> => {
+export class ConfigMudou extends Error {}
+
+/**
+ * `base`: a configuração que o painel tinha carregado quando o administrador começou a editar. Se a gravada mudou desde então
+ * (outro administrador ou outra aba salvou), recusa: gravar a cópia inteira poderia religar uma função desligada por outro.
+ */
+export const salvarConfig = async (db: Firestore, uid: string, nova: ConfigSistema, base: ConfigSistema): Promise<ConfigSistema> => {
   const ref = db.doc(DOC_CONFIG);
   await db.runTransaction(async (tx) => {
     const atual = await tx.get(ref);
     const antes = normalizarConfig(atual.exists ? atual.data() : null);
+    if (JSON.stringify(antes) !== JSON.stringify(normalizarConfig(base))) throw new ConfigMudou();
     tx.set(ref, { ...nova, atualizadoPor: uid, atualizadoEm: FieldValue.serverTimestamp() });
     tx.create(ref.collection("historico").doc(), { antes, depois: nova, por: uid, em: FieldValue.serverTimestamp() });
   });
@@ -348,7 +355,15 @@ export async function handleAdminSistema(req: VercelRequest, res: VercelResponse
     if (body.action === "salvar-config") {
       const parsed = parseConfigEnviada(body.config);
       if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-      const config = await salvarConfig(db, user.uid, parsed.value);
+      const base = parseConfigEnviada(body.base);
+      if (!base.ok) return res.status(400).json({ error: "Atualize o painel (recarregue a página) antes de salvar." });
+      let config: ConfigSistema;
+      try {
+        config = await salvarConfig(db, user.uid, parsed.value, base.value);
+      } catch (erro) {
+        if (erro instanceof ConfigMudou) return res.status(409).json({ code: "config_mudou", error: "Outro administrador alterou a configuração enquanto você editava. Recarregue para ver a versão atual e refaça a sua mudança." });
+        throw erro;
+      }
       console.log(JSON.stringify({ evt: "sistema_config_salva", funcoes: config.funcoes, aviso: Boolean(config.aviso) }));
       return res.status(200).json({ config });
     }

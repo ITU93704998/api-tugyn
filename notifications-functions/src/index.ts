@@ -1,3 +1,4 @@
+import { captureLiveAttendance, dispatchLiveAttendance, invalidateLiveUser, sweepLiveAttendance } from "../../api/_lib/liveActivities";
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
@@ -13,6 +14,7 @@ if (!getApps().length) initializeApp();
 const db = getFirestore();
 // Configure the SAME Expo project secret as the Vercel API; never place it in client configuration.
 const expoAccessToken = defineSecret("EXPO_ACCESS_TOKEN");
+const liveApnsKey = defineSecret("LIVE_ACTIVITY_APNS_KEY");
 const region = process.env.TUGYN_PUSH_REGION || "southamerica-east1";
 const triggerOptions = { region, retry: true, timeoutSeconds: 60, memory: "256MiB" as const, maxInstances: 3, concurrency: 10 };
 const safe = isSafeUid;
@@ -21,6 +23,7 @@ export const captureTurmaParticipantNotification = onDocumentWritten({ ...trigge
   if (!event.data || !safe(event.params.turmaId) || !safe(event.params.participantId)) return;
   const before = event.data.before.exists ? event.data.before.data()! : null;
   const after = event.data.after.exists ? event.data.after.data()! : null;
+  if (!after || before?.status !== after.status) await invalidateLiveUser(db, event.params.participantId, event.params.turmaId);
   if (!after || before?.status === after.status || (after.status !== "pendente" && !(before?.status === "pendente" && after.status === "aprovado"))) return;
   const [turma, current] = await Promise.all([db.doc(`turmas/${event.params.turmaId}`).get(), event.data.after.ref.get()]);
   const change: Change = { id: event.id, source: event.source, timeMs: event.data.after.updateTime?.toMillis() ?? Date.parse(event.time), turmaId: event.params.turmaId, before, after };
@@ -29,6 +32,7 @@ export const captureTurmaParticipantNotification = onDocumentWritten({ ...trigge
 
 export const captureTurmaGameNotification = onDocumentWritten({ ...triggerOptions, document: "turmas/{turmaId}/jogos/{dayId}" }, async event => {
   if (!event.data || !safe(event.params.turmaId) || !/^\d{8}$/.test(event.params.dayId)) return;
+  await captureLiveAttendance(db, event.params.turmaId, event.params.dayId);
   const before = event.data.before.exists ? event.data.before.data()! : null;
   const after = event.data.after.exists ? event.data.after.data()! : null;
   if (!after) return;
@@ -79,4 +83,30 @@ export const checkPushReceipts = onSchedule({
     await registrarRotina(db, "push_recibos", { ok: false, duracaoMs: Date.now() - inicio, problemas: ["falha_geral"] });
     throw erro;
   }
+});
+
+// Live Activities têm tokens e entrega próprios; nunca são tratadas como ExpoPushToken.
+export const deliverTurmaLiveActivity = onDocumentWritten({
+  ...triggerOptions, document: "liveActivityGames/{gameKey}", secrets: [liveApnsKey],
+}, async event => {
+  const before=event.data?.before.data(),after=event.data?.after.data();
+  if(after?.dirty && (before?.version!==after.version || before?.enrollmentRevision!==after.enrollmentRevision || before?.dirty!==true)) await dispatchLiveAttendance(db,event.params.gameKey);
+});
+
+export const retryTurmaLiveActivities = onSchedule({
+  region,schedule:"every 1 minutes",timeZone:"America/Sao_Paulo",timeoutSeconds:60,memory:"256MiB",maxInstances:1,retryCount:0,secrets:[liveApnsKey],
+}, async()=>{await sweepLiveAttendance(db);});
+
+export const invalidateTurmaLiveActivities = onDocumentWritten({ ...triggerOptions, document:"turmas/{turmaId}" },async event=>{
+  if(process.env.LIVE_ACTIVITIES_ENABLED!=="true" || !event.data)return;
+  const a=event.data.before.data(),b=event.data.after.data();
+  if(a?.ativo===b?.ativo && a?.status===b?.status && a?.nome===b?.nome)return;
+  const groups=await db.collection("liveActivityGames").where("turmaId","==",event.params.turmaId).limit(50).get();
+  for(const group of groups.docs){const d=group.data();await captureLiveAttendance(db,event.params.turmaId,d.dayId,true);}
+});
+
+export const invalidateAccountLiveActivities = onDocumentWritten({ ...triggerOptions, document:"users/{uid}" },async event=>{
+  if(!event.data)return;
+  const a=event.data.before.data(),b=event.data.after.data();
+  if(a?.status!==b?.status || a?.excluindoEm!==b?.excluindoEm || !event.data.after.exists)await invalidateLiveUser(db,event.params.uid);
 });

@@ -63,7 +63,7 @@ export const registrarRotina = async (
 // ─── Configuração remota ──────────────────────────────────────────────────────────────────────────────────────────────
 
 export type Plataforma = "ios" | "android";
-export const FUNCOES = ["desafios", "amistosos", "anuncios"] as const;
+export const FUNCOES = ["desafios", "amistosos", "anuncios", "acompanharConfirmacoes"] as const;
 export type Funcao = (typeof FUNCOES)[number];
 
 export interface ConfigSistema {
@@ -80,7 +80,7 @@ export const CONFIG_PADRAO: ConfigSistema = {
   versoes: { ios: { min: null, latest: null }, android: { min: null, latest: null } },
   mensagemAtualizacao: null,
   aviso: null,
-  funcoes: { desafios: true, amistosos: true, anuncios: true },
+  funcoes: { desafios: true, amistosos: true, anuncios: true, acompanharConfirmacoes: true },
 };
 
 export const MENSAGEM_MAX = 200;
@@ -111,6 +111,7 @@ export const normalizarConfig = (bruto: unknown): ConfigSistema => {
       desafios: f.desafios !== false,
       amistosos: f.amistosos !== false,
       anuncios: f.anuncios !== false,
+      acompanharConfirmacoes: f.acompanharConfirmacoes !== false,
     },
   };
 };
@@ -132,6 +133,25 @@ export const lerConfig = async (db: Firestore, agora = Date.now()): Promise<Conf
   } catch (erro) {
     console.warn(JSON.stringify({ evt: "config_sistema_falhou", message: (erro as Error)?.message ?? String(erro) }));
     return cacheConfig?.valor ?? CONFIG_PADRAO;
+  }
+};
+
+/**
+ * Para decisões em que supor "ligado" é pior do que esperar (ex.: encerrar Live Activities quando a função foi desligada).
+ * true/false só com leitura confiável (do Firestore ou do cache de 30 s). Se a leitura falhar, mantém o último estado
+ * conhecido apenas se ele for "desligado"; caso contrário devolve null, e quem chama não age agora e tenta de novo depois.
+ * (Não muda `lerConfig`, que continua "falha aberta" para versão mínima e as demais funções.)
+ */
+export const funcaoLigadaConfiavel = async (db: Firestore, funcao: Funcao, agora = Date.now()): Promise<boolean | null> => {
+  if (cacheConfig && agora - cacheConfig.em < CACHE_CONFIG_MS) return cacheConfig.valor.funcoes[funcao];
+  try {
+    const snap = await db.doc(DOC_CONFIG).get();
+    const valor = normalizarConfig(snap.exists ? snap.data() : null);
+    cacheConfig = { valor, em: agora };
+    return valor.funcoes[funcao];
+  } catch (erro) {
+    console.warn(JSON.stringify({ evt: "config_sistema_falhou_estrito", funcao, message: (erro as Error)?.message ?? String(erro) }));
+    return cacheConfig && !cacheConfig.valor.funcoes[funcao] ? false : null;
   }
 };
 
@@ -174,6 +194,7 @@ export const esquecerConfig = (): void => {
 
 /** Recusa padronizada de uma função desligada (o app mostra a mensagem). */
 export const FUNCAO_DESLIGADA: Record<Funcao, string> = {
+  acompanharConfirmacoes: "O acompanhamento de confirmações está temporariamente indisponível. Sua presença continua confirmada.",
   desafios: "Os desafios estão temporariamente indisponíveis. Tente novamente mais tarde.",
   amistosos: "Os amistosos estão temporariamente indisponíveis. Tente novamente mais tarde.",
   anuncios: "Os anúncios estão temporariamente desligados.",
