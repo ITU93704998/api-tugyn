@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { VercelResponse } from "@vercel/node";
 import type { Firestore } from "firebase-admin/firestore";
 import { v2 as cloudinary } from "cloudinary";
-import { CONFIG_CONTRATO_DOC, configuracaoInicial, gerarPdfContrato, hashPdf, preencherTexto, validarConfiguracao, VARIAVEIS, type ConfiguracaoContrato } from "./contratoConfiguracao";
+import { COLECAO_LOGOS, CONFIG_CONTRATO_DOC, SUGESTOES_POLITICAS, TEXTO_INICIAL, configuracaoInicial, validarLogoPng, gerarPdfContrato, hashPdf, preencherTexto, validarConfiguracao, VARIAVEIS, type ConfiguracaoContrato } from "./contratoConfiguracao";
 import { MODELO_DOC, parseModelo, proximaVersao, type ContratoModelo, type VersaoModelo } from "./contratoModelo";
 import { contaDosComprovantes, type ContratoDoc } from "./contratos";
 import { responder } from "./contratosComuns";
@@ -37,18 +37,53 @@ export async function apagarPdf(publicId: string): Promise<void> {
   if (conta) await cloudinary.uploader.destroy(publicId, { ...conta, resource_type: "raw", type: "authenticated" }).catch(() => undefined);
 }
 
+/** PNG da logo guardada (confere o hash: o arquivo é exatamente o que a versão registrou). Null se não existir. */
+export async function lerLogo(db: Firestore, sha256: string): Promise<Buffer | null> {
+  if (!/^[0-9a-f]{64}$/.test(sha256)) return null;
+  const snap = await db.doc(`${COLECAO_LOGOS}/${sha256}`).get();
+  const png = snap.exists ? snap.data()?.png : null;
+  if (typeof png !== "string") return null;
+  const buffer = Buffer.from(png, "base64");
+  return hashPdf(new Uint8Array(buffer)) === sha256 ? buffer : null;
+}
+
+export class LogoAusente extends Error {}
+
+/** PDF do contrato com a logo da configuração (a da versão publicada, no caso do cliente). */
+export async function pdfDoContrato(db: Firestore, configuracao: ConfiguracaoContrato, texto: string): Promise<Buffer> {
+  let logo: Buffer | null = null;
+  if (configuracao.logo) {
+    logo = await lerLogo(db, configuracao.logo);
+    if (!logo) throw new LogoAusente("A logo do contrato não foi encontrada. Envie a logo de novo nas configurações do contrato.");
+  }
+  return gerarPdfContrato(texto, logo);
+}
+
 /** Todas as ações passam pelo mesmo requireUser/admin e rate limit da rota existente. */
 export async function adminConfiguracaoContrato(db: Firestore, acao: string, body: Record<string, unknown>, uid: string, agora: number, res: VercelResponse) {
   const ref = db.doc(CONFIG_CONTRATO_DOC);
   const snap = await ref.get(), estado = snap.data();
   const revisao = typeof estado?.revisao === "number" ? estado.revisao : 0;
-  if (acao === "contrato_config_ver") return responder(res, 200, { revisao, configuracao: estado?.rascunho ?? configuracaoInicial(), publicadoVersao: estado?.publicadoVersao ?? null, publicadoEm: estado?.publicadoEm ?? null, variaveis: VARIAVEIS });
+  if (acao === "contrato_config_logo") {
+    // Envia a logo (PNG). Guardada por hash, sem sobrescrever: versões publicadas continuam apontando para a delas.
+    const logo = validarLogoPng(body.png);
+    if (!logo.ok) return responder(res, 400, { error: logo.error });
+    try { await gerarPdfContrato("Teste da logo", logo.buffer); } catch (e) { return responder(res, 400, { error: e instanceof Error ? e.message : "Logo inválida." }); }
+    const logoRef = db.doc(`${COLECAO_LOGOS}/${logo.sha256}`);
+    if (!(await logoRef.get()).exists) await logoRef.set({ png: logo.buffer.toString("base64"), bytes: logo.buffer.length, largura: logo.largura, altura: logo.altura, transparente: logo.transparente, enviadoEm: agora, enviadoPor: uid });
+    return responder(res, 200, { logo: logo.sha256, transparente: logo.transparente, largura: logo.largura, altura: logo.altura });
+  }
+  if (acao === "contrato_config_ver") {
+    const rascunho = estado?.rascunho ?? configuracaoInicial();
+    const logoSalva = typeof rascunho.logo === "string" && rascunho.logo ? await lerLogo(db, rascunho.logo) : null;
+    return responder(res, 200, { revisao, configuracao: { ...rascunho, logo: rascunho.logo ?? "" }, logoPng: logoSalva ? `data:image/png;base64,${logoSalva.toString("base64")}` : null, publicadoVersao: estado?.publicadoVersao ?? null, publicadoEm: estado?.publicadoEm ?? null, variaveis: VARIAVEIS, modeloSugerido: TEXTO_INICIAL, sugestoes: SUGESTOES_POLITICAS });
+  }
   const publicar = acao === "contrato_config_publicar";
   const v = validarConfiguracao(body.configuracao, publicar);
   if (!v.ok) return responder(res, 400, { error: v.error });
   if (publicar && body.revisado !== true) return responder(res, 400, { error: "Confirme que revisou o documento antes de publicar." });
   if (acao === "contrato_config_previa") {
-    try { const buffer = await gerarPdfContrato(`PRÉVIA — NÃO PUBLICADA\n\n${preencherTexto(v.valor, exemploPedido(((await db.doc(MODELO_DOC).get()).data()?.versao ?? 0) + 1))}`); return responder(res, 200, { pdf: buffer.toString("base64") }); }
+    try { const buffer = await pdfDoContrato(db, v.valor, `PRÉVIA — NÃO PUBLICADA\n\n${preencherTexto(v.valor, exemploPedido(((await db.doc(MODELO_DOC).get()).data()?.versao ?? 0) + 1))}`); return responder(res, 200, { pdf: buffer.toString("base64") }); }
     catch (e) { return responder(res, 400, { error: e instanceof Error ? e.message : "Modelo inválido." }); }
   }
   if (body.revisao !== revisao) return responder(res, 409, { error: "Outro administrador alterou o rascunho. Recarregue antes de salvar." });
@@ -57,7 +92,7 @@ export async function adminConfiguracaoContrato(db: Firestore, acao: string, bod
   let upload: Awaited<ReturnType<typeof subirPdf>> | null = null;
   if (publicar) {
     // Também valida caracteres e tamanho ANTES de qualquer publicação ou upload.
-    try { upload = await subirPdf(await gerarPdfContrato(preencherTexto(v.valor, exemploPedido(versaoAntes + 1))), "contrato-modelo"); }
+    try { upload = await subirPdf(await pdfDoContrato(db, v.valor, preencherTexto(v.valor, exemploPedido(versaoAntes + 1))), "contrato-modelo"); }
     catch (e) { return responder(res, 400, { error: e instanceof Error ? e.message : "Não foi possível gerar o PDF." }); }
   }
   let versao: number | null = null;

@@ -1,5 +1,5 @@
-import { apagarPdf, dadosDoPedido, modeloDoCliente, resumoVersao, subirPdf } from "./contratoConfiguracaoAdmin";
-import { gerarPdfContrato, preencherTexto } from "./contratoConfiguracao";
+import { apagarPdf, dadosDoPedido, modeloDoCliente, pdfDoContrato, resumoVersao, subirPdf } from "./contratoConfiguracaoAdmin";
+import { preencherTexto } from "./contratoConfiguracao";
 import { randomBytes } from "node:crypto";
 import type { VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
@@ -61,7 +61,7 @@ export const clientePdf = async (c: CtxCliente) => {
   let enviado: Awaited<ReturnType<typeof subirPdf>> | null = null;
   if (!encontrado.data.documentoContrato && !encontrado.data.aceite && modelo.configuracao) {
     if (!encontrado.data.pedido || !encontrado.data.preco) return responder(res, 409, { error: "Confirme o pedido antes de abrir o contrato preenchido." });
-    enviado = await subirPdf(await gerarPdfContrato(preencherTexto(modelo.configuracao, dadosDoPedido(encontrado.data, modelo.versao))), "contratos-preenchidos/" + encontrado.ref.id);
+    enviado = await subirPdf(await pdfDoContrato(db, modelo.configuracao, preencherTexto(modelo.configuracao, dadosDoPedido(encontrado.data, modelo.versao))), "contratos-preenchidos/" + encontrado.ref.id);
     documento = { ...documento, ...enviado, preenchivel: true };
   }
   try {

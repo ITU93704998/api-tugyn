@@ -42,7 +42,7 @@ import { dentroDoLimite } from "./_lib/rateLimit";
 const ACOES_CLIENTE = ["ver", "configurar", "comprovante", "contrato_aceitar", "contrato_pdf", "anuncio_imagem", "anuncio_enviar"] as const;
 /** Sem login nem link: a página pública "quero anunciar". Só aceita a solicitação (e com limite por IP). */
 const ACOES_PUBLICAS = ["solicitar"] as const;
-const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "contrato_config_ver", "contrato_config_salvar", "contrato_config_previa", "contrato_config_publicar", "aprovar", "pedir_ajustes", "anuncios_publicar", "campanha_excluir"] as const;
+const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "contrato_config_ver", "contrato_config_logo", "contrato_config_salvar", "contrato_config_previa", "contrato_config_publicar", "aprovar", "pedir_ajustes", "anuncios_publicar", "campanha_excluir"] as const;
 const ID = /^[A-Za-z0-9]{10,40}$/;
 
 /** Ação da rota → ação do núcleo de etapas (sem `as`: se um nome mudar de um lado, o compilador acusa). */
@@ -148,7 +148,7 @@ const idValido = (valor: unknown): string | null => (typeof valor === "string" &
 const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Record<string, unknown>, uid: string, res: VercelResponse) => {
   const agora = Date.now();
 
-  if (acao === "contrato_config_ver" || acao === "contrato_config_salvar" || acao === "contrato_config_previa" || acao === "contrato_config_publicar") return adminConfiguracaoContrato(db, acao, body, uid, agora, res);
+  if (acao === "contrato_config_ver" || acao === "contrato_config_logo" || acao === "contrato_config_salvar" || acao === "contrato_config_previa" || acao === "contrato_config_publicar") return adminConfiguracaoContrato(db, acao, body, uid, agora, res);
 
   if (acao === "criar") {
     const dados = parseCriar(body);
