@@ -1,3 +1,4 @@
+import type { VersaoModelo } from "./contratoModelo";
 import { createHash, randomBytes } from "node:crypto";
 import type { VercelRequest } from "@vercel/node";
 import { type AnuncioContrato, type ImagemAnuncio } from "./anuncioContrato";
@@ -117,6 +118,8 @@ export interface AnuncioEnviado extends AnuncioContrato {
 }
 
 export interface ContratoDoc {
+  /** PDF preenchido e privado, congelado quando aberto. Nunca é substituído após aceite. */
+  documentoContrato?: VersaoModelo | null;
   status: Status;
   codigo: string;
   tokenHash: string;
@@ -227,6 +230,7 @@ export const parseContrato = (raw: unknown): ContratoDoc | null => {
     anuncio: parseAnuncio(raw.anuncio),
     rascunhoImagem: parseImagem(raw.rascunhoImagem),
     aceite: parseAceite(raw.aceite),
+    documentoContrato: isRecord(raw.documentoContrato) && typeof raw.documentoContrato.publicId === "string" && typeof raw.documentoContrato.sha256 === "string" && num(raw.documentoContrato.versao) >= 1 ? { publicId: raw.documentoContrato.publicId, sha256: raw.documentoContrato.sha256, versao: num(raw.documentoContrato.versao), nome: limparTexto(raw.documentoContrato.nome, 80), bytes: num(raw.documentoContrato.bytes), preenchivel: raw.documentoContrato.preenchivel === true, enviadoEm: num(raw.documentoContrato.enviadoEm) } : null,
     pdfSolicitado: isRecord(raw.pdfSolicitado) && num(raw.pdfSolicitado.versao) >= 1 ? { versao: num(raw.pdfSolicitado.versao), em: num(raw.pdfSolicitado.em) } : null,
     ajustes: isRecord(raw.ajustes) && typeof raw.ajustes.nota === "string" ? { nota: limparTexto(raw.ajustes.nota, 300), em: num(raw.ajustes.em) } : null,
     campanhaId: typeof raw.campanhaId === "string" && raw.campanhaId ? raw.campanhaId.slice(0, 128) : null,
@@ -261,8 +265,8 @@ export const visaoPublica = (c: ContratoDoc, config: ConfigContratos, agora: num
     preco: c.preco,
     pagamento: mostraPagamento
       ? {
-          linkCartao: config.pagamento.linkCartao,
-          linkPix: config.pagamento.linkPix,
+          linkCartao: (modelo?.configuracao || c.documentoContrato?.preenchivel) && !c.aceite ? "" : config.pagamento.linkCartao,
+          linkPix: (modelo?.configuracao || c.documentoContrato?.preenchivel) && !c.aceite ? "" : config.pagamento.linkPix,
           instrucoes: config.pagamento.instrucoes,
           valorTotal: c.preco ? c.preco.total : null,
           comprovanteEnviadoEm: c.pagamento.comprovante ? c.pagamento.comprovante.enviadoEm : null,
@@ -272,6 +276,7 @@ export const visaoPublica = (c: ContratoDoc, config: ConfigContratos, agora: num
       : null,
     // o contrato em PDF: se existe, qual versão, se este cliente já concordou com ELA e se já a abriu (condição para aceitar)
     contratoPdf: {
+      antesPagamento: !!modelo?.configuracao || c.documentoContrato?.preenchivel === true,
       disponivel: modelo !== null,
       versao: modelo ? modelo.versao : null,
       nome: modelo ? modelo.nome : null,

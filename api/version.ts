@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleAdminUsuarios } from "./_lib/adminUsuarios";
+import { handleAppLinks } from "./_lib/appLinks";
 import { handleContacts } from "./_lib/contatos";
 import { handleModeracao } from "./_lib/moderacao";
 import { handleNotificacoes } from "./_lib/notificacoesGerais";
@@ -43,6 +44,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.query?.resource === "relato") return handleRelato(req, res);
   // Pedido de revisão de conta suspensa (app e site, SEM login: a conta suspensa não entra).
   if (req.query?.resource === "revisao") return handleRevisao(req, res);
+  // Arquivos que autorizam os links a abrir o app (/.well-known/..., por rewrite no vercel.json; ver _lib/appLinks.ts).
+  if (req.query?.resource === "apple-app-site-association" || req.query?.resource === "assetlinks") return handleAppLinks(req, res);
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
     return res.status(405).json({ error: "Método não permitido." });

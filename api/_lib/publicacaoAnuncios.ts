@@ -11,7 +11,9 @@ import { type BuildResult, type Campaign, buildAdsConfig, validateCampaignInput 
  */
 
 export const COLECAO_CAMPANHAS = "adCampaigns";
-const CONFIG = "adsConfig/atual";
+/** Os anúncios publicados (o que o app mostra). */
+export const DOC_ANUNCIOS_PUBLICADOS = "adsConfig/atual";
+const CONFIG = DOC_ANUNCIOS_PUBLICADOS;
 const TRILHA = "adsPublicacoes";
 
 export type MotivoPublicacao = "publicar" | "aprovar" | "excluir";

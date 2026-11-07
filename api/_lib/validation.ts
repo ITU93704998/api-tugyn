@@ -111,5 +111,55 @@ export const parseBannerDeAnuncio = (value: unknown): string | "contrato" | null
   return m[2] === "contratos" ? "contrato" : value;
 };
 
-/** A URL (de uma campanha) aponta para esta imagem? Funciona com versão e transformações no caminho. */
-export const urlUsaImagem = (url: unknown, publicId: string): boolean => typeof url === "string" && url.includes(`/${publicId}.`);
+/** Segmento de assinatura (`s--abc--`), transformação (`f_auto`, `c_fill,w_300`, `t_nome`...) ou versão (`v1700000000`). */
+const SEGMENTO_DE_ENTREGA = /^(?:s--[^/]+--|v\d+|[a-z]{1,4}_[^/]*|[^/]*,[^/]*)$/;
+const EXTENSAO = /\.[A-Za-z0-9]{1,5}$/;
+
+/**
+ * A URL (de uma campanha ou do anúncio publicado) aponta para esta imagem? Lê a URL de entrega do Cloudinary
+ * (`https://res.cloudinary.com/<cloud>/image/upload/[transformações/][v123/]<public_id>[.ext][?...]`), com ou sem extensão,
+ * com transformações, versão, query string e fragmento, e compara o `public_id` INTEIRO (segmento a segmento: um id com o
+ * mesmo começo não confunde). Com `cloud`, URL de outra conta do Cloudinary é outra imagem.
+ *
+ * Na dúvida, responde que USA (quem chama mantém a imagem): URL que não dá para ler, de outro endereço ou em formato
+ * desconhecido, mas que contém o id.
+ */
+export const urlUsaImagem = (url: unknown, publicId: string, cloud?: string): boolean => {
+  if (typeof url !== "string" || !url || !publicId) return false;
+  let partes: string[];
+  let host: string;
+  try {
+    const u = new URL(url);
+    host = u.hostname.toLowerCase();
+    partes = u.pathname.split("/").filter(Boolean).map((p) => decodeURIComponent(p));
+  } catch {
+    return url.includes(publicId);
+  }
+  if (host !== "res.cloudinary.com") return url.includes(publicId); // CDN própria/formato desconhecido: na dúvida, usa
+  const upload = partes.indexOf("upload");
+  if (upload < 2 || partes[upload - 1] !== "image") return url.includes(publicId);
+  if (cloud && partes[0] !== cloud) return false;
+  const resto = partes.slice(upload + 1);
+  if (!resto.length) return false;
+  resto[resto.length - 1] = resto[resto.length - 1].replace(EXTENSAO, "");
+  const alvo = publicId.split("/");
+  if (resto.length < alvo.length) return false;
+  const fim = resto.slice(resto.length - alvo.length);
+  if (fim.some((p, i) => p !== alvo[i])) return false;
+  const antes = resto.slice(0, resto.length - alvo.length);
+  // Antes do id só cabem assinatura, transformações e versão; outra pasta na frente = id mais longo = outra imagem.
+  return antes.every((p) => SEGMENTO_DE_ENTREGA.test(p));
+};
+
+/** Todos os textos de um documento (campos aninhados e listas), para procurar URLs de imagem. */
+export const textosDoDocumento = (valor: unknown, limite = 5000): string[] => {
+  const saida: string[] = [];
+  const visitar = (v: unknown, profundidade: number) => {
+    if (saida.length >= limite || profundidade > 8) return;
+    if (typeof v === "string") saida.push(v);
+    else if (Array.isArray(v)) v.forEach((x) => visitar(x, profundidade + 1));
+    else if (v && typeof v === "object") Object.values(v as Record<string, unknown>).forEach((x) => visitar(x, profundidade + 1));
+  };
+  visitar(valor, 0);
+  return saida;
+};

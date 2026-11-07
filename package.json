@@ -14,7 +14,8 @@
   "type": "commonjs",
   "dependencies": {
     "cloudinary": "^2.10.0",
-    "firebase-admin": "^14.5.0"
+    "firebase-admin": "^14.5.0",
+    "pdf-lib": "1.17.1"
   },
   "overrides": {
     "jwks-rsa": "3.2.2"

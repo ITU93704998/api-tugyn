@@ -1,3 +1,4 @@
+import { validarConfiguracao, type ConfiguracaoContrato } from "./contratoConfiguracao";
 import { createHash } from "node:crypto";
 
 /**
@@ -12,6 +13,7 @@ export const PDF_URL_SEGUNDOS = 300;
 export const VERSOES_GUARDADAS = 20;
 
 export interface VersaoModelo {
+  preenchivel?: boolean;
   versao: number;
   nome: string;
   bytes: number;
@@ -22,6 +24,7 @@ export interface VersaoModelo {
 }
 
 export interface ContratoModelo extends VersaoModelo {
+  configuracao?: ConfiguracaoContrato;
   enviadoPor: string;
   /** As versões anteriores (a mais recente primeiro), para o aceite de contratos antigos continuar rastreável. */
   anteriores: VersaoModelo[];
@@ -41,7 +44,8 @@ export const parseModelo = (raw: unknown): ContratoModelo | null => {
   const atual = parseVersao(raw);
   if (!atual || !isRecord(raw)) return null;
   const anteriores = Array.isArray(raw.anteriores) ? raw.anteriores.map(parseVersao).filter((v): v is VersaoModelo => v !== null).slice(0, VERSOES_GUARDADAS) : [];
-  return { ...atual, enviadoPor: str(raw.enviadoPor, 128), anteriores };
+  const config = raw.configuracao ? validarConfiguracao(raw.configuracao) : null;
+  return { ...atual, enviadoPor: str(raw.enviadoPor, 128), anteriores, ...(config?.ok ? { configuracao: config.valor } : {}) };
 };
 
 export type PdfValido = { ok: true; buffer: Buffer; bytes: number; sha256: string; dataUri: string } | { ok: false; error: string };

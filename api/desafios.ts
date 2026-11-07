@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { getAuth } from "firebase-admin/auth";
 import {
   FieldPath,
   FieldValue,
@@ -43,6 +44,7 @@ import { ehAcaoDeAmistoso, executarAmistoso, parseAmistosoBody } from "./_lib/am
 import { DEDUPE_MS, type PushDraft } from "./_lib/push";
 import { consultarRecibos, recuperarAvisosPendentes, enviarAviso } from "./_lib/pushEnvio";
 import { bucketsSemCredenciais } from "./_lib/cloudinaryCleanup";
+import { limparContasIncompletas } from "./_lib/contasIncompletasJob";
 import { processarExclusoesPendentes } from "./_lib/exclusaoContaJob";
 import { limparReservasDeMidia } from "./_lib/midiaReservasJob";
 import { processarPendencias } from "./_lib/recalculos";
@@ -84,7 +86,7 @@ export const config = { maxDuration: 60 };
  * Prazo de cada etapa da rotina, contado do início da chamada (a função morre em `maxDuration`). O que não couber fica na
  * fila para a próxima rodada e a resposta sai como não-2xx (ver `problemasDaRotina`).
  */
-const PRAZOS_DA_ROTINA_MS = { apuracao: 28_000, avisos: 35_000, exclusoes: 42_000, midia: 47_000, outbox: 51_000, recibos: 54_000, pendencias: 57_000 };
+const PRAZOS_DA_ROTINA_MS = { apuracao: 28_000, avisos: 35_000, exclusoes: 42_000, midia: 47_000, contas: 50_000, outbox: 52_500, recibos: 55_000, pendencias: 57_000 };
 /** Etapa que não tem pelo menos isso de tempo nem começa (uma chamada externa já em andamento não é interrompida). */
 const FOLGA_MINIMA_MS = 1_500;
 
@@ -590,6 +592,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         }
         return etapa(nome, () => fn(ate));
       };
+      // Contas do login sem perfil (cadastro interrompido): marca e revoga numa rodada, apaga na seguinte se nada mudou.
+      const contas = await seCouber("contas_incompletas", inicio + PRAZOS_DA_ROTINA_MS.contas, (ate) => limparContasIncompletas(db, getAuth(getFirebaseApp()), ate));
       const recuperados = await seCouber("push_outbox", inicio + PRAZOS_DA_ROTINA_MS.outbox, (ate) => recuperarAvisosPendentes(db, { limit: 3, prazoAte: ate }));
       const recibos = await seCouber("push_recibos", inicio + PRAZOS_DA_ROTINA_MS.recibos, (ate) => consultarRecibos(db, { prazoAte: ate }));
       // Recálculos de perfil que o app não conseguiu pedir (ou que falharam): pendência durável gravada junto com a partida.
@@ -602,6 +606,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         exclusoesConcluidas: exclusoes?.concluidas ?? 0,
         exclusoesPendentes: exclusoes?.pendentes ?? 0,
         reservasResolvidas: midia?.resolvidas ?? 0,
+        contasIncompletasMarcadas: contas?.marcadas ?? 0,
+        contasIncompletasApagadas: contas?.apagadas ?? 0,
         duracaoMs: Date.now() - inicio,
         // Sem tempo hoje: não é falha (a fila é durável e os workers frequentes também cuidam).
         etapasAdiadas: adiadas,
@@ -619,6 +625,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           ...(midia?.restantes ? ["midia_restante"] : []),
           ...((midia?.falhas ?? 0) > 0 ? ["midia_pendente"] : []),
           // Falhas por item dessas etapas também contam (antes só a exceção da etapa inteira aparecia).
+          ...((contas?.falhas ?? 0) > 0 ? [`contas_incompletas_falhas:${contas?.falhas}`] : []),
           ...((recuperados?.falhas ?? 0) > 0 ? [`push_outbox_falhas:${recuperados?.falhas}`] : []),
           ...((recibos?.falhas ?? 0) > 0 ? [`push_recibos_falhas:${recibos?.falhas}`] : []),
           ...((pendencias?.falhas ?? 0) > 0 ? [`estatisticas_falhas:${pendencias?.falhas}`] : []),

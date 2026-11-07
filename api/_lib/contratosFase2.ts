@@ -1,3 +1,5 @@
+import { apagarPdf, dadosDoPedido, modeloDoCliente, resumoVersao, subirPdf } from "./contratoConfiguracaoAdmin";
+import { gerarPdfContrato, preencherTexto } from "./contratoConfiguracao";
 import { randomBytes } from "node:crypto";
 import type { VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
@@ -8,14 +10,14 @@ import { type ConfigContratos, datasAoAprovar, linkExpirado, proximoStatus } fro
 import { ContratoModelo, MODELO_DOC, PDF_URL_SEGUNDOS, acharVersao, limparNomePdf, parseModelo, proximaVersao, validarPdf } from "./contratoModelo";
 import { Conflito, Invalido, NaoEncontrado, lerNaTransacao, responder } from "./contratosComuns";
 import { gravarPublicacao, lerCampanhasNaTransacao } from "./publicacaoAnuncios";
-import { type ContratoDoc, comHistorico, contaDosComprovantes, limparTexto, validarImagem, visaoPublica } from "./contratos";
+import { type ContratoDoc, COLECAO, comHistorico, contaDosComprovantes, limparTexto, parseContrato, validarImagem, visaoPublica } from "./contratos";
 
 /**
  * Fase 2 do contrato: o contrato em PDF, o anúncio do cliente (texto ou banner 3,2 : 1) com o aceite, e a análise (aprovar ou pedir ajustes).
  * Tudo roda dentro da rota `api/contratos`; cada mudança de etapa é conferida DENTRO da transação.
  */
 
-const ETAPAS_COM_PDF = ["pago", "em_analise", "ajustes_solicitados", "aprovado"] as const;
+const ETAPAS_COM_PDF = ["aguardando_pagamento", "comprovante_enviado", "pago", "em_analise", "ajustes_solicitados", "aprovado"] as const;
 const ID_CAMPANHAS = "adCampaigns";
 
 export interface CtxCliente {
@@ -50,23 +52,35 @@ const aleatorio = (): string => randomBytes(12).toString("base64url");
 /** O cliente abre o contrato (PDF): devolve um endereço temporário e REGISTRA que esta versão foi aberta (condição para aceitar). */
 export const clientePdf = async (c: CtxCliente) => {
   const { db, res, encontrado, agora } = c;
-  if (!(ETAPAS_COM_PDF as readonly string[]).includes(encontrado.data.status)) return responder(res, 409, { error: "O contrato fica disponível depois da confirmação do pagamento." });
-  const modelo = await lerModelo(db);
+  if (!(ETAPAS_COM_PDF as readonly string[]).includes(encontrado.data.status)) return responder(res, 409, { error: "Confirme o pedido para consultar o contrato." });
+  const modelo = await modeloDoCliente(db, encontrado.data);
   if (!modelo) return responder(res, 404, { error: "O contrato ainda não está disponível. Fale com a Tugyn ADS." });
   const conta = contaDosComprovantes();
   if (!conta) return responder(res, 503, { error: "O contrato ainda não está disponível. Fale com a Tugyn ADS." });
-  const { url, expiraEmS } = urlDoPdf(conta, modelo.publicId, agora);
+  let documento = resumoVersao(modelo);
+  let enviado: Awaited<ReturnType<typeof subirPdf>> | null = null;
+  if (!encontrado.data.documentoContrato && !encontrado.data.aceite && modelo.configuracao) {
+    if (!encontrado.data.pedido || !encontrado.data.preco) return responder(res, 409, { error: "Confirme o pedido antes de abrir o contrato preenchido." });
+    enviado = await subirPdf(await gerarPdfContrato(preencherTexto(modelo.configuracao, dadosDoPedido(encontrado.data, modelo.versao))), "contratos-preenchidos/" + encontrado.ref.id);
+    documento = { ...documento, ...enviado, preenchivel: true };
+  }
   try {
     await db.runTransaction(async (tx) => {
       const atual = await lerNaTransacao(tx, encontrado.ref);
       if (atual.tokenHash !== encontrado.data.tokenHash || linkExpirado(atual, agora) || !(ETAPAS_COM_PDF as readonly string[]).includes(atual.status)) throw new Conflito();
-      tx.update(encontrado.ref, { pdfSolicitado: { versao: modelo.versao, em: agora }, atualizadoEm: agora });
+      if (JSON.stringify(atual.pedido) !== JSON.stringify(encontrado.data.pedido) || JSON.stringify(atual.preco) !== JSON.stringify(encontrado.data.preco)) throw new Conflito();
+      if (atual.documentoContrato) documento = atual.documentoContrato;
+      else if (atual.aceite && atual.aceite.versao !== documento.versao) throw new Conflito();
+      tx.update(encontrado.ref, { documentoContrato: documento, pdfSolicitado: { versao: documento.versao, em: agora }, atualizadoEm: agora });
     });
   } catch (error) {
+    if (enviado) await apagarPdf(enviado.publicId);
     if (error instanceof Conflito || error instanceof NaoEncontrado) return responder(res, 409, { error: "O contrato mudou. Atualize a página." });
     throw error;
   }
-  return responder(res, 200, { url, versao: modelo.versao, nome: modelo.nome, expiraEm: expiraEmS * 1000 });
+  if (enviado && enviado.publicId !== documento.publicId) await apagarPdf(enviado.publicId);
+  const { url, expiraEmS } = urlDoPdf(conta, documento.publicId, agora);
+  return responder(res, 200, { url, sha256: documento.sha256, versao: documento.versao, nome: documento.nome, expiraEm: expiraEmS * 1000 });
 };
 
 /** O cliente envia a imagem do banner: sobe para o Cloudinary (pública, na pasta do administrador) e SÓ fica se tiver a proporção 3,2 : 1. */
@@ -124,7 +138,7 @@ export const clienteEnviarAnuncio = async (c: CtxCliente) => {
   const d = encontrado.data;
   const proximo = proximoStatus(d.status, "enviar_anuncio", "cliente");
   if (!proximo || !d.pedido) return responder(res, 409, { error: "Não é possível enviar o anúncio neste momento." });
-  const modelo = await lerModelo(db);
+  const modelo = await modeloDoCliente(db, d);
   if (!modelo) return responder(res, 503, { error: "O contrato ainda não está disponível. Fale com a Tugyn ADS." });
   if (!(d.pdfSolicitado && d.pdfSolicitado.versao === modelo.versao)) return responder(res, 409, { error: "Abra e leia o contrato antes de enviar o anúncio." });
   const jaAceitou = d.aceite !== null && d.aceite.versao === modelo.versao;
@@ -143,12 +157,13 @@ export const clienteEnviarAnuncio = async (c: CtxCliente) => {
       const atual = await lerNaTransacao(tx, encontrado.ref);
       const novoStatus = proximoStatus(atual.status, "enviar_anuncio", "cliente");
       if (atual.tokenHash !== d.tokenHash || linkExpirado(atual, agora) || !novoStatus || !atual.pdfSolicitado || atual.pdfSolicitado.versao !== modelo.versao) throw new Conflito();
+      if (atual.documentoContrato && atual.documentoContrato.sha256 !== modelo.sha256) throw new Conflito();
       const aceite = jaAceitou && atual.aceite && atual.aceite.versao === modelo.versao ? atual.aceite : { versao: modelo.versao, sha256: modelo.sha256, nomeArquivo: modelo.nome, aceitoEm: agora, ipHash, pdfAbertoEm: atual.pdfSolicitado.em };
       const anuncio = { ...v.anuncio, enviadoEm: agora };
       imagemAntiga = atual.anuncio?.imagem && v.anuncio.imagem && atual.anuncio.imagem.publicId !== v.anuncio.imagem.publicId ? atual.anuncio.imagem.publicId : null;
       const historico = comHistorico(atual.historico, { em: agora, por: "cliente", acao: jaAceitou ? "reenviou o anúncio" : "enviou o anúncio e aceitou o contrato", nota: `contrato v${modelo.versao}` });
       gravado = { ...atual, status: novoStatus, anuncio, rascunhoImagem: null, aceite, ajustes: null, atualizadoEm: agora, historico };
-      tx.update(encontrado.ref, { status: novoStatus, anuncio, rascunhoImagem: null, aceite, ajustes: null, atualizadoEm: agora, historico });
+      tx.update(encontrado.ref, { status: novoStatus, anuncio, rascunhoImagem: null, aceite, documentoContrato: resumoVersao(modelo), ajustes: null, atualizadoEm: agora, historico });
     });
   } catch (error) {
     if (error instanceof Conflito || error instanceof NaoEncontrado) return responder(res, 409, { error: "O contrato mudou. Atualize a página." });
@@ -157,6 +172,26 @@ export const clienteEnviarAnuncio = async (c: CtxCliente) => {
   const conta = contaDosComprovantes();
   if (imagemAntiga && conta) await destruir(conta, imagemAntiga, "upload", "image"); // a imagem que foi trocada no reenvio
   return responder(res, 200, { contrato: visaoPublica(gravado as unknown as ContratoDoc, config, agora, modelo) });
+};
+
+/** Aceite do PDF congelado, antes do pagamento; nunca confia em hash/versão enviados pelo navegador. */
+export const clienteAceitarContrato = async (c: CtxCliente) => {
+  const { db, res, body, agora, encontrado, config, ipHash } = c;
+  if (body.aceito !== true) return responder(res, 400, { error: "Confirme que leu e concorda com o contrato." });
+  try {
+    await db.runTransaction(async tx => {
+      const atual = await lerNaTransacao(tx, encontrado.ref);
+      const pdf = atual.documentoContrato;
+      if (atual.status !== "aguardando_pagamento" || atual.tokenHash !== encontrado.data.tokenHash || linkExpirado(atual, agora) || !pdf || body.sha256 !== pdf.sha256 || !atual.pdfSolicitado || atual.pdfSolicitado.versao !== pdf.versao) throw new Conflito();
+      if (atual.aceite) return;
+      const aceite = { versao: pdf.versao, sha256: pdf.sha256, nomeArquivo: pdf.nome, aceitoEm: agora, ipHash, pdfAbertoEm: atual.pdfSolicitado.em };
+      tx.update(encontrado.ref, { aceite, atualizadoEm: agora, historico: comHistorico(atual.historico, { em: agora, por: "cliente", acao: "aceitou o contrato antes do pagamento", nota: "contrato v" + pdf.versao }) });
+    });
+  } catch (e) { if (e instanceof Conflito || e instanceof NaoEncontrado) return responder(res, 409, { error: "Abra o contrato deste pedido antes de aceitar. Se o pedido mudou, atualize a página." }); throw e; }
+  const atual = await encontrado.ref.get();
+  const doc = parseContrato(atual.data());
+  if (!doc) return responder(res, 404, { error: "Contrato não encontrado." });
+  return responder(res, 200, { contrato: visaoPublica(doc, config, agora, await modeloDoCliente(db, doc)) });
 };
 
 // ─────────────────────────── ADMINISTRADOR ───────────────────────────
@@ -175,6 +210,10 @@ export const adminModeloEnviar = async (db: Firestore, body: Record<string, unkn
       const snapshot = await tx.get(db.doc(MODELO_DOC));
       const novo = proximaVersao(snapshot.exists ? parseModelo(snapshot.data()) : null, { nome, bytes: pdf.bytes, sha256: pdf.sha256, publicId: enviado.public_id }, agora, uid);
       versao = novo.versao;
+      for (const anterior of snapshot.exists ? [parseModelo(snapshot.data())!].filter(Boolean) : []) {
+        for (const v of [anterior, ...anterior.anteriores]) tx.set(db.doc(`adsContratoVersoes/${v.versao}`), { ...v, anteriores: [] });
+      }
+      tx.create(db.doc(`adsContratoVersoes/${novo.versao}`), { ...novo, anteriores: [] });
       tx.set(db.doc(MODELO_DOC), novo as unknown as Record<string, unknown>);
     });
   } catch (error) {
@@ -186,10 +225,26 @@ export const adminModeloEnviar = async (db: Firestore, body: Record<string, unkn
 
 /** Endereço temporário (5 minutos) do PDF, para o administrador conferir (a versão atual ou uma anterior). */
 export const adminModeloUrl = async (db: Firestore, body: Record<string, unknown>, agora: number, res: VercelResponse) => {
+  if (body.contratoId !== undefined) {
+    if (typeof body.contratoId !== "string" || !/^[A-Za-z0-9]{10,40}$/.test(body.contratoId)) return responder(res, 400, { error: "Contrato inválido." });
+    const snap = await db.doc(COLECAO + "/" + body.contratoId).get();
+    const doc = snap.exists ? parseContrato(snap.data()) : null;
+    if (!doc?.aceite) return responder(res, 404, { error: "Nenhum contrato aceito encontrado para este pedido." });
+    const pdf = await modeloDoCliente(db, doc);
+    if (!pdf || pdf.sha256 !== doc.aceite.sha256) return responder(res, 409, { error: "O PDF original deste aceite não está disponível. Não será exibida outra versão." });
+    const conta = contaDosComprovantes();
+    if (!conta) return responder(res, 503, { error: "Conta do Cloudinary dos anúncios não configurada." });
+    const { url, expiraEmS } = urlDoPdf(conta, pdf.publicId, agora);
+    return responder(res, 200, { url, versao: pdf.versao, nome: pdf.nome, expiraEm: expiraEmS * 1000 });
+  }
   const modelo = await lerModelo(db);
   if (!modelo) return responder(res, 404, { error: "Nenhum contrato cadastrado ainda." });
   const pedida = typeof body.versao === "number" && Number.isInteger(body.versao) ? body.versao : undefined;
-  const versao = acharVersao(modelo, pedida);
+  let versao = acharVersao(modelo, pedida);
+  if (!versao && pedida !== undefined && Number.isSafeInteger(pedida) && pedida >= 1) {
+    const arquivo = await db.doc(`adsContratoVersoes/${pedida}`).get();
+    versao = arquivo.exists ? parseModelo({ ...arquivo.data(), anteriores: [], enviadoPor: "" }) : null;
+  }
   if (!versao) return responder(res, 404, { error: "Versão não encontrada." });
   const conta = contaDosComprovantes();
   if (!conta) return responder(res, 503, { error: "Conta do Cloudinary dos anúncios não configurada." });

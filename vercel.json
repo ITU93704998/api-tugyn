@@ -7,6 +7,18 @@
   ],
   "rewrites": [
     {
+      "source": "/.well-known/apple-app-site-association",
+      "destination": "/api/version?resource=apple-app-site-association"
+    },
+    {
+      "source": "/apple-app-site-association",
+      "destination": "/api/version?resource=apple-app-site-association"
+    },
+    {
+      "source": "/.well-known/assetlinks.json",
+      "destination": "/api/version?resource=assetlinks"
+    },
+    {
       "source": "/api/time/c/:codigo",
       "destination": "/api/turma/:codigo?tipo=convite"
     },

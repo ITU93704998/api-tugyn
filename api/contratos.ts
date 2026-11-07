@@ -1,3 +1,5 @@
+import { clienteAceitarContrato } from "./_lib/contratosFase2";
+import { adminConfiguracaoContrato, modeloDoCliente, registroAceiteAnterior } from "./_lib/contratoConfiguracaoAdmin";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { v2 as cloudinary } from "cloudinary";
 import { type Firestore, getFirestore } from "firebase-admin/firestore";
@@ -23,7 +25,7 @@ import {
 import { Conflito, NaoEncontrado, buscarPorToken, lerConfig, lerNaTransacao, prepararContrato, responder } from "./_lib/contratosComuns";
 import { aprovarSolicitacao, excluirSolicitacao, solicitar } from "./_lib/solicitacoes";
 import { excluirCampanha, publicarAnuncios } from "./_lib/publicacaoAnuncios";
-import { adminAprovar, adminModeloEnviar, adminModeloUrl, adminPedirAjustes, clienteEnviarAnuncio, clienteImagem, clientePdf, lerModelo } from "./_lib/contratosFase2";
+import { adminAprovar, adminModeloEnviar, adminModeloUrl, adminPedirAjustes, clienteEnviarAnuncio, clienteImagem, clientePdf } from "./_lib/contratosFase2";
 import { handleCors } from "./_lib/cors";
 import { dentroDoLimite } from "./_lib/rateLimit";
 
@@ -37,10 +39,10 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  * O cliente NUNCA fala com o Firestore: esta rota confere o token e a etapa, RECALCULA o preço e grava (o valor que a tela do cliente mostra é só apoio).
  */
 
-const ACOES_CLIENTE = ["ver", "configurar", "comprovante", "contrato_pdf", "anuncio_imagem", "anuncio_enviar"] as const;
+const ACOES_CLIENTE = ["ver", "configurar", "comprovante", "contrato_aceitar", "contrato_pdf", "anuncio_imagem", "anuncio_enviar"] as const;
 /** Sem login nem link: a página pública "quero anunciar". Só aceita a solicitação (e com limite por IP). */
 const ACOES_PUBLICAS = ["solicitar"] as const;
-const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "aprovar", "pedir_ajustes", "anuncios_publicar", "campanha_excluir"] as const;
+const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "contrato_config_ver", "contrato_config_salvar", "contrato_config_previa", "contrato_config_publicar", "aprovar", "pedir_ajustes", "anuncios_publicar", "campanha_excluir"] as const;
 const ID = /^[A-Za-z0-9]{10,40}$/;
 
 /** Ação da rota → ação do núcleo de etapas (sem `as`: se um nome mudar de um lado, o compilador acusa). */
@@ -53,8 +55,6 @@ const ACAO_DO_NUCLEO: Record<"novo_link" | "confirmar_pagamento" | "pedir_compro
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** O contrato em PDF só entra na visão depois do pagamento (antes disso o cliente não precisa dele): economiza uma leitura. */
-const modeloDaVisao = (db: Firestore, status: Status) => (status === "pago" || status === "em_analise" || status === "ajustes_solicitados" || status === "aprovado" ? lerModelo(db) : Promise.resolve(null));
 
 // ─────────────────────────── CLIENTE ───────────────────────────
 const cliente = async (db: Firestore, acao: (typeof ACOES_CLIENTE)[number], body: Record<string, unknown>, res: VercelResponse, ipHash: string) => {
@@ -67,13 +67,15 @@ const cliente = async (db: Firestore, acao: (typeof ACOES_CLIENTE)[number], body
     return responder(res, 410, { error: cancelado ? "Este contrato foi cancelado." : "Este link expirou.", motivo: cancelado ? "cancelado" : "expirado", contato: config.contato });
   }
 
-  if (acao === "ver") return responder(res, 200, { contrato: visaoPublica(encontrado.data, config, agora, await modeloDaVisao(db, encontrado.data.status)) });
+  if (acao === "ver") return responder(res, 200, { contrato: visaoPublica(encontrado.data, config, agora, await modeloDoCliente(db, encontrado.data)) });
 
   // Fase 2: contrato em PDF, imagem do banner e envio do anúncio
   if (acao === "contrato_pdf" || acao === "anuncio_imagem" || acao === "anuncio_enviar") {
     const contexto = { db, res, body, agora, encontrado, config, ipHash };
     return acao === "contrato_pdf" ? clientePdf(contexto) : acao === "anuncio_imagem" ? clienteImagem(contexto) : clienteEnviarAnuncio(contexto);
   }
+
+  if (acao === "contrato_aceitar") return clienteAceitarContrato({ db, res, body, agora, encontrado, config, ipHash });
 
   if (acao === "configurar") {
     if (!temPrecos(config)) return responder(res, 503, { error: "Os valores ainda não foram configurados. Fale com a Tugyn ADS." });
@@ -88,15 +90,21 @@ const cliente = async (db: Firestore, acao: (typeof ACOES_CLIENTE)[number], body
         const atual = await lerNaTransacao(tx, encontrado.ref);
         const novoStatus = proximoStatus(atual.status, "configurar", "cliente");
         if (atual.tokenHash !== encontrado.data.tokenHash || linkExpirado(atual, agora) || !novoStatus) throw new Conflito();
-        gravado = { ...atual, pedido, preco, status: novoStatus, atualizadoEm: agora, historico: comHistorico(atual.historico, { em: agora, por: "cliente", acao: "confirmou o pedido", nota: `${preco.total} centavos, ${pedido.dias} dia(s)` }) };
-        tx.update(encontrado.ref, { pedido, preco, status: novoStatus, atualizadoEm: agora, historico: gravado.historico });
+        const aceiteAnterior = registroAceiteAnterior(atual);
+        if (aceiteAnterior) tx.set(encontrado.ref.collection("aceites").doc(), aceiteAnterior);
+        gravado = { ...atual, pedido, preco, status: novoStatus, aceite: null, documentoContrato: null, pdfSolicitado: null, atualizadoEm: agora, historico: comHistorico(atual.historico, { em: agora, por: "cliente", acao: "confirmou o pedido", nota: `${preco.total} centavos, ${pedido.dias} dia(s)` }) };
+        tx.update(encontrado.ref, { pedido, preco, status: novoStatus, aceite: null, documentoContrato: null, pdfSolicitado: null, atualizadoEm: agora, historico: gravado.historico });
       });
     } catch (error) {
       if (error instanceof Conflito || error instanceof NaoEncontrado) return responder(res, 409, { error: "O contrato mudou. Atualize a página." });
       throw error;
     }
-    return responder(res, 200, { contrato: visaoPublica(gravado as unknown as ContratoDoc, config, agora) });
+    return responder(res, 200, { contrato: visaoPublica(gravado as unknown as ContratoDoc, config, agora, await modeloDoCliente(db, gravado as unknown as ContratoDoc)) });
   }
+
+  // Um pedido configurável só recebe comprovante depois do aceite.
+  const modeloPagamento = await modeloDoCliente(db, encontrado.data);
+  if ((modeloPagamento?.configuracao || encontrado.data.documentoContrato?.preenchivel) && !encontrado.data.aceite) return responder(res, 409, { error: "Leia e aceite o contrato antes de pagar." });
 
   // comprovante
   if (!proximoStatus(encontrado.data.status, "enviar_comprovante", "cliente") || !encontrado.data.pedido || !encontrado.data.preco) return responder(res, 409, { error: "Não é possível enviar o comprovante neste momento." });
@@ -120,6 +128,7 @@ const cliente = async (db: Firestore, acao: (typeof ACOES_CLIENTE)[number], body
       const atual = await lerNaTransacao(tx, encontrado.ref);
       const novoStatus = proximoStatus(atual.status, "enviar_comprovante", "cliente");
       if (atual.tokenHash !== encontrado.data.tokenHash || linkExpirado(atual, agora) || !novoStatus) throw new Conflito();
+      if (atual.documentoContrato?.preenchivel && !atual.aceite) throw new Conflito();
       const pagamento = { ...atual.pagamento, comprovante: { publicId: enviado.public_id, formato: String(enviado.format ?? ""), bytes: Number(enviado.bytes ?? imagem.bytes), enviadoEm: agora }, declaradoEm: agora };
       gravado = { ...atual, status: novoStatus, pagamento, atualizadoEm: agora, historico: comHistorico(atual.historico, { em: agora, por: "cliente", acao: "enviou o comprovante e declarou o pagamento" }) };
       tx.update(encontrado.ref, { status: novoStatus, pagamento, atualizadoEm: agora, historico: gravado.historico });
@@ -138,6 +147,8 @@ const idValido = (valor: unknown): string | null => (typeof valor === "string" &
 
 const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Record<string, unknown>, uid: string, res: VercelResponse) => {
   const agora = Date.now();
+
+  if (acao === "contrato_config_ver" || acao === "contrato_config_salvar" || acao === "contrato_config_previa" || acao === "contrato_config_publicar") return adminConfiguracaoContrato(db, acao, body, uid, agora, res);
 
   if (acao === "criar") {
     const dados = parseCriar(body);

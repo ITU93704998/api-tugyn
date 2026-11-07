@@ -10,6 +10,7 @@ A Vercel chama a rotina 1x por dia (`vercel.json`: `10 15 * * *`, 12:10 em Bras�
 | avisos (notificação) | 38 s | Envia a fila `reavisarTentativas in [0, 1, 2]` com cursor pelo id. Cada desafio é tentado uma vez por rodada, com no máximo 3 envios por pessoa. |
 | exclusões de conta | 46 s | Termina os jobs de `exclusoesConta` (INF-04). |
 | reservas de imagem | 52 s | Resolve as reservas vencidas de `midiaReservas` (INF-03). |
+| contas incompletas | 50 s (adiável) | Apaga do Auth as contas sem `users/{uid}` de cadastro interrompido (ver abaixo). |
 | push / recibos / recálculos | — | Recuperação da outbox de push, recibos do Expo e recálculos pendentes (já existiam). |
 
 A apuração pedida pelo app (`POST apurar`) continua enviando o aviso na hora, para o outro participante.
@@ -23,6 +24,7 @@ A apuração pedida pelo app (`POST apurar`) continua enviando o aviso na hora, 
 - etapa que lançou erro (`etapa_falhou:*`);
 - exclusão pendente;
 - reserva de imagem pendente;
+- conta incompleta que não pôde ser apagada (`contas_incompletas_falhas:N`);
 - conta do Cloudinary sem credencial (`credencial_ausente_<bucket>`).
 
 Tudo certo → `200` e o log `desafios_rotina` com as contagens, `atrasoMaxMs` e `duracaoMs`.
@@ -112,3 +114,22 @@ O banner (e o cadastro) continuam gravando a referência pelo app: as regras con
 ## Regras do Firestore
 
 `midiaReservas` e `exclusoesConta` não têm `match` nas regras: o app não lê nem escreve, só o Admin SDK. Não é preciso publicar regras para estas mudanças.
+
+## Contas incompletas (`_lib/contasIncompletasJob.ts`)
+
+O cadastro cria a conta no Auth antes da foto, do @ e do perfil. Se o app fecha no meio, o desfazer do app não roda e sobra uma conta sem `users/{uid}` ("Perfil incompleto"; o e-mail fica "em uso"). A rotina trata só as contas com TODOS estes sinais:
+
+- só o provedor `password`, e-mail não confirmado, conta ativa, **sem nenhuma custom claim**;
+- criada há mais de 24 h e menos de 60 dias;
+- entrou só na criação (até 10 min depois) e não renovou a sessão nas últimas 24 h (conta criada no console/script, sem entrada, fica).
+
+**Duas fases, em rodadas diferentes (nunca apaga na rodada em que identificou):**
+
+1. **Marcar.** Transação: sem `users/{uid}`, sem `exclusoesConta/{uid}` e sem marca → cria `contasIncompletas/{uid}` (`marcadaEm`). Depois revoga as sessões (`revokeRefreshTokens`) e anota `revogadaEm`. Nenhum app aberto consegue renovar o acesso; o token que existir vence em até 1 h.
+2. **Apagar** (rodada seguinte, depois de 2 h de quarentena). Relê a conta no Auth e exige de novo todos os sinais, sem claim, sem entrada nem renovação depois de `marcadaEm`. Transação: ainda sem perfil e sem exclusão → `apagandoEm` → apaga a conta, a marca e `versoesApp/{uid}`.
+
+Qualquer mudança (perfil, claim, nova entrada, renovação, conta desativada) **preserva** a conta e tira a marca. Marca sem `revogadaEm` nunca apaga. Falha de leitura preserva (a marca fica para a próxima rodada).
+
+**Limite conhecido.** Auth e Firestore não têm transação conjunta. Resta o intervalo de milissegundos entre a última releitura e a exclusão, numa conta sem sessão válida há pelo menos 2 h. **Não dê a permissão de administrador a uma conta que esteja em `contasIncompletas`.**
+
+A foto enviada no cadastro já some pela etapa de reservas de imagem (a reserva vence sem perfil que a use). Listar o Auth é grátis: páginas de 1000, cursor em `sistema/limpezaContasIncompletas`, até 200 marcas e 200 exclusões por rodada. `contasIncompletas` não tem `match` nas regras: só o Admin SDK lê e grava.
