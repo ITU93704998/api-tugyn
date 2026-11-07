@@ -52,11 +52,19 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 
 /** Intervalo esperado de cada rotina e a partir de quanto tempo sem rodar ela merece atenção / é crítica. */
 export const ROTINA_INFO: Record<NomeRotina, { nome: string; frequencia: string; atencaoMs: number; criticoMs: number; opcional: boolean }> = {
-  push_reenvio: { nome: "Reenvio de notificações", frequencia: "a cada 1 min (Functions)", atencaoMs: 5 * MIN, criticoMs: 15 * MIN, opcional: false },
-  push_recibos: { nome: "Recibos das notificações", frequencia: "a cada 15 min (Functions)", atencaoMs: 45 * MIN, criticoMs: 2 * HORA, opcional: false },
+  push_reenvio: { nome: "Reenvio de notificações", frequencia: "a cada 1 min (Firebase Functions, plano Blaze)", atencaoMs: 5 * MIN, criticoMs: 15 * MIN, opcional: false },
+  push_recibos: { nome: "Recibos das notificações", frequencia: "a cada 15 min (Firebase Functions, plano Blaze)", atencaoMs: 45 * MIN, criticoMs: 2 * HORA, opcional: false },
   rotina_diaria: { nome: "Rotina diária (desafios, exclusões, imagens)", frequencia: "1 vez por dia (cron da Vercel)", atencaoMs: 26 * HORA, criticoMs: 50 * HORA, opcional: false },
   pendencias_estatisticas: { nome: "Recálculo de estatísticas pendentes", frequencia: "agendador externo (opcional)", atencaoMs: 26 * HORA, criticoMs: 72 * HORA, opcional: true },
 };
+
+/**
+ * Rotinas que rodam nas Firebase Functions (exigem o plano Blaze). Sem nenhuma execução registrada, o projeto está sem
+ * Functions publicadas: não é problema, a rotina diária da Vercel faz o reenvio e confere os recibos uma vez por dia.
+ * Se as Functions forem publicadas, a partir da primeira execução elas são avaliadas normalmente.
+ */
+export const ROTINAS_DAS_FUNCTIONS: ReadonlySet<NomeRotina> = new Set<NomeRotina>(["push_reenvio", "push_recibos"]);
+export const MOTIVO_SEM_FUNCTIONS = "Não usada: as Firebase Functions não estão publicadas (exigem o plano Blaze). A rotina diária da Vercel faz esse trabalho uma vez por dia.";
 
 export interface EstadoRotina {
   id: NomeRotina;
@@ -87,6 +95,7 @@ export const avaliarRotina = (id: NomeRotina, registro: unknown, ultimaFalha: un
     resumo: r && isRecord(r.resumo) ? (Object.fromEntries(Object.entries(r.resumo).filter(([, v]) => typeof v === "number")) as Record<string, number>) : {},
     ultimaFalha: ms(ultimaFalha),
   };
+  if (!em && ROTINAS_DAS_FUNCTIONS.has(id)) return { ...base, nivel: "sem_dados", motivo: MOTIVO_SEM_FUNCTIONS };
   if (!em) {
     return { ...base, nivel: info.opcional ? "sem_dados" : "atencao", motivo: info.opcional ? "Ainda não executou (agendador opcional)." : "Nenhuma execução registrada ainda." };
   }
@@ -125,6 +134,14 @@ export const avaliarFila = (id: NomeFila, total: number | null, maisAntigo: numb
   else if (total > 0 && esperaMaxMs >= info.criticoMs) nivel = "critico";
   else if (total > 0 && esperaMaxMs >= info.atencaoMs) nivel = "atencao";
   return { id, nome: info.nome, descricao: info.descricao, total, esperaMaxMs, nivel };
+};
+
+/** Sem Functions, reenvio e recibos ficam com a rotina diária: a fila só indica atraso depois de mais de um dia. */
+export const PRAZO_FILA_SEM_FUNCTIONS = { atencaoMs: 26 * HORA, criticoMs: 50 * HORA };
+export const ajustarFilaSemFunctions = (f: EstadoFila): EstadoFila => {
+  if (f.total === null) return f;
+  const nivel: Nivel = f.total > 0 && f.esperaMaxMs >= PRAZO_FILA_SEM_FUNCTIONS.criticoMs ? "critico" : f.total > 0 && f.esperaMaxMs >= PRAZO_FILA_SEM_FUNCTIONS.atencaoMs ? "atencao" : "ok";
+  return { ...f, nivel, descricao: `${f.descricao} (pela rotina diária, sem Functions)` };
 };
 
 const contar = async (q: FirebaseFirestore.Query): Promise<number | null> => {
@@ -324,11 +341,15 @@ const saude = async (db: Firestore, atualizar: boolean) => {
   const dados = rotinasSnap.exists ? (rotinasSnap.data() ?? {}) : {};
   const falhas = isRecord(dados.falhas) ? dados.falhas : {};
   const rotinas = ROTINAS.map((id) => avaliarRotina(id, dados[id], falhas[id], agora));
+  const semFunctions = (id: NomeRotina) => rotinas.some((r) => r.id === id && r.ultimaExecucao === 0);
+  const filasAvaliadas = filas.map((f) =>
+    (f.id === "push_pendentes" && semFunctions("push_reenvio")) || (f.id === "push_recibos" && semFunctions("push_recibos")) ? ajustarFilaSemFunctions(f) : f,
+  );
   return {
     geradoEm: agora,
-    nivel: nivelGeral([...rotinas.map((r) => r.nivel), ...filas.map((f) => f.nivel)]),
+    nivel: nivelGeral([...rotinas.map((r) => r.nivel), ...filasAvaliadas.map((f) => f.nivel)]),
     rotinas,
-    filas,
+    filas: filasAvaliadas,
     versoes,
     config,
     vercel: configDaVercel(),

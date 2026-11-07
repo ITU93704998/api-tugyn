@@ -126,3 +126,24 @@ test('salvar config: valida versões, mínima ≤ recente, tamanhos e interrupto
   assert.match(A.parseConfigEnviada({ ...ok, aviso: 'a'.repeat(161) }).error, /160/);
   assert.match(A.parseConfigEnviada({ ...ok, funcoes: { desafios: true } }).error, /Interruptores/);
 });
+
+test('sem Firebase Functions (plano gratuito): rotinas das Functions ficam "não usadas" e as filas usam o prazo da rotina diária', () => {
+  const ts_ = (m) => ({ toMillis: () => m });
+  for (const id of ['push_reenvio', 'push_recibos']) {
+    const r = A.avaliarRotina(id, undefined, null, AGORA);
+    assert.equal(r.nivel, 'sem_dados');
+    assert.match(r.motivo, /Não usada/);
+  }
+  // Publicadas e rodando, voltam a ser avaliadas normalmente (e parada vira crítico).
+  assert.equal(A.avaliarRotina('push_reenvio', { em: ts_(AGORA - 20 * MIN), ok: true }, null, AGORA).nivel, 'critico');
+  // A rotina diária continua obrigatória.
+  assert.equal(A.avaliarRotina('rotina_diaria', undefined, null, AGORA).nivel, 'atencao');
+  // Recibos esperando 3 h: atenção com Functions, normal sem elas; mais de 26 h volta a ser atenção, mais de 50 h crítico.
+  const fila = A.avaliarFila('push_recibos', 3, AGORA - 3 * HORA, AGORA);
+  assert.equal(fila.nivel, 'atencao');
+  assert.equal(A.ajustarFilaSemFunctions(fila).nivel, 'ok');
+  assert.match(A.ajustarFilaSemFunctions(fila).descricao, /rotina diária/);
+  assert.equal(A.ajustarFilaSemFunctions(A.avaliarFila('push_recibos', 3, AGORA - 27 * HORA, AGORA)).nivel, 'atencao');
+  assert.equal(A.ajustarFilaSemFunctions(A.avaliarFila('push_pendentes', 1, AGORA - 51 * HORA, AGORA)).nivel, 'critico');
+  assert.equal(A.ajustarFilaSemFunctions(A.avaliarFila('push_pendentes', null, 0, AGORA)).nivel, 'sem_dados');
+});
