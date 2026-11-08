@@ -106,3 +106,10 @@ test('LA-04: atualização vale até o fim da partida (sem "desatualizado" após
  const p=core.attendanceSnapshot('t','20261107',{nome:'Turma'},{status:'aberta',expiraEm:NOW+3*3600000,confirmados:{}},NOW);
  assert.equal(core.livePayload(p,false,NOW).aps['stale-date'],Math.floor((NOW+3*3600000)/1000));
 });
+
+test('registro diferencia ambiente ausente, divergente e campos inválidos sem acessar o banco',async()=>{
+ const db={doc(){throw Error('não deve ler o banco');}};
+ for(const [extra,pattern]of [[{environment:null},/não informou o ambiente/],[{environment:'development'},/difere do servidor/],[{activityId:'../x'},/identificador/],[{token:'ExpoPushToken[x]'},/token da atividade/],[{dayId:'20260230'},/data do acompanhamento/]]){
+  await assert.rejects(()=>live.registerLiveSubscription(db,'u1',{...body(),...extra},NOW),e=>e.status===400&&pattern.test(e.message));
+ }
+});

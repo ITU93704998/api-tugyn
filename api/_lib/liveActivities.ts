@@ -56,7 +56,11 @@ export async function revokeLiveSubscription(db:Firestore,id:string,key:string):
 }
 
 export async function registerLiveSubscription(db:Firestore,uid:string,b:Record<string,unknown>,now:number) {
-  if(!safeLiveId(b.turmaId) || !safeLiveDay(b.dayId) || typeof b.activityId!=="string" || !/^[A-Za-z0-9-]{1,128}$/.test(b.activityId) || typeof b.token!=="string" || !/^[a-fA-F0-9]{32,1024}$/.test(b.token) || b.environment!==ambiente())throw new LiveRefusal(400,"Dados do acompanhamento inválidos ou ambiente da build incompatível.");
+  if(!safeLiveId(b.turmaId) || !safeLiveDay(b.dayId))throw new LiveRefusal(400,"A turma ou a data do acompanhamento é inválida. Atualize a partida e tente novamente.");
+  if(typeof b.activityId!=="string" || !/^[A-Za-z0-9-]{1,128}$/.test(b.activityId))throw new LiveRefusal(400,"O identificador da atividade do iPhone é inválido. Reinicie o acompanhamento.");
+  if(typeof b.token!=="string" || !/^[a-fA-F0-9]{32,1024}$/.test(b.token))throw new LiveRefusal(400,"O token da atividade do iPhone é inválido. Reinicie o acompanhamento.");
+  if(b.environment!=="production" && b.environment!=="development")throw new LiveRefusal(400,"O iPhone não informou o ambiente de notificações. Instale a build atualizada pelo TestFlight.");
+  if(b.environment!==ambiente())throw new LiveRefusal(400,"O ambiente de notificações da build difere do servidor. Confira LIVE_ACTIVITY_APNS_ENV na API e nas Functions (production para TestFlight).");
   const turmaId=b.turmaId,dayId=b.dayId,activityId=b.activityId,token=b.token.toLowerCase(),environment=String(b.environment);
   const id=hash(`${uid}/${activityId}`), gameKey=liveGameKey(turmaId,dayId), revocationKey=randomBytes(32).toString("hex");
   const ref=db.doc(`${LIVE_SUBSCRIPTIONS}/${id}`),groupRef=db.doc(`${LIVE_GROUPS}/${gameKey}`);
