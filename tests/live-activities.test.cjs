@@ -8,17 +8,17 @@ function fakeDb(initial={}){
  const docs=new Map(Object.entries(initial).map(([k,v])=>[k,clone(v)]));let queue=Promise.resolve();
  const snap=k=>({exists:docs.has(k),id:k.split('/').pop(),ref:ref(k),data:()=>clone(docs.get(k))});
  const ref=k=>({path:k,id:k.split('/').pop(),get:async()=>snap(k),set:async v=>{docs.set(k,clone(v));},delete:async()=>docs.delete(k)});
- const query=(collection,filters=[],sort=null,max=Infinity,after=null)=>({where:(k,op,v)=>query(collection,[...filters,[k,op,v]],sort,max,after),orderBy:k=>query(collection,filters,k,max,after),limit:n=>query(collection,filters,sort,n,after),startAfter:v=>query(collection,filters,sort,max,v),get:async()=>{let rows=[...docs].filter(([k,v])=>k.startsWith(collection+'/')&&k.split('/').length===collection.split('/').length+1&&filters.every(([f,op,target])=>op==='=='?v[f]===target:op==='<='?v[f]<=target:false));if(sort&&typeof sort!=='string')rows.sort((a,b)=>a[0].localeCompare(b[0]));else if(sort)rows.sort((a,b)=>a[1][sort]-b[1][sort]);if(after!==null)rows=rows.filter(([k])=>k.split('/').pop()>after);const out=rows.slice(0,max).map(([k])=>snap(k));return{docs:out,size:out.length,empty:!out.length};}});
+ const query=(collection,filters=[],sort=null,max=Infinity,after=null)=>({where:(k,op,v)=>query(collection,[...filters,[k,op,v]],sort,max,after),orderBy:k=>query(collection,filters,k,max,after),limit:n=>query(collection,filters,sort,n,after),startAfter:v=>query(collection,filters,sort,max,v),get:async()=>{let rows=[...docs].filter(([k,v])=>k.startsWith(collection+'/')&&k.split('/').length===collection.split('/').length+1&&filters.every(([f,op,target])=>op==='=='?v[f]===target:op==='<='?v[f]<=target:op==='>'?v[f]>target:false));if(sort&&typeof sort!=='string')rows.sort((a,b)=>a[0].localeCompare(b[0]));else if(sort)rows.sort((a,b)=>a[1][sort]-b[1][sort]);if(after!==null)rows=rows.filter(([k])=>k.split('/').pop()>after);const out=rows.slice(0,max).map(([k])=>snap(k));return{docs:out,size:out.length,empty:!out.length};}});
  const db={doc:ref,collection:k=>query(k),runTransaction:async f=>{const before=queue;let release;queue=new Promise(r=>release=r);await before;const writes=[];let started=false;const write=f=>{started=true;writes.push(f);};try{const result=await f({get:async r=>{if(started)throw Error('read after write');return r.get();},set:(r,v)=>write(()=>docs.set(r.path,clone(v))),update:(r,v)=>write(()=>docs.set(r.path,{...docs.get(r.path),...clone(v)})),delete:r=>write(()=>docs.delete(r.path))});writes.forEach(f=>f());return result;}finally{release();}}};return{db,docs};
 }
 const ids={turmaId:'turma1',dayId:'20261107'};
 const base=()=>({ 'turmas/turma1':{nome:'Pelada de sábado',creatorId:'dono',ativo:true,participantes:['u1','u2']},'turmas/turma1/jogos/20261107':{status:'aberta',horario:'19:00',local:'Quadra',expiraEm:NOW+3600000,confirmados:{u1:{nome:'não vai ao payload'},u2:{}}},'users/u1':{},'users/u2':{},'users/dono':{},'turmas/turma1/participantes/u1':{status:'aprovado'},'turmas/turma1/participantes/u2':{status:'aprovado'}});
-const body=(activityId='a1',token='aa'.repeat(32))=>({...ids,activityId,token,environment:'production'});
+const body=(activityId='a1',token='aa'.repeat(32))=>({...ids,activityId,token,revocationKey:require('node:crypto').createHash('sha256').update(activityId).digest('hex'),environment:'production'});
 const setup=async()=>{const f=fakeDb(base());const a=await live.registerLiveSubscription(f.db,'u1',body(),NOW);const b=await live.registerLiveSubscription(f.db,'u2',body('a2','bb'.repeat(32)),NOW);return{...f,a,b,key:live.liveGameKey(ids.turmaId,ids.dayId)};};
 test('snapshot contém só agregado; contagem limitada e expiração/encerramento seguros',()=>{const d=base();const p=core.attendanceSnapshot(ids.turmaId,ids.dayId,d['turmas/turma1'],d['turmas/turma1/jogos/20261107'],NOW);assert.equal(p.total,2);assert.ok(!JSON.stringify(p).includes('não vai'));assert.equal(core.attendanceSnapshot('t','d',null,null,NOW).status,'cancelada');assert.equal(core.attendanceSnapshot('t','d',{}, {status:'aberta',expiraEm:NOW-1},NOW).status,'encerrada');assert.equal(core.safeLiveDay('20260230'),false);});
 test('somente dono ou membro aprovado com presença pode acompanhar',()=>{const d=base(),t=d['turmas/turma1'],j=d['turmas/turma1/jogos/20261107'];assert.equal(core.canFollowAttendance('u1',t,{status:'aprovado'},j,NOW),true);assert.equal(core.canFollowAttendance('fora',t,{status:'aprovado'},j,NOW),false);assert.equal(core.canFollowAttendance('u1',t,{status:'pendente'},j,NOW),false);assert.equal(core.canFollowAttendance('dono',t,null,j,NOW),true);assert.equal(core.canFollowAttendance('u1',t,{status:'aprovado'},{...j,confirmados:{}},NOW),false);});
 test('registro valida ambiente, token, data e conta suspensa; cliente não escolhe contador',async()=>{const {db,docs}=fakeDb(base());for(const bad of [{token:'ExpoPushToken[errado]'},{environment:'development'},{dayId:'20260230'},{turmaId:'../x'}])await assert.rejects(()=>live.registerLiveSubscription(db,'u1',{...body(),...bad},NOW));const r=await live.registerLiveSubscription(db,'u1',{...body(),total:999,uid:'dono'},NOW);assert.equal(r.props.total,2);const sub=docs.get(core.LIVE_SUBSCRIPTIONS+'/'+r.subscriptionId);assert.equal(sub.uid,'u1');assert.notEqual(sub.revocationHash,r.revocationKey);docs.set('users/u2',{status:'suspended'});await assert.rejects(()=>live.registerLiveSubscription(db,'u2',body('a2'),NOW));});
-test('registro recusa janela maior que 7,5 h e não prolonga atividade ao renovar token',async()=>{const {db,docs}=fakeDb(base());const game=docs.get('turmas/turma1/jogos/20261107');game.expiraEm=NOW+10*3600000;await assert.rejects(()=>live.registerLiveSubscription(db,'u1',body(),NOW));game.expiraEm=NOW+3600000;const a=await live.registerLiveSubscription(db,'u1',body(),NOW);const b=await live.registerLiveSubscription(db,'u1',body('a1','cc'.repeat(32)),NOW+1000);assert.equal(a.subscriptionId,b.subscriptionId);assert.equal(a.expiresAt,b.expiresAt);assert.notEqual(a.revocationKey,b.revocationKey);});
+test('registro recusa janela maior que 7,5 h e não prolonga atividade ao renovar token',async()=>{const {db,docs}=fakeDb(base());const game=docs.get('turmas/turma1/jogos/20261107');game.expiraEm=NOW+10*3600000;await assert.rejects(()=>live.registerLiveSubscription(db,'u1',body(),NOW));game.expiraEm=NOW+3600000;const a=await live.registerLiveSubscription(db,'u1',body(),NOW);const b=await live.registerLiveSubscription(db,'u1',body('a1','cc'.repeat(32)),NOW+1000);assert.equal(a.subscriptionId,b.subscriptionId);assert.equal(a.expiresAt,b.expiresAt);assert.equal(a.revocationKey,b.revocationKey);});
 test('revogação funciona sem login com segredo correto e não expõe existência',async()=>{const {db,docs}=fakeDb(base());const a=await live.registerLiveSubscription(db,'u1',body(),NOW);await live.revokeLiveSubscription(db,a.subscriptionId,'0'.repeat(64));assert.ok(docs.has(core.LIVE_SUBSCRIPTIONS+'/'+a.subscriptionId));await live.revokeLiveSubscription(db,a.subscriptionId,a.revocationKey);assert.equal(docs.has(core.LIVE_SUBSCRIPTIONS+'/'+a.subscriptionId),false);await live.revokeLiveSubscription(db,a.subscriptionId,a.revocationKey);});
 test('eventos duplicados e alterações de foto/nome não criam atualizações do contador',async()=>{const {db,docs,key}=await setup();const ref=core.LIVE_GROUPS+'/'+key,version=docs.get(ref).version;await live.captureLiveAttendance(db,ids.turmaId,ids.dayId,false,NOW+500);assert.equal(docs.get(ref).version,version);docs.get('turmas/turma1/jogos/20261107').confirmados.u1.nome='Outra foto/nome';await live.captureLiveAttendance(db,ids.turmaId,ids.dayId,false,NOW+600);assert.equal(docs.get(ref).version,version);delete docs.get('turmas/turma1/jogos/20261107').confirmados.u2;await live.captureLiveAttendance(db,ids.turmaId,ids.dayId,false,NOW+700);assert.equal(docs.get(ref).props.total,1);});
 test('sucesso parcial repete só aparelho transitório, sem reenviar ao que recebeu',async()=>{const {db,docs,a,b,key}=await setup();let clock=NOW+1000;const sent=[];let fail=true;const client={close(){},send:async token=>{sent.push(token);return token.startsWith('bb')&&fail?{ok:false,permanent:false,reason:'503'}:{ok:true,permanent:false,reason:'200'};}};await live.dispatchLiveAttendance(db,key,{client,now:()=>clock});assert.equal(sent.length,2);assert.ok(docs.get(core.LIVE_SUBSCRIPTIONS+'/'+a.subscriptionId).lastVersion>0);assert.equal(docs.get(core.LIVE_SUBSCRIPTIONS+'/'+b.subscriptionId).lastVersion,0);clock+=61000;fail=false;await live.dispatchLiveAttendance(db,key,{client,now:()=>clock});assert.equal(sent.length,3);assert.ok(sent[2].startsWith('bb'));});
@@ -113,3 +113,43 @@ test('registro diferencia ambiente ausente, divergente e campos inválidos sem a
   await assert.rejects(()=>live.registerLiveSubscription(db,'u1',{...body(),...extra},NOW),e=>e.status===400&&pattern.test(e.message));
  }
 });
+
+test('chave preparada permanece válida após resposta perdida no cadastro e na renovação',async()=>{
+ const {db,docs}=fakeDb(base());
+ const prepared=live.prepareLiveSubscription('u1','stable');
+ assert.equal(docs.size,Object.keys(base()).length,'preparação não grava inscrição');
+ const first=await live.registerLiveSubscription(db,'u1',{...body('stable'),revocationKey:prepared.revocationKey},NOW);
+ assert.equal(first.subscriptionId,prepared.subscriptionId);
+ assert.equal(first.revocationKey,prepared.revocationKey);
+ const second=await live.registerLiveSubscription(db,'u1',{...body('stable','cc'.repeat(32)),revocationKey:prepared.revocationKey},NOW+1);
+ assert.equal(second.revocationKey,prepared.revocationKey);
+ await live.revokeLiveSubscription(db,prepared.subscriptionId,prepared.revocationKey);
+ assert.equal(docs.has(core.LIVE_SUBSCRIPTIONS+'/'+prepared.subscriptionId),false);
+ // Primeiro registro confirmado no servidor, mas resposta descartada pelo app.
+ const pending=live.prepareLiveSubscription('u1','initial-lost');
+ await live.registerLiveSubscription(db,'u1',{...body('initial-lost'),revocationKey:pending.revocationKey},NOW+2);
+ await live.revokeLiveSubscription(db,pending.subscriptionId,pending.revocationKey);
+ assert.equal(docs.has(core.LIVE_SUBSCRIPTIONS+'/'+pending.subscriptionId),false);
+});
+
+test('registros expirados não escondem os cinco ativos; renovação e outro usuário continuam permitidos',async()=>{
+ const {db,docs}=fakeDb(base());
+ for(let i=0;i<8;i++)docs.set(core.LIVE_SUBSCRIPTIONS+'/expired-'+i,{uid:'u1',expiresAt:NOW-1});
+ for(let i=0;i<5;i++)await live.registerLiveSubscription(db,'u1',body('active-'+i),NOW);
+ await assert.rejects(()=>live.registerLiveSubscription(db,'u1',body('sixth'),NOW),e=>e.status===409);
+ await live.registerLiveSubscription(db,'u1',body('active-0','cc'.repeat(32)),NOW+1);
+ await live.registerLiveSubscription(db,'u2',body('other'),NOW+1);
+ const first=live.prepareLiveSubscription('u1','active-0');
+ const renewed=await live.registerLiveSubscription(db,'u1',{...body('active-0'),revocationKey:first.revocationKey},NOW+2);
+ await live.revokeLiveSubscription(db,renewed.subscriptionId,renewed.revocationKey);
+ await live.registerLiveSubscription(db,'u1',body('replacement'),NOW+3);
+ assert.equal([...docs].filter(([k,v])=>k.startsWith(core.LIVE_SUBSCRIPTIONS+'/')&&v.uid==='u1'&&v.expiresAt>NOW).length,5);
+});
+
+test('preparação e chave fornecida são validadas antes de ler o banco',async()=>{
+ assert.throws(()=>live.prepareLiveSubscription('u1','../bad'));
+ const db={doc(){throw Error('não deve ler o banco');}};
+ await assert.rejects(()=>live.registerLiveSubscription(db,'u1',{...body(),revocationKey:'bad'},NOW),e=>e.status===400);
+});
+
+test('cliente antigo sem chave persistida deve atualizar, sem criar inscrição',async()=>{const {db,docs}=fakeDb(base());const b=body();delete b.revocationKey;await assert.rejects(()=>live.registerLiveSubscription(db,'u1',b,NOW),e=>e.status===409);assert.equal([...docs.keys()].filter(k=>k.startsWith(core.LIVE_SUBSCRIPTIONS+'/')).length,0);});

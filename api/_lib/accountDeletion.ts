@@ -351,6 +351,10 @@ export const excluirConta = async (
     for (const n of [1, 2]) await encerrarAmistososDoTime(db, `${uid}_${n}`);
   });
 
+  // Departamento médico (dado de saúde): um único documento por pessoa, sem cópias nos grupos (as turmas e os times
+  // consultam pela API, que lê este registro na hora). Se o delete falhar, a etapa falha e a exclusão para aqui.
+  await etapa("departamento-medico", () => db.doc(`departamentoMedico/${uid}`).delete().then(() => undefined));
+
   await etapa("perfil", async () => {
     // Todas as reservas de username deste uid (não depende de o perfil ainda existir).
     const reservas = await db.collection("usernames").where("uid", "==", uid).get();

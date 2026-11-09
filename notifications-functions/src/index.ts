@@ -1,3 +1,4 @@
+import { enfileirarPerfil, mudouIdentidade, processarPerfil, recuperarPerfis } from "../../api/_lib/perfilSync";
 import { captureLiveAttendance, dispatchLiveAttendance, invalidateLiveUser, sweepLiveAttendance } from "../../api/_lib/liveActivities";
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -54,10 +55,14 @@ export const retryTurmaNotifications = onSchedule({
   memory: "256MiB", maxInstances: 1, retryCount: 0, secrets: [expoAccessToken],
 }, async () => {
   const inicio = Date.now();
+  const perfis = recuperarPerfis(db, inicio + 15_000).catch(() => { console.error(JSON.stringify({ evt: 'perfil_sync_sweep_failed' })); });
   try {
+    // Identidade tem fila independente: falha de envio Expo não impede o reparo.
+    // A promessa é aguardada no finally para não continuar após a função terminar.
     // NOT-02 also covers API notifications without a turma event ledger (for example, challenges).
     const outbox = await recuperarAvisosPendentes(db, { limit: 3 });
     const events = await sweepEvents(db);
+
     console.log(JSON.stringify({ evt: "turma_push_sweep", outbox, events }));
     const falhas = Number((outbox as { falhas?: unknown } | null)?.falhas ?? 0) || 0;
     // Heartbeat for the admin panel (Saúde do sistema): last run, ok, duration.
@@ -65,6 +70,8 @@ export const retryTurmaNotifications = onSchedule({
   } catch (erro) {
     await registrarRotina(db, "push_reenvio", { ok: false, duracaoMs: Date.now() - inicio, problemas: ["falha_geral"] });
     throw erro;
+  } finally {
+    await perfis;
   }
 });
 
@@ -107,6 +114,13 @@ export const invalidateTurmaLiveActivities = onDocumentWritten({ ...triggerOptio
 
 export const invalidateAccountLiveActivities = onDocumentWritten({ ...triggerOptions, document:"users/{uid}" },async event=>{
   if(!event.data)return;
-  const a=event.data.before.data(),b=event.data.after.data();
-  if(a?.status!==b?.status || a?.excluindoEm!==b?.excluindoEm || !event.data.after.exists)await invalidateLiveUser(db,event.params.uid);
+  const a=event.data.before.data(),b=event.data.after.data(),uid=event.params.uid;
+  // As duas tarefas são independentes: a falha de uma (ex.: Live Activities) não pode pular a outra (nome/foto nos grupos).
+  // Roda as duas e, se alguma falhou, relança a primeira falha depois (as duas são idempotentes; a varredura recuperarPerfis cobre o resto).
+  const tarefas:Promise<unknown>[]=[];
+  if(a?.status!==b?.status || a?.excluindoEm!==b?.excluindoEm || !event.data.after.exists)tarefas.push(invalidateLiveUser(db,uid));
+  if(!b || b.status==="suspended" || b.excluindoEm!=null)tarefas.push(enfileirarPerfil(db,uid));
+  else if(mudouIdentidade(a,b))tarefas.push((async()=>{await enfileirarPerfil(db,uid);await processarPerfil(db,uid,Date.now()+20_000);})());
+  const falha=(await Promise.allSettled(tarefas)).find((r):r is PromiseRejectedResult=>r.status==="rejected");
+  if(falha)throw falha.reason;
 });

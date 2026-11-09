@@ -1,3 +1,5 @@
+import { handlePerfilSync } from "./_lib/perfilSyncApi";
+import { handleDepartamentoMedico } from "./_lib/departamentoMedico";
 import { handleLiveActivities } from "./_lib/liveActivities";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { handleAdminUsuarios } from "./_lib/adminUsuarios";
@@ -29,6 +31,9 @@ import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from ".
 export const config = { maxDuration: 60 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.query?.resource === "perfil-sync") return handlePerfilSync(req, res);
+  // Departamento médico de uma turma/time (só membros; confere membro e DM vigentes a cada consulta).
+  if (req.query?.resource === "departamento-medico") return handleDepartamentoMedico(req, res);
   if (req.query?.resource === "live-activity") return handleLiveActivities(req, res);
   if (req.query?.resource === "contatos") return handleContacts(req, res);
   // Moderação do painel (Segurança › Denúncias): só administradores. Fica aqui para não criar outra função na Vercel.

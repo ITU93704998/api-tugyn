@@ -24,7 +24,7 @@ export async function handleLiveActivities(req:VercelRequest,res:VercelResponse)
   res.setHeader("Cache-Control","no-store");
   if(req.method!=="POST"){res.setHeader("Allow","POST, OPTIONS");return res.status(405).json({error:"Método não permitido."});}
   const b=dataLive(req.body);
-  if(!["disponibilidade","registrar","parar"].includes(String(b.action)))return res.status(400).json({error:"Ação inválida."});
+  if(!["disponibilidade","preparar","registrar","parar"].includes(String(b.action)))return res.status(400).json({error:"Ação inválida."});
   try {
     if(b.action==="parar") {
       if(typeof b.subscriptionId!=="string" || !/^[a-f0-9]{64}$/.test(b.subscriptionId) || typeof b.revocationKey!=="string" || !/^[a-f0-9]{64}$/.test(b.revocationKey))return res.status(400).json({error:"Pedido inválido."});
@@ -36,8 +36,13 @@ export async function handleLiveActivities(req:VercelRequest,res:VercelResponse)
     }
     const user=await requireUser(req,res,"live-activity");if(!user)return;
     if(!await dentroDoLimite(user.uid,"live-activity",90,3600))return res.status(429).json({error:"Muitas tentativas. Tente novamente mais tarde."});
-    if(b.action==="disponibilidade")return res.status(200).json({enabled:enabled() && (await lerConfig(getFirestore(getFirebaseApp()))).funcoes.acompanharConfirmacoes,environment:ambiente()});
+    if(b.action==="disponibilidade") {
+      const servico=enabled();
+      const permitido=servico && (await lerConfig(getFirestore(getFirebaseApp()))).funcoes.acompanharConfirmacoes;
+      return res.status(200).json({enabled:permitido,environment:ambiente(),reason:permitido?null:servico?"painel_desativado":"servico_desativado"});
+    }
     if(!enabled())return res.status(503).json({error:"O acompanhamento na tela bloqueada ainda não foi disponibilizado."});
+    if(b.action==="preparar")return res.status(200).json(prepareLiveSubscription(user.uid,b.activityId));
     const result=await registerLiveSubscription(getFirestore(getFirebaseApp()),user.uid,b,Date.now());
     return res.status(200).json(result);
   }catch(e){
@@ -55,6 +60,12 @@ export async function revokeLiveSubscription(db:Firestore,id:string,key:string):
   });
 }
 
+/** No database write: losing this response cannot create an orphan subscription. */
+export function prepareLiveSubscription(uid:string,activityId:unknown) {
+  if(typeof activityId!=="string" || !/^[A-Za-z0-9-]{1,128}$/.test(activityId))throw new LiveRefusal(400,"Identificador de atividade inválido.");
+  return {subscriptionId:hash(`${uid}/${activityId}`),revocationKey:randomBytes(32).toString("hex")};
+}
+
 export async function registerLiveSubscription(db:Firestore,uid:string,b:Record<string,unknown>,now:number) {
   if(!safeLiveId(b.turmaId) || !safeLiveDay(b.dayId))throw new LiveRefusal(400,"A turma ou a data do acompanhamento é inválida. Atualize a partida e tente novamente.");
   if(typeof b.activityId!=="string" || !/^[A-Za-z0-9-]{1,128}$/.test(b.activityId))throw new LiveRefusal(400,"O identificador da atividade do iPhone é inválido. Reinicie o acompanhamento.");
@@ -62,13 +73,17 @@ export async function registerLiveSubscription(db:Firestore,uid:string,b:Record<
   if(b.environment!=="production" && b.environment!=="development")throw new LiveRefusal(400,"O iPhone não informou o ambiente de notificações. Instale a build atualizada pelo TestFlight.");
   if(b.environment!==ambiente())throw new LiveRefusal(400,"O ambiente de notificações da build difere do servidor. Confira LIVE_ACTIVITY_APNS_ENV na API e nas Functions (production para TestFlight).");
   const turmaId=b.turmaId,dayId=b.dayId,activityId=b.activityId,token=b.token.toLowerCase(),environment=String(b.environment);
-  const id=hash(`${uid}/${activityId}`), gameKey=liveGameKey(turmaId,dayId), revocationKey=randomBytes(32).toString("hex");
+  if(b.revocationKey===undefined)throw new LiveRefusal(409,"Atualize o app para ativar o acompanhamento com cancelamento seguro.");
+  if(typeof b.revocationKey!=="string" || !/^[a-f0-9]{64}$/.test(b.revocationKey))throw new LiveRefusal(400,"Chave de cancelamento inválida.");
+  // Persisted by the client before sending; never rotate on registration/retry.
+  const revocationKey=b.revocationKey;
+  const id=hash(`${uid}/${activityId}`), gameKey=liveGameKey(turmaId,dayId);
   const ref=db.doc(`${LIVE_SUBSCRIPTIONS}/${id}`),groupRef=db.doc(`${LIVE_GROUPS}/${gameKey}`);
   let snapshot:AttendanceProps|null=null,expiresAt=0;
   await db.runTransaction(async tx=>{
     const [turma,participant,game,profile,previous,group,own,config]=await Promise.all([
       tx.get(db.doc(`turmas/${turmaId}`)),tx.get(db.doc(`turmas/${turmaId}/participantes/${uid}`)),tx.get(db.doc(`turmas/${turmaId}/jogos/${dayId}`)),
-      tx.get(db.doc(`users/${uid}`)),tx.get(ref),tx.get(groupRef),tx.get(db.collection(LIVE_SUBSCRIPTIONS).where("uid","==",uid).limit(6)),tx.get(db.doc(DOC_CONFIG)),
+      tx.get(db.doc(`users/${uid}`)),tx.get(ref),tx.get(groupRef),tx.get(db.collection(LIVE_SUBSCRIPTIONS).where("uid","==",uid).where("expiresAt",">",now).limit(6)),tx.get(db.doc(DOC_CONFIG)),
     ]);
     if(config.data()?.funcoes?.acompanharConfirmacoes===false)throw new LiveRefusal(503,FUNCAO_DESLIGADA.acompanharConfirmacoes);
     const t=turma.exists ? turma.data()! : null,j=game.exists ? game.data()! : null;
@@ -109,7 +124,7 @@ export async function captureLiveAttendance(db:Firestore,turmaId:string,dayId:st
 
 export async function invalidateLiveUser(db:Firestore,uid:string,turmaId?:string):Promise<void> {
   if(!enabled() || !safeLiveId(uid))return;
-  const subscriptions=await db.collection(LIVE_SUBSCRIPTIONS).where("uid","==",uid).limit(6).get();
+  const subscriptions=await db.collection(LIVE_SUBSCRIPTIONS).where("uid","==",uid).where("expiresAt",">",Date.now()).limit(6).get();
   const groups=new Map<string,{turmaId:string;dayId:string}>();
   for(const d of subscriptions.docs){const s=d.data() as Subscription;if(!turmaId || s.turmaId===turmaId)groups.set(s.gameKey,s);}
   for(const s of groups.values())await captureLiveAttendance(db,s.turmaId,s.dayId,true);
