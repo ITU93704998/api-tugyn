@@ -256,3 +256,47 @@ test('soma só a temporada do desafio e decide o vencedor', () => {
   assert.equal(d.vencedorEntre(n('a', 1, 0), n('b', 1, 0)), null); // empate
   assert.equal(d.vencedorEntre(n('a', 0, 0), n('b', 0, 0)), null);
 });
+
+test('departamento médico: bloqueia só o desafio do dia (criar e aceitar), nos dois sentidos', () => {
+  const PARTIDA_DM = Date.parse('2026-11-11T00:00:00Z');
+  const turmaDoDia = { status: 'ativa', horario: '21:00', diasSemana: ['terca'], participantes: ['a', 'b'] };
+  const dia = { ...base, tipo: 'dia', temporada: undefined, turmaDados: turmaDoDia };
+  const noDM = { retorno: ts_(AGORA + 3 * DIA) };
+  const semData = { retorno: null };
+  const vencido = { retorno: ts_(AGORA - 1) };
+
+  assert.equal(d.emDMAgora(noDM, AGORA), true);
+  assert.equal(d.emDMAgora(semData, AGORA), true);
+  assert.equal(d.emDMAgora(vencido, AGORA), false);
+  assert.equal(d.emDMAgora(null, AGORA), false);
+  assert.equal(d.emDMAgora({ retorno: 'x' }, AGORA), false);
+
+  assert.equal(d.autorizarCriacao(dia).ok, true);
+  assert.equal(d.autorizarCriacao({ ...dia, dmDesafiante: noDM }).code, 'dm_desafiante');
+  assert.equal(d.autorizarCriacao({ ...dia, dmDesafiado: semData }).code, 'dm_desafiado');
+  assert.equal(d.autorizarCriacao({ ...dia, dmDesafiado: vencido }).ok, true);
+  // temporada continua liberada
+  assert.equal(d.autorizarCriacao({ ...base, dmDesafiante: noDM, dmDesafiado: noDM }).ok, true);
+
+  const c = { bloqueio: false, turma: { status: 'ativa', participantes: ['a', 'b'] }, perfilDesafiante: { name: 'Ana' }, agoraMs: AGORA };
+  const doDia = desafio({ tipo: 'dia', inicioEm: ts_(PARTIDA_DM) });
+  assert.equal(d.motivoParaNaoAceitar({ ...c, desafio: doDia }), null);
+  assert.match(d.motivoParaNaoAceitar({ ...c, desafio: doDia, dmDesafiado: noDM }), /Você está no departamento médico/);
+  assert.match(d.motivoParaNaoAceitar({ ...c, desafio: doDia, dmDesafiante: noDM }), /Quem desafiou você/);
+  assert.equal(d.motivoParaNaoAceitar({ ...c, desafio: desafio(), dmDesafiado: noDM, dmDesafiante: noDM }), null);
+});
+
+test('departamento médico: quem perdeu o vínculo com a turma não fica sabendo do DM do outro', () => {
+  const noDM = { retorno: null };
+  const doDia = desafio({ tipo: 'dia' });
+  const base_ = { bloqueio: false, perfilDesafiante: { name: 'Ana' }, desafio: doDia, dmDesafiante: noDM, dmDesafiado: noDM, agoraMs: AGORA };
+  const exMembro = d.motivoParaNaoAceitar({ ...base_, turma: { status: 'ativa', participantes: ['a'] } });
+  const encerrada = d.motivoParaNaoAceitar({ ...base_, turma: { status: 'encerrada', participantes: ['a', 'b'] } });
+  const semTurma = d.motivoParaNaoAceitar({ ...base_, turma: null });
+  for (const motivo of [exMembro, encerrada, semTurma]) {
+    assert.ok(motivo);
+    assert.doesNotMatch(motivo, /departamento médico/);
+  }
+  // ainda juntos na turma ativa: aí sim o motivo é o DM
+  assert.match(d.motivoParaNaoAceitar({ ...base_, turma: { status: 'ativa', participantes: ['a', 'b'] } }), /departamento médico/);
+});

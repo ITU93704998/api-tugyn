@@ -18,3 +18,4 @@ delete-test.json
 
 .vercel
 .env*
+!.env.example

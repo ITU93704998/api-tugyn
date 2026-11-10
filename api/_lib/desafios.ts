@@ -302,7 +302,30 @@ export interface ContextoCriacao {
   ativosDesafiado: number;
   /** Desafio que já existe com o mesmo id (mesma dupla e temporada). */
   existente: Dados;
+  /** Registro `departamentoMedico/{uid}` de cada um (null/ausente = não está no DM). Só pesa no desafio do dia. */
+  dmDesafiante?: Dados;
+  dmDesafiado?: Dados;
 }
+
+/**
+ * Está no departamento médico agora? Mesmo critério de `api/_lib/departamentoMedico.ts`: o registro existe e a volta
+ * prevista (`retorno`) não passou (`retorno: null` = sem data prevista, continua no DM).
+ */
+export const emDMAgora = (registro: Dados, agoraMs: number): boolean => {
+  if (!registro) return false;
+  const retorno = registro.retorno;
+  if (retorno === null) return true;
+  const t = retorno as { toMillis?: () => number } | undefined;
+  return typeof t?.toMillis === "function" && t.toMillis() > agoraMs;
+};
+
+/** Desafio do dia com alguém no DM: quem não vai jogar não entra. O de temporada continua liberado. */
+const MOTIVO_DM = {
+  desafiante: "Você está no departamento médico e não pode desafiar para a partida de hoje. O desafio de temporada continua liberado.",
+  desafiado: "Este atleta está no departamento médico e não joga hoje. Dá para desafiar para a temporada.",
+  aceitarDesafiado: "Você está no departamento médico e não pode aceitar desafios para a partida de hoje.",
+  aceitarDesafiante: "Quem desafiou você está no departamento médico e não joga hoje.",
+};
 
 export type Criacao = { ok: true; id: string; dados: Record<string, unknown>; draft: PushDraft } | Negado;
 
@@ -374,6 +397,10 @@ export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
 
   const periodo = periodoDoDesafio(c);
   if (!periodo.ok) return periodo;
+  if (c.tipo === "dia") {
+    if (emDMAgora(c.dmDesafiante, c.agoraMs)) return negar(409, "dm_desafiante", MOTIVO_DM.desafiante);
+    if (emDMAgora(c.dmDesafiado, c.agoraMs)) return negar(409, "dm_desafiado", MOTIVO_DM.desafiado);
+  }
   const nesse = c.tipo === "dia" ? "hoje" : "nesta temporada";
 
   if (c.existente) {
@@ -518,13 +545,28 @@ export const vagaVenceEm = (desafio: Dados, status: "pendente" | "aceito"): numb
   status === "pendente" ? prazoParaAceitar(desafio) : apuracaoLiberadaEm(desafio) + FOLGA_VAGA_ACEITO_MS;
 
 /** Ao aceitar: o que ainda precisa valer (o convite pode ter sido criado antes de um bloqueio ou de alguém sair da turma). */
-export const motivoParaNaoAceitar = (c: { bloqueio: boolean; turma: Dados; perfilDesafiante: Dados; desafio: Dados }): string | null => {
+export const motivoParaNaoAceitar = (c: {
+  bloqueio: boolean;
+  turma: Dados;
+  perfilDesafiante: Dados;
+  desafio: Dados;
+  /** Registros do DM (só pesam no desafio do dia). */
+  dmDesafiante?: Dados;
+  dmDesafiado?: Dados;
+  agoraMs?: number;
+}): string | null => {
   if (c.bloqueio) return "Não é possível aceitar este desafio.";
   if (!perfilDisponivel(c.perfilDesafiante)) return "Quem desafiou você não está mais disponível.";
   const membros = listaDe(c.turma?.participantes);
   if (!turmaAtiva(c.turma) || !c.turma) return "A turma deste desafio foi encerrada.";
   if (!membros.includes(String(c.desafio?.desafianteId)) || !membros.includes(String(c.desafio?.desafiadoId))) {
     return "Vocês não estão mais juntos na turma deste desafio.";
+  }
+  // DM por último: o motivo só fala de saúde para quem ainda divide a turma ativa (quem já veria o aviso do DM).
+  if (c.desafio?.tipo === "dia") {
+    const agora = c.agoraMs ?? Date.now();
+    if (emDMAgora(c.dmDesafiado, agora)) return MOTIVO_DM.aceitarDesafiado;
+    if (emDMAgora(c.dmDesafiante, agora)) return MOTIVO_DM.aceitarDesafiante;
   }
   return null;
 };

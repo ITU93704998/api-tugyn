@@ -145,7 +145,10 @@ export const criar = async (db: Firestore, uid: string, pedido: Extract<DesafioR
   // TUDO o que decide é lido DENTRO da transação (perfis, bloqueios, turma, o desafio da dupla e as vagas): um bloqueio,
   // uma saída da turma ou uma exclusão de conta que aconteça ao mesmo tempo faz a transação reler e decidir de novo.
   const resultado = await db.runTransaction(async (tx) => {
-    const [existente, vagasA, vagasB, perfilA, perfilB, bloqueioA, bloqueioB, turma] = await tx.getAll(
+    // DM: só no desafio do dia (lido junto, dentro da transação: entrar no DM ao mesmo tempo faz decidir de novo). O de
+    // temporada não lê esses dois documentos.
+    const comDM = pedido.tipo === "dia";
+    const [existente, vagasA, vagasB, perfilA, perfilB, bloqueioA, bloqueioB, turma, dmA, dmB] = await tx.getAll(
       ref,
       vagasRef(db, uid),
       vagasRef(db, desafiadoId),
@@ -154,6 +157,7 @@ export const criar = async (db: Firestore, uid: string, pedido: Extract<DesafioR
       db.doc(`users/${uid}/blocked/${desafiadoId}`),
       db.doc(`users/${desafiadoId}/blocked/${uid}`),
       db.doc(`turmas/${turmaId}`),
+      ...(comDM ? [db.doc(`departamentoMedico/${uid}`), db.doc(`departamentoMedico/${desafiadoId}`)] : []),
     );
     const turmaDados = turma.exists ? (turma.data() ?? null) : null;
     const agora = Date.now();
@@ -173,6 +177,8 @@ export const criar = async (db: Firestore, uid: string, pedido: Extract<DesafioR
       ativosDesafiante: Object.keys(ativosA).length,
       ativosDesafiado: Object.keys(ativosB).length,
       existente: existente.exists ? (existente.data() ?? null) : null,
+      dmDesafiante: dmA?.exists ? (dmA.data() ?? null) : null,
+      dmDesafiado: dmB?.exists ? (dmB.data() ?? null) : null,
     });
     if (!auth.ok) return auth;
     // Recriar só depois de cancelado (`autorizarCriacao` já nega os outros casos).
@@ -208,18 +214,23 @@ export const responder = async (db: Firestore, uid: string, desafioId: string, a
       const desafianteId = String(desafio.desafianteId);
       const turmaId = (desafio.turmas as { id?: unknown }[] | undefined)?.[0]?.id;
       const turmaValida = typeof turmaId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(turmaId);
-      const [bloqueioA, bloqueioB, perfil, turma] = await tx.getAll(
+      const [bloqueioA, bloqueioB, perfil, turma, dmDesafiado, dmDesafiante] = await tx.getAll(
         db.doc(`users/${uid}/blocked/${desafianteId}`),
         db.doc(`users/${desafianteId}/blocked/${uid}`),
         db.doc(`users/${desafianteId}`),
         // Sem turma válida no desafio, lê um id que nunca existe (getAll precisa de referências).
         db.doc(`turmas/${turmaValida ? turmaId : "_sem_turma_"}`),
+        // DM só no desafio do dia (o de temporada não lê).
+        ...(desafio.tipo === "dia" ? [db.doc(`departamentoMedico/${uid}`), db.doc(`departamentoMedico/${desafianteId}`)] : []),
       );
       motivo = motivoParaNaoAceitar({
         bloqueio: bloqueioA.exists || bloqueioB.exists,
         turma: turmaValida && turma.exists ? (turma.data() ?? null) : null,
         perfilDesafiante: perfil.exists ? (perfil.data() ?? null) : null,
         desafio,
+        dmDesafiado: dmDesafiado?.exists ? (dmDesafiado.data() ?? null) : null,
+        dmDesafiante: dmDesafiante?.exists ? (dmDesafiante.data() ?? null) : null,
+        agoraMs: Date.now(),
       });
     }
     if (motivo) {
