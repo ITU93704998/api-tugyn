@@ -10,6 +10,7 @@ import { dispatchEvent, enqueueEvent, sweepEvents } from "./outbox";
 import { isSafeUid } from "../../api/_lib/validation";
 import { consultarRecibos, recuperarAvisosPendentes } from "../../api/_lib/pushEnvio";
 import { registrarRotina } from "../../api/_lib/sistema";
+import { mexeNosTrofeus, sincronizarTrofeusCampeonato } from "../../api/_lib/trofeusSync";
 
 if (!getApps().length) initializeApp();
 const db = getFirestore();
@@ -123,4 +124,16 @@ export const invalidateAccountLiveActivities = onDocumentWritten({ ...triggerOpt
   else if(mudouIdentidade(a,b))tarefas.push((async()=>{await enfileirarPerfil(db,uid);await processarPerfil(db,uid,Date.now()+20_000);})());
   const falha=(await Promise.allSettled(tarefas)).find((r):r is PromiseRejectedResult=>r.status==="rejected");
   if(falha)throw falha.reason;
+});
+
+// Galeria de troféus: acerta o perfil dos jogadores sempre que um campeonato encerra, é corrigido, reaberto ou apagado
+// (inclusive quando a turma inteira é excluída). Lê o estado atual numa transação (ordem dos disparos não importa) e, se
+// falhar, o Firebase tenta de novo (retry). Lances ao vivo de campeonato em andamento não disparam trabalho.
+export const syncCampeonatoTrofeus = onDocumentWritten({ ...triggerOptions, document: "turmas/{turmaId}/campeonatos/{campeonatoId}" }, async event => {
+  if (!event.data || !safe(event.params.turmaId) || !safe(event.params.campeonatoId)) return;
+  const antes = event.data.before.exists ? event.data.before.data() : null;
+  const depois = event.data.after.exists ? event.data.after.data() : null;
+  if (!mexeNosTrofeus(antes, depois)) return;
+  const r = await sincronizarTrofeusCampeonato(db, event.params.turmaId, event.params.campeonatoId);
+  console.log(JSON.stringify({ evt: "trofeus_sync", ...r }));
 });

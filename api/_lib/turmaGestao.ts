@@ -11,6 +11,8 @@ import { isSafeUid } from "./validation";
  *  - estatisticas:          depois de enviar uma partida, o organizador pede o recálculo do resumo geral dos jogadores dela.
  *  - estatisticas-proprias: o próprio usuário pede o recálculo do seu resumo (ao abrir o perfil).
  *  - temporario:  o organizador escolhe (ou encerra, com null) um membro aprovado como organizador temporário por 24 h.
+ *  - trofeus:     o organizador (ou o temporário no prazo), depois de mexer num campeonato, pede a atualização da galeria
+ *                 de troféus de quem jogou (o servidor calcula tudo pelo campeonato gravado; ver `trofeus.ts`).
  */
 
 export type GestaoRequest =
@@ -19,7 +21,8 @@ export type GestaoRequest =
   | { action: "temporario"; turmaId: string; membroId: string | null }
   | { action: "estatisticas"; turmaId: string; jogadores: string[] }
   | { action: "estatisticas-proprias" }
-  | { action: "resumo"; turmaId: string };
+  | { action: "resumo"; turmaId: string }
+  | { action: "trofeus"; turmaId: string; campeonatoId: string };
 
 export type GestaoParse = { ok: true; value: GestaoRequest } | { ok: false; error: string };
 
@@ -35,6 +38,10 @@ export const parseGestaoBody = (body: unknown): GestaoParse => {
   }
   if (b.action === "excluir") return { ok: true, value: { action: "excluir", turmaId: b.turmaId } };
   if (b.action === "resumo") return { ok: true, value: { action: "resumo", turmaId: b.turmaId } };
+  if (b.action === "trofeus") {
+    if (!isSafeUid(b.campeonatoId)) return { ok: false, error: "Campeonato inválido." };
+    return { ok: true, value: { action: "trofeus", turmaId: b.turmaId, campeonatoId: b.campeonatoId } };
+  }
   if (b.action === "temporario") {
     if (b.membroId !== null && !isSafeUid(b.membroId)) return { ok: false, error: "Membro inválido." };
     return { ok: true, value: { action: "temporario", turmaId: b.turmaId, membroId: b.membroId } };

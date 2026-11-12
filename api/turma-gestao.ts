@@ -9,7 +9,8 @@ import { DEDUPE_MS } from "./_lib/push";
 import { enviarAviso } from "./_lib/pushEnvio";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { registrarRotina } from "./_lib/sistema";
-import { jogadoresParaRecalcular } from "./_lib/estatisticas";
+import { ehOrganizadorTemporario, jogadoresParaRecalcular } from "./_lib/estatisticas";
+import { sincronizarTrofeusCampeonato } from "./_lib/trofeusSync";
 import { processarPendencias, recalcularDaPartida, recalcularUsuario, reconstruirResumoDaTurma } from "./_lib/recalculos";
 import { enviarPartida, parsePartidaEnviada } from "./_lib/partidaEnvio";
 import { autorizarExclusao, autorizarTemporario, autorizarTransferencia, bannerParaApagar, exigirOrganizador, parseGestaoBody } from "./_lib/turmaGestao";
@@ -25,6 +26,8 @@ import { autorizarExclusao, autorizarTemporario, autorizarTransferencia, bannerP
  *                                       lista, aplica só a diferença nos números dos membros e grava tudo numa transação
  *  - resumo                             o organizador pede a reconstrução do resumo da turma (auto-correção): o servidor o
  *                                       refaz a partir dos participantes aprovados (o app não grava mais o resumo inteiro)
+ *  - trofeus { campeonatoId }           o organizador (ou o temporário no prazo) pede a atualização da galeria de troféus
+ *                                       de quem jogou o campeonato (campeão, artilheiro, garçom), calculada pelo servidor
  * Pelo servidor (Admin SDK) porque as regras do Firestore não deixam o app trocar o dono, apagar a turma com tudo dentro
  * nem gravar o resumo geral (`users/{uid}.estatisticas`) de ninguém.
  */
@@ -37,6 +40,8 @@ const LIMITE_POR_HORA = 20;
 const LIMITE_ESTATISTICAS_POR_HORA = 60;
 /** Envios de partida (cada correção conta): folga para um dia de várias partidas e reenvios. */
 const LIMITE_PARTIDAS_POR_HORA = 120;
+/** Galeria de troféus: um pedido a cada placar que mexe num campeonato encerrado (e a auto-correção ao abrir). */
+const LIMITE_TROFEUS_POR_HORA = 120;
 /** Uma transação/lote do Firestore aceita até 500 escritas: sobra margem para a turma e a prévia. */
 const ESCRITAS_POR_LOTE = 450;
 
@@ -211,6 +216,23 @@ const estatisticasDaPartida = async (db: Firestore, uid: string, turmaId: string
 };
 
 /** Reconstrução do resumo da turma pedida pelo organizador (auto-correção do app). */
+/**
+ * Galeria de troféus de um campeonato (reconciliação manual): normalmente quem acerta é o gatilho das Functions a cada
+ * mudança do campeonato; aqui o organizador (ou o temporário no prazo) pode pedir de novo. A conta é feita pelo estado
+ * gravado, dentro de uma transação (`./_lib/trofeusSync`).
+ */
+const sincronizarTrofeus = async (db: Firestore, uid: string, turmaId: string, campeonatoId: string) => {
+  const [turmaSnap, participanteSnap] = await db.getAll(db.doc(`turmas/${turmaId}`), db.doc(`turmas/${turmaId}/participantes/${uid}`));
+  const turma = turmaSnap.exists ? (turmaSnap.data() ?? null) : null;
+  if (!turma) return { ok: false as const, status: 404 as const, code: "turma_nao_encontrada", error: "Turma não encontrada." };
+  const participante = participanteSnap.exists ? (participanteSnap.data() ?? null) : null;
+  if (turma.creatorId !== uid && !ehOrganizadorTemporario(uid, turma, Date.now(), participante)) {
+    return { ok: false as const, status: 403 as const, code: "nao_organizador", error: "Só o organizador pode fazer isso." };
+  }
+  const r = await sincronizarTrofeusCampeonato(db, turmaId, campeonatoId);
+  return { ok: true as const, recebem: r.recebem, removidos: r.removidos };
+};
+
 const reconstruirResumo = async (db: Firestore, uid: string, turmaId: string) => {
   const turmaSnap = await db.doc(`turmas/${turmaId}`).get();
   const turma = turmaSnap.exists ? (turmaSnap.data() ?? null) : null;
@@ -271,7 +293,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const ehEstatistica = request.action === "estatisticas" || request.action === "estatisticas-proprias";
   const limiteOk = ehEstatistica
     ? await dentroDoLimite(user.uid, "estatisticas", LIMITE_ESTATISTICAS_POR_HORA, 3600)
-    : await dentroDoLimite(user.uid, "turma-gestao", LIMITE_POR_HORA, 3600);
+    : request.action === "trofeus"
+      ? await dentroDoLimite(user.uid, "trofeus", LIMITE_TROFEUS_POR_HORA, 3600)
+      : await dentroDoLimite(user.uid, "turma-gestao", LIMITE_POR_HORA, 3600);
   if (!limiteOk) {
     return res.status(429).json({ error: "Muitas tentativas. Tente novamente mais tarde." });
   }
@@ -299,7 +323,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             ? await definirTemporario(db, user.uid, request.turmaId, request.membroId)
             : request.action === "resumo"
               ? await reconstruirResumo(db, user.uid, request.turmaId)
-              : await excluir(db, user.uid, request.turmaId);
+              : request.action === "trofeus"
+                ? await sincronizarTrofeus(db, user.uid, request.turmaId, request.campeonatoId)
+                : await excluir(db, user.uid, request.turmaId);
     if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
 
     // Sucesso parcial: diz QUEM ficou para depois (a pendência durável continua gravada e a rotina do servidor tenta de novo).
