@@ -279,3 +279,17 @@ test('campeonatos legítimos gerados pela lógica do app passam (folgas, returno
     assert.equal(motivoInvalido('C1', c), null, `${formato} ${n} ${JSON.stringify(r)}`);
   }
 });
+
+test('modelo do troféu: vai para a galeria; ausente ou desconhecido vira a taça clássica (sem invalidar)', () => {
+  const de = (c) => [...calcularTrofeus('T1', 'C1', turma, c).values()];
+  const estrela = de({ ...campeonato(), trofeu: 'estrela' });
+  assert.ok(estrela.length > 0);
+  assert.ok(estrela.every((t) => t.modelo === 'estrela'));
+  assert.ok(de({ ...campeonato(), trofeu: 'bola' }).every((t) => t.modelo === 'bola'));
+  for (const novo of ['imperial', 'moderna', 'angular', 'craque']) assert.ok(de({ ...campeonato(), trofeu: novo }).every((t) => t.modelo === novo), novo);
+  assert.ok(de(campeonato()).every((t) => t.modelo === 'classica'));
+  const estranho = de({ ...campeonato(), trofeu: '<script>' });
+  assert.ok(estranho.length > 0 && estranho.every((t) => t.modelo === 'classica'));
+  // Trocar o modelo muda o troféu gravado (regrava com o novo desenho).
+  assert.equal(mesmoTrofeu(estrela[0], { ...estrela[0], modelo: 'bola' }), false);
+});

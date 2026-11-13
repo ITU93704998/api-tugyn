@@ -15,7 +15,7 @@
  * campeonato (`trofeusCampeonatos/<turmaId>_<campeonatoId>` → `{ uids, assinatura }`) só o servidor lê. Quem grava é
  * `./trofeusSync.ts` (gatilho das Functions a cada mudança do campeonato).
  */
-import type { Campeonato, JogoCampeonato, OrigemVaga, RegrasCampeonato, TimeCampeonato } from "./campeonato/types";
+import { type Campeonato, type JogoCampeonato, type ModeloTrofeu, type OrigemVaga, type RegrasCampeonato, type TimeCampeonato, modeloDoTrofeu } from "./campeonato/types";
 import { MAX_ELENCO, MAX_GOLS, MAX_TIMES, MIN_TIMES, gerarTabela } from "./campeonato/tabela";
 import { campeaoDe, resolverJogos, temResultado } from "./campeonato/classificacao";
 
@@ -24,6 +24,8 @@ export type TipoTrofeu = "campeao" | "artilheiro" | "garcom";
 export interface Trofeu {
   turmaId: string;
   campeonatoId: string;
+  /** Modelo do troféu escolhido pelo organizador ao criar o campeonato (a galeria desenha a taça com ele). */
+  modelo: ModeloTrofeu;
   campeonato: string;
   turma: string;
   /** Time da pessoa no campeonato. */
@@ -206,6 +208,8 @@ export const validarCampeonato = (id: string, d: Record<string, unknown>): Campe
     jogos,
     sorteio,
     campeao: typeof d.campeao === "string" ? d.campeao : null,
+    // Só aparência: valor desconhecido vira a taça clássica (não invalida o campeonato).
+    trofeu: modeloDoTrofeu(d.trofeu),
     criadoPor: "",
     criadoEmMs: 0,
     atualizadoEmMs: 0,
@@ -267,7 +271,7 @@ export const calcularTrofeus = (
   const artilheiros = lideres(gols);
   const garcons = lideres(assistencias);
 
-  const base = { turmaId, campeonatoId, campeonato: c.nome, turma: texto(turma.nome, 60, "Turma") };
+  const base = { turmaId, campeonatoId, modelo: c.trofeu, campeonato: c.nome, turma: texto(turma.nome, 60, "Turma") };
   for (const [uid, timeId] of timeDe) {
     const titulos: TipoTrofeu[] = [];
     if (timeId === c.campeao) titulos.push("campeao");

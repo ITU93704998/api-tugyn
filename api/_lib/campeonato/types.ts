@@ -10,6 +10,12 @@ export type FormatoCampeonato = "pontos" | "mata";
 
 export type StatusCampeonato = "andamento" | "encerrado";
 
+/** Modelo do troféu que o campeonato dá (escolhido na criação; não muda depois). Campeonatos antigos: "classica". */
+export type ModeloTrofeu = "classica" | "estrela" | "bola" | "imperial" | "moderna" | "angular" | "craque";
+export const MODELOS_TROFEU: readonly ModeloTrofeu[] = ["classica", "estrela", "bola", "imperial", "moderna", "angular", "craque"];
+/** Qualquer valor desconhecido (ou ausente) vira a taça clássica. */
+export const modeloDoTrofeu = (v: unknown): ModeloTrofeu => (MODELOS_TROFEU as readonly unknown[]).includes(v) ? (v as ModeloTrofeu) : "classica";
+
 export interface RegrasCampeonato {
   /** Pontos corridos: segundo turno com o mando invertido. */
   returno: boolean;
@@ -111,6 +117,7 @@ export interface Campeonato {
   /** Ordem sorteada na criação: último critério de desempate (fica gravada, então a tabela nunca "muda sozinha"). */
   sorteio: string[];
   campeao: string | null;
+  trofeu: ModeloTrofeu;
   criadoPor: string;
   criadoEmMs: number;
   atualizadoEmMs: number;
