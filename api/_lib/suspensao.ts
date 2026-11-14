@@ -11,6 +11,7 @@
  * Cada rota da API declara a AÇÃO que faz (parâmetro obrigatório de `requireUser`): nenhuma rota nova fica sem política.
  */
 export const ACOES_DA_API = [
+  "campeonatos-times",
   "perfil-sync",
   "departamento-medico",
   "avaliar",

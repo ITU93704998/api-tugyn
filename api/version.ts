@@ -1,3 +1,4 @@
+import { handleCampeonatosTimes } from "./_lib/campeonatosTimesApi";
 import { handlePerfilSync } from "./_lib/perfilSyncApi";
 import { handleDepartamentoMedico } from "./_lib/departamentoMedico";
 import { handleLiveActivities } from "./_lib/liveActivities";
@@ -31,6 +32,7 @@ import { compareVersions, isValidVersion, parsePlatform, resolvePolicy } from ".
 export const config = { maxDuration: 60 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.query?.resource === "campeonatos-times") return handleCampeonatosTimes(req, res);
   if (req.query?.resource === "perfil-sync") return handlePerfilSync(req, res);
   // Departamento médico de uma turma/time (só membros; confere membro e DM vigentes a cada consulta).
   if (req.query?.resource === "departamento-medico") return handleDepartamentoMedico(req, res);

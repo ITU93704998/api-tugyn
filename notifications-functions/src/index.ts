@@ -11,6 +11,7 @@ import { isSafeUid } from "../../api/_lib/validation";
 import { consultarRecibos, recuperarAvisosPendentes } from "../../api/_lib/pushEnvio";
 import { registrarRotina } from "../../api/_lib/sistema";
 import { mexeNosTrofeus, sincronizarTrofeusCampeonato } from "../../api/_lib/trofeusSync";
+import { cancelarJogosAbandonados as cancelarAbandonados } from "../../api/_lib/campeonatoAbandonado";
 
 if (!getApps().length) initializeApp();
 const db = getFirestore();
@@ -136,4 +137,13 @@ export const syncCampeonatoTrofeus = onDocumentWritten({ ...triggerOptions, docu
   if (!mexeNosTrofeus(antes, depois)) return;
   const r = await sincronizarTrofeusCampeonato(db, event.params.turmaId, event.params.campeonatoId);
   console.log(JSON.stringify({ evt: "trofeus_sync", ...r }));
+});
+
+// Campeonatos: jogo esquecido "ao vivo" (6 h sem nenhum lance, pausa ou troca de tempo) é cancelado, como o "Zerar" do
+// app. Consulta só os documentos ao vivo parados; sem nenhum, a execução custa 1 leitura.
+export const cancelarJogosAbandonados = onSchedule({
+  region, schedule: "every 60 minutes", timeZone: "America/Sao_Paulo", timeoutSeconds: 120, memory: "256MiB", maxInstances: 1, retryCount: 0,
+}, async () => {
+  const r = await cancelarAbandonados(db);
+  if (r.vistos) console.log(JSON.stringify({ evt: "campeonatos_abandonados", ...r }));
 });

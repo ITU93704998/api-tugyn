@@ -12,8 +12,8 @@ export const NOME_CAMPEONATO_MAX = 50;
 export const NOME_TIME_MAX = 24;
 export const MAX_ELENCO = 30;
 export const MAX_GOLS = 99;
-/** Campeonatos em andamento ao mesmo tempo, por turma. */
-export const MAX_EM_ANDAMENTO = 3;
+/** Campeonatos em andamento ao mesmo tempo, por turma (e por conta, no modo Offline). */
+export const MAX_EM_ANDAMENTO = 2;
 export const CORES_TIMES = ["#FE7552", "#3B82F6", "#22C55E", "#EAB308", "#A855F7", "#EF4444", "#14B8A6", "#F97316", "#EC4899", "#64748B", "#84CC16", "#06B6D4", "#8B5CF6", "#F43F5E", "#10B981", "#FFFFFF"];
 
 export const MAX_MINUTOS_TEMPO = 90;

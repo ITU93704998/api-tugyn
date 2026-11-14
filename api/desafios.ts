@@ -1,3 +1,4 @@
+import { limparBannersCT } from "./_lib/campeonatosTimesMidia";
 import { timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getAuth } from "firebase-admin/auth";
@@ -592,7 +593,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // 3. Exclusões de conta com etapas pendentes (ver `_lib/exclusaoConta.ts`).
       const exclusoes = await etapa("exclusoes", () => processarExclusoesPendentes(db, inicio + PRAZOS_DA_ROTINA_MS.exclusoes));
       // 4. Reservas de imagem vencidas: confirma as trocas e apaga os envios órfãos (ver `_lib/midiaReservas.ts`).
-      const midia = await etapa("midia", () => limparReservasDeMidia(db, inicio + PRAZOS_DA_ROTINA_MS.midia));
+      const midia = await etapa("midia", async () => {
+        const r = await limparReservasDeMidia(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
+        await limparBannersCT(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
+        return r;
+      });
       // As três últimas recebem o prazo que sobra (as anteriores podem ter usado tudo). O que não couber fica para o
       // worker de 1 minuto (outbox) / de 15 minutos (recibos), em notifications-functions, ou para a próxima rodada.
       const adiadas: string[] = [];

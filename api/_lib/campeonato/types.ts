@@ -1,4 +1,3 @@
-// CÓPIA de tugyn/src/screens/Campeonatos/types.ts (lógica pura do app). Mantenha igual ao app: o servidor confere o campeonato com ela.
 /**
  * Campeonatos da turma (`turmas/{turmaId}/campeonatos/{id}`): o organizador cria os times, a tabela é gerada no app e ele
  * mesmo lança os placares. Tudo fica num documento só (times + jogos), então lançar um placar e avançar a chave é uma
@@ -96,6 +95,11 @@ export interface JogoCampeonato {
   golsFora: number | null;
   /** Pênaltis [casa, fora]: só no jogo que decide um confronto de mata-mata empatado. */
   penaltis: [number, number] | null;
+  /**
+   * Sessão ao vivo aberta por último (id do documento ao vivo): gravada na mesma transação que abre a sessão, para as regras
+   * conferirem que a abertura é a atual. Ausente nos jogos que nunca foram ao vivo.
+   */
+  sessao?: string | null;
   /** participanteId → gols neste jogo. */
   gols: Record<string, number>;
   /** participanteId → assistências neste jogo (só pelo ao vivo). */
