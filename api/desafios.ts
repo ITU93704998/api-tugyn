@@ -595,7 +595,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // 4. Reservas de imagem vencidas: confirma as trocas e apaga os envios órfãos (ver `_lib/midiaReservas.ts`).
       const midia = await etapa("midia", async () => {
         const r = await limparReservasDeMidia(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
-        await limparBannersCT(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
+        const banners = await limparBannersCT(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
+        if (banners.falhas || banners.invalidos) console.warn(JSON.stringify({ evt: "banners_campeonato_falharam", ...banners }));
         return r;
       });
       // As três últimas recebem o prazo que sobra (as anteriores podem ter usado tudo). O que não couber fica para o

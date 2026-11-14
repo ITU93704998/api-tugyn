@@ -63,6 +63,15 @@ export interface InscricaoCT {
   timeId: string; donoId: string; timeNome: string; escudoUrl: string | null; cor: string | null;
   jogadores: AtletaCT[]; status: "pendente" | "aprovada" | "recusada" | "cancelada";
   pago: boolean; motivo: string | null; criadoEm: number; atualizadoEm: number;
+  /** Tentativa do formulário que gravou este pedido (interna; não vai para a tela). */
+  tentativaId?: string | null;
+  tentativasTotal?: number;
+}
+/** ID da tentativa de inscrição: gerado ao abrir o formulário e repetido nos retries. */
+export function tentativaCT(v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  exigirCT(typeof v === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(v), "Tentativa de inscrição inválida.");
+  return v;
 }
 export function elencoCT(time: Dados, camp: Dados, quem: string, ids: unknown): AtletaCT[] {
   exigirCT(time.donoId === quem, "Somente o dono pode inscrever este time.", 403);
@@ -83,7 +92,11 @@ export function elencoCT(time: Dados, camp: Dados, quem: string, ids: unknown): 
 }
 export interface JogoCT extends JogoCampeonato {
   id: string; grupo: string | null; quando: number | null; local: string | null; status: "pendente" | "finalizado";
+  /** Revisão do jogo: sobe a cada mudança de placar ou de adversários. O formulário envia a que viu (`versaoEsperada`). */
+  versao?: number;
 }
+/** Código da recusa quando o formulário foi aberto sobre outra versão do jogo (a tela atualiza e pede nova confirmação). */
+export const JOGO_DESATUALIZADO_CT = "jogo_desatualizado";
 export interface LinhaCT { timeId: string; pontos: number; jogos: number; vitorias: number; empates: number; derrotas: number; golsPro: number; golsContra: number; saldo: number; grupo: string | null }
 const timesDa = (inscricoes: InscricaoCT[]): Record<string, TimeCampeonato> => Object.fromEntries(inscricoes.map((i) => [i.timeId, { nome: i.timeNome, cor: i.cor ?? "#FE7552", elenco: i.jogadores.map((j) => ({ id: j.id, nome: j.nome })) }]));
 const baseDo = (inscricoes: InscricaoCT[], jogos: Record<string, JogoCampeonato>, sorteio: string[]) => ({ times: timesDa(inscricoes), jogos, sorteio, regras: { ...REGRAS_PADRAO } });
@@ -110,6 +123,9 @@ export function tabelaCT(inscricoes: InscricaoCT[], jogos: Record<string, JogoCT
 export function registrarResultadoCT(camp: Dados, inscricoes: InscricaoCT[], jogosAntes: Record<string, JogoCT>, jogoId: string, body: Dados): { jogos: Record<string, JogoCT>; campeaoTimeId: string | null; classificacao: LinhaCT[] } {
   const j = jogosAntes[jogoId];
   exigirCT(j && j.casa && j.fora, "Os adversários deste jogo ainda não estão definidos.", 409);
+  // O formulário diz quais adversários viu: se a chave mudou (outro aparelho corrigiu um placar anterior), o placar não
+  // pode ir para outro confronto.
+  if (body.casaEsperada !== j.casa || body.foraEsperada !== j.fora) throw new RecusaCT(409, "Os adversários deste jogo mudaram. Atualize o campeonato e confira antes de salvar.", JOGO_DESATUALIZADO_CT);
   const golsCasa = numeroCT(body.golsCasa, 0, 99, "Gols da casa"), golsFora = numeroCT(body.golsFora, 0, 99, "Gols do visitante");
   let penaltis: [number, number] | null = null;
   if (body.penaltis != null) {
@@ -132,8 +148,11 @@ export function registrarResultadoCT(camp: Dados, inscricoes: InscricaoCT[], jog
   if (j.golsCasa === golsCasa && j.golsFora === golsFora && JSON.stringify(j.penaltis) === JSON.stringify(penaltis) && mesmoMapa(j.gols, gols) && mesmoMapa(j.assistencias, assistencias)) {
     return { jogos: jogosAntes, campeaoTimeId: typeof camp.campeaoTimeId === "string" ? camp.campeaoTimeId : null, classificacao: tabelaCT(inscricoes, jogosAntes, sorteio, grupos) };
   }
-  // Depois de começar a fase seguinte, não se pode trocar a equipe classificada por trás de jogos finalizados.
-  exigirCT(resultadoEditavelCT(j, jogosAntes), "Este placar já definiu uma fase seguinte e está fechado.", 409);
+  // Formulário aberto sobre outra versão do jogo (placar salvo ou corrigido em outro aparelho): não sobrescreve sem ver.
+  exigirCT(typeof body.versaoEsperada === "number" && Number.isSafeInteger(body.versaoEsperada), "Versão do jogo inválida.");
+  if (body.versaoEsperada !== Number(j.versao ?? 0)) throw new RecusaCT(409, "Este jogo foi alterado em outro aparelho. Atualize o campeonato e confira antes de salvar.", JOGO_DESATUALIZADO_CT);
+  // Depois que um jogo que recebe o vencedor deste confronto tem resultado, não se troca o classificado por trás dele.
+  exigirCT(resultadoEditavelCT(j, jogosAntes), "Este placar já decidiu um jogo seguinte que tem resultado e está fechado.", 409);
   const base = baseDo(inscricoes, jogosAntes, sorteio);
   const alterado = aplicarResultado(base, jogoId, { golsCasa, golsFora, penaltis, gols: gols as Record<string, number>, assistencias: assistencias as Record<string, number> });
   let jogos = Object.fromEntries(Object.entries(alterado.jogos).map(([id, x]) => [id, { ...jogosAntes[id], ...x, status: temResultado(x) ? "finalizado" as const : "pendente" as const }])) as Record<string, JogoCT>;
@@ -153,12 +172,28 @@ export function registrarResultadoCT(camp: Dados, inscricoes: InscricaoCT[], jog
   }
   // Os jogos dos grupos têm fase rN para a classificação, porém a final do mata-mata define o campeão.
   const campeaoTimeId = camp.formato === "grupos_mata" ? (jogos.final ? campeaoDe(baseDo(inscricoes, jogos, sorteio)) : null) : alterado.campeao;
-  return { jogos, campeaoTimeId, classificacao };
+  return { jogos: comVersoes(jogosAntes, jogos), campeaoTimeId, classificacao };
 }
+
+/** Sobe a versão de cada jogo que mudou (placar, adversários, vaga); jogos novos (mata-mata gerado) começam na 0. */
+function comVersoes(antes: Record<string, JogoCT>, depois: Record<string, JogoCT>): Record<string, JogoCT> {
+  const semVersao = (x: JogoCT) => JSON.stringify({ ...x, versao: undefined });
+  return Object.fromEntries(Object.entries(depois).map(([id, x]) => {
+    const a = antes[id];
+    if (!a) return [id, { ...x, versao: 0 }];
+    return [id, semVersao(a) === semVersao(x) ? x : { ...x, versao: Number(a.versao ?? 0) + 1 }];
+  }));
+}
+
+/** O jogo `o` recebe o vencedor do confronto `confronto`? */
+const recebeVencedorDe = (o: JogoCT, confronto: string) =>
+  [o.origem?.casa, o.origem?.fora].some((v) => v != null && typeof v === "object" && "vencedor" in v && v.vencedor === confronto);
 
 export function resultadoEditavelCT(j: JogoCT, jogos: Record<string, JogoCT>): boolean {
   if (!temResultado(j)) return true;
   if (j.grupo && jogos.final) return false;
   if (/^r\d+$/.test(j.fase)) return true;
-  return !Object.values(jogos).some((o) => o.ordem > j.ordem && temResultado(o));
+  // Eliminatória: só fecha quando o jogo que recebe o vencedor deste confronto já tem resultado. Outro jogo da mesma fase
+  // (a outra semifinal) não fecha este.
+  return !Object.values(jogos).some((o) => o.id !== j.id && temResultado(o) && recebeVencedorDe(o, j.confronto));
 }

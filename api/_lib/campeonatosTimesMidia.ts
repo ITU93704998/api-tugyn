@@ -27,18 +27,25 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
   const temImagem = !removendo && body.imagem != null;
   const conta = temImagem ? getAccount("turmas") : null;
   if (temImagem) { const i = parseImage(body.imagem); if (!i.ok) throw new RecusaCT(i.status, i.error); exigirCT(conta, "Servidor não configurado para banners de turma e campeonato.", 503); }
-  const publicId = temImagem ? `turmas/${uid}/campeonatos/${cid}/${randomBytes(12).toString("hex")}` : null;
-  const fila = publicId ? db.doc(`${FILA}/${chave(publicId)}`) : null;
+  // ID determinístico (patrocinador + conteúdo): o retry da mesma imagem reaproveita o mesmo arquivo em vez de criar outro.
+  const publicId = temImagem ? `turmas/${uid}/campeonatos/${cid}/${chave(id + ":" + chave(body.imagem as string)).slice(0, 24)}` : null;
+  let fila = publicId ? db.doc(`${FILA}/${chave(publicId)}`) : null;
+  let bannerUrl: string | null = null;
   // Reserva durável antes da chamada externa: a rotina diária recolhe uploads interrompidos.
   if (fila) await db.runTransaction(async (tx) => {
-    const [cs, perfil] = await tx.getAll(ref, db.doc(`users/${uid}`));
+    const [cs, perfil, reserva] = await tx.getAll(ref, db.doc(`users/${uid}`), fila!);
     exigirCT(cs.exists, "Campeonato não encontrado.", 404); pode(cs.data()!, uid);
     exigirCT(perfilDisponivel(perfil.data()), "Perfil indisponível.", 403);
-    exigirCT(lista(cs.data()!).some((p) => p.id === id) || lista(cs.data()!).length < 6, "Use no máximo seis patrocinadores.");
-    tx.create(fila, { campeonatoId: cid, uid, publicId, status: "pendente", criadoEm: Date.now(), leaseAte: null });
+    const todos = lista(cs.data()!), atual = todos.find((p) => p.id === id);
+    exigirCT(atual || todos.length < 6, "Use no máximo seis patrocinadores.");
+    // A mesma imagem já está publicada neste patrocinador (resposta anterior perdida): sem novo envio.
+    if (atual?.publicId === publicId && atual.bannerUrl) { bannerUrl = atual.bannerUrl; return; }
+    exigirCT(!reserva.exists || Number(reserva.get("leaseAte") ?? 0) <= Date.now(), "Esta imagem está sendo processada. Tente novamente em instantes.", 409);
+    // Reserva existente (retry ou limpeza pendente desta mesma imagem) é renovada em vez de duplicada.
+    tx.set(fila!, { campeonatoId: cid, uid, publicId, status: "pendente", criadoEm: Date.now(), leaseAte: null, tentativas: 0 });
   });
-  let bannerUrl: string | null = null;
-  if (temImagem && conta && publicId) {
+  if (bannerUrl) fila = null;
+  if (temImagem && conta && publicId && !bannerUrl) {
     const resultado = await cloudinary.uploader.upload(body.imagem as string, { ...conta, public_id: publicId,
       overwrite: false, unique_filename: false, resource_type: "image", tags: [`uid_${uid}`],
       transformation: [{ width: 1200, height: 400, crop: "fill", gravity: "auto" }, { quality: "auto:good", fetch_format: "auto" }], timeout: 30_000 });
@@ -55,32 +62,55 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
     const alterados = todos.filter((p) => p.id !== id);
     if (!removendo) alterados.push({ id, nome, texto, site: site || null, bannerUrl: bannerUrl ?? anterior?.bannerUrl ?? null, publicId: publicId ?? anterior?.publicId ?? null });
     // Assets antigos saem pela mesma fila, depois que a referência é removida atomicamente.
-    if (anterior?.publicId && (removendo || publicId)) tx.set(db.doc(`${FILA}/${chave(anterior.publicId)}`), { campeonatoId: cid, uid, publicId: anterior.publicId, status: "pendente", criadoEm: Date.now() - DIA, leaseAte: null });
+    if (anterior?.publicId && (removendo || publicId) && anterior.publicId !== publicId) tx.set(db.doc(`${FILA}/${chave(anterior.publicId)}`), { campeonatoId: cid, uid, publicId: anterior.publicId, status: "pendente", criadoEm: Date.now() - DIA, leaseAte: null });
     tx.update(ref, { patrocinadores: alterados, atualizadoEm: Date.now() });
     if (fila) tx.delete(fila);
   });
 }
 
-/** Limitado por lote e prazo; nunca apaga um banner ainda referenciado. Não necessita função Vercel nova. */
-export async function limparBannersCT(db: Firestore, ate: number): Promise<void> {
-  if (Date.now() > ate - 1500) return;
-  const s = await db.collection(FILA).where("status", "==", "pendente").where("criadoEm", "<=", Date.now() - DIA).orderBy("criadoEm").limit(5).get();
+/** Tentativas antes de tirar o item da fila (fica com status "falhou" para revisão manual). */
+const MAX_TENTATIVAS_LIMPEZA = 8;
+export interface ResultadoLimpezaCT { apagados: number; mantidos: number; falhas: number; adiados: number; invalidos: number }
+
+/**
+ * Limitado por lote e prazo; nunca apaga um banner ainda referenciado. Não necessita função Vercel nova.
+ * Uma falha num item não interrompe o lote: o item volta para a fila com espera crescente (`criadoEm` passa a valer
+ * como "disponível a partir de", então a mesma consulta e o mesmo índice continuam valendo) e os demais seguem.
+ */
+export async function limparBannersCT(db: Firestore, ate: number): Promise<ResultadoLimpezaCT> {
+  const r: ResultadoLimpezaCT = { apagados: 0, mantidos: 0, falhas: 0, adiados: 0, invalidos: 0 };
+  if (Date.now() > ate - 1500) return r;
+  const s = await db.collection(FILA).where("status", "==", "pendente").where("criadoEm", "<=", Date.now() - DIA).orderBy("criadoEm").limit(10).get();
   for (const item of s.docs) {
-    if (Date.now() > ate - 1500) break;
-    const job = await db.runTransaction(async (tx) => {
-      const atual = await tx.get(item.ref); if (!atual.exists || Number(atual.get("leaseAte") ?? 0) > Date.now()) return null;
-      const d = atual.data()!;
-      // Defesa adicional: a fila nunca oferece uma URL externa nem outro bucket para destruição.
-      exigirCT(typeof d.publicId === "string" && d.publicId.startsWith(`turmas/${d.uid}/campeonatos/${d.campeonatoId}/`) && /^[A-Za-z0-9_/-]+$/.test(d.publicId), "Reserva de mídia inválida.");
-      const camp = await tx.get(db.doc(`${COLECAO_CT}/${d.campeonatoId}`));
-      if (camp.exists && lista(camp.data()!).some((p) => p.publicId === d.publicId)) { tx.delete(item.ref); return null; }
-      tx.update(item.ref, { leaseAte: Date.now() + 60_000 }); return d;
-    });
-    if (!job) continue;
-    const conta = getAccount("turmas"); exigirCT(conta, "Conta Cloudinary de turmas indisponível.", 503);
-    const opcoes = { ...conta, resource_type: "image" as const, invalidate: true, timeout: Math.max(1000, Math.min(10_000, ate - Date.now())) };
-    const r = await cloudinary.uploader.destroy(job.publicId, opcoes);
-    exigirCT(r.result === "ok" || r.result === "not found", "Falha ao limpar banner.", 502);
-    await item.ref.delete();
+    if (Date.now() > ate - 1500) { r.adiados++; continue; }
+    try {
+      const job = await db.runTransaction(async (tx): Promise<Dados | null> => {
+        const atual = await tx.get(item.ref); if (!atual.exists || Number(atual.get("leaseAte") ?? 0) > Date.now()) return null;
+        const d = atual.data()!;
+        // Defesa adicional: a fila nunca oferece uma URL externa nem outro bucket para destruição. Item assim sai da fila.
+        if (!(typeof d.publicId === "string" && d.publicId.startsWith(`turmas/${d.uid}/campeonatos/${d.campeonatoId}/`) && /^[A-Za-z0-9_/-]+$/.test(d.publicId))) {
+          tx.update(item.ref, { status: "invalido", leaseAte: null }); r.invalidos++; return null;
+        }
+        const camp = await tx.get(db.doc(`${COLECAO_CT}/${d.campeonatoId}`));
+        if (camp.exists && lista(camp.data()!).some((p) => p.publicId === d.publicId)) { tx.delete(item.ref); r.mantidos++; return null; }
+        tx.update(item.ref, { leaseAte: Date.now() + 60_000 }); return d;
+      });
+      if (!job) continue;
+      const conta = getAccount("turmas"); exigirCT(conta, "Conta Cloudinary de turmas indisponível.", 503);
+      const opcoes = { ...conta, resource_type: "image" as const, invalidate: true, timeout: Math.max(1000, Math.min(10_000, ate - Date.now())) };
+      const res = await cloudinary.uploader.destroy(job.publicId as string, opcoes);
+      exigirCT(res.result === "ok" || res.result === "not found", "Falha ao limpar banner.", 502);
+      await item.ref.delete(); r.apagados++;
+    } catch (e) {
+      r.falhas++;
+      // Libera o lease e reagenda com espera crescente (1 h, 2 h, 4 h… até 24 h); só texto curto e seguro no registro.
+      const tentativas = Number(item.get("tentativas") ?? 0) + 1;
+      const espera = Math.min(DIA, 3_600_000 * 2 ** (tentativas - 1));
+      const ultimoErro = (e instanceof RecusaCT ? e.message : "Falha ao falar com o serviço de imagens.").slice(0, 120);
+      await item.ref.update(tentativas >= MAX_TENTATIVAS_LIMPEZA
+        ? { status: "falhou", leaseAte: null, tentativas, ultimoErro }
+        : { criadoEm: Date.now() - DIA + espera, leaseAte: null, tentativas, ultimoErro }).catch(() => undefined);
+    }
   }
+  return r;
 }

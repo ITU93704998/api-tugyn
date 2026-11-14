@@ -8,7 +8,7 @@ import { RecusaCT, exigirCT, objetoCT } from "./campeonatosTimesDominio";
 import { patrocinadorCT, patrocinadoresPublicosCT } from "./campeonatosTimesMidia";
 import { criarCT, listarCT, lerDetalheCT, gruposLiberadosCT, inscreverCT, responderCT, cancelarInscricaoCT, iniciarCT, resultadoCT, administrarCT } from "./campeonatosTimesServico";
 
-const ACOES = new Set(["listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar"]);
+const ACOES = new Set(["recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar"]);
 export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "private, no-store");
   if (handleCors(req, res)) return;
@@ -19,15 +19,16 @@ export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResp
   try {
     exigirCT(ACOES.has(acao), "Ação inválida.");
     exigirCT(Buffer.byteLength(JSON.stringify(b), "utf8") <= (acao === "patrocinador" ? 2_850_000 : 24_000), "Pedido muito grande.", 413);
-    const leitura = acao === "listar" || acao === "detalhe";
+    const leitura = acao === "listar" || acao === "detalhe" || acao === "recursos";
     exigirCT(await dentroDoLimite(usuario.uid, `ct_${leitura ? "ler" : acao === "patrocinador" ? "midia" : "gravar"}`, leitura ? 300 : acao === "patrocinador" ? 15 : 120, 3600), "Muitas tentativas. Aguarde um pouco.", 429);
     const db = getFirestore(getFirebaseApp()), uid = usuario.uid;
+    // Liberações da conta: só o formulário de criação precisa; listar e detalhe não pagam essa leitura a cada abertura.
+    if (acao === "recursos") return res.status(200).json({ ok: true, recursos: { gruposMataLiberado: await gruposLiberadosCT(db, uid) } });
     if (leitura || acao === "criar") {
-      const gruposMataLiberado = await gruposLiberadosCT(db, uid);
-      const dados = acao === "listar" ? await listarCT(db, uid, b) : acao === "detalhe" ? await lerDetalheCT(db, uid, b) : await criarCT(db, uid, b, gruposMataLiberado);
+      const dados = acao === "listar" ? await listarCT(db, uid, b) : acao === "detalhe" ? await lerDetalheCT(db, uid, b) : await criarCT(db, uid, b, await gruposLiberadosCT(db, uid));
       // Os public_ids são internos; a tela só recebe URLs públicas dos patrocinadores.
       if (dados.campeonato) { const c = dados.campeonato as Record<string, unknown>; c.patrocinadores = patrocinadoresPublicosCT(c); }
-      return res.status(200).json({ ok: true, ...dados, recursos: { gruposMataLiberado } });
+      return res.status(200).json({ ok: true, ...dados });
     }
     switch (acao) {
       case "inscrever": await inscreverCT(db, uid, b); break;

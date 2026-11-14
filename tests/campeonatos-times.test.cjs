@@ -7,6 +7,8 @@ const { createRequire } = require('node:module');
 const root = path.resolve(__dirname, '..');
 const ts = require(require.resolve('typescript', { paths: [root] }));
 const cache = new Map();
+/** Corpo do resultado com o que o formulário viu (adversários e versão do jogo). */
+const V = (j, b) => ({ casaEsperada: j.casa, foraEsperada: j.fora, versaoEsperada: j.versao ?? 0, ...b });
 function carregar(nome, stubs = {}, fresh = false) {
   const f = path.join(root, 'api/_lib', nome+'.ts');
   if(!fresh && cache.has(f))return cache.get(f).exports;
@@ -24,6 +26,7 @@ class Ref {
  collection(n){return new Query(this.db,this.path+'/'+n);}
  async get(){return this.db.snap(this.path);}
  async delete(){this.db.data.delete(this.path);}
+ async update(v){const a=this.db.data.get(this.path);if(!a)throw Error("not-found");this.db.data.set(this.path,{...a,...v});}
 }
 class Query {
  constructor(db,p,filters=[],orders=[],lim=Infinity,cursor=null){Object.assign(this,{db,path:p,filters,orders,lim,cursor});}
@@ -90,8 +93,8 @@ test('cancelamento libera vaga e trava do atleta; início incompleto falha sem g
 test('início e resultado confirmam gravação, controlam proprietário e encerram campeonato',async()=>{
  const{db,id,base}=await completo();await assert.rejects(S.iniciarCT(db,'a',{campeonatoId:id},NOW),/organizador/);await S.iniciarCT(db,'org',{campeonatoId:id},NOW);
  let detalhe=await S.lerDetalheCT(db,'org',{campeonatoId:id});assert.equal(detalhe.jogos.length,3);
- const j=detalhe.jogos[0];await assert.rejects(S.resultadoCT(db,'a',{campeonatoId:id,jogoId:j.id,golsCasa:2,golsFora:0},NOW),/organizador/);
- for(const jogo of detalhe.jogos)await S.resultadoCT(db,'org',{campeonatoId:id,jogoId:jogo.id,golsCasa:2,golsFora:0},NOW);
+ const j=detalhe.jogos[0];await assert.rejects(S.resultadoCT(db,'a',V(j,{campeonatoId:id,jogoId:j.id,golsCasa:2,golsFora:0}),NOW),/organizador/);
+ for(const jogo of detalhe.jogos)await S.resultadoCT(db,'org',V(jogo,{campeonatoId:id,jogoId:jogo.id,golsCasa:2,golsFora:0}),NOW);
  assert.equal(db.data.get(base).status,'encerrado');assert.ok(db.data.get(base).campeaoTimeId);assert.equal(db.data.get('controleCampeonatosTimes/org').ativos,0);
 });
 test('privacidade: pedido pendente e pagamento só para organizador e dono da inscrição',async()=>{
@@ -102,15 +105,15 @@ test('privacidade: pedido pendente e pagamento só para organizador e dono da in
 const inscritos=n=>Array.from({length:n},(_,i)=>({timeId:'t'+i+'_1',donoId:'d'+i,timeNome:'Time '+i,cor:null,jogadores:[{id:'p'+i,nome:'P'+i}],status:'aprovada'}));
 for(const [formato,n]of[['triangular',3],['quadrangular',4],['mata',4],['mata',8],['mata',16],['grupos_mata',8],['grupos_mata',16]])test('fluxo completo legítimo: '+formato+' '+n,()=>{
  const ins=inscritos(n),ordem=ins.map(i=>i.timeId),inicial=D.gerarJogosCT(formato,ordem);let jogos=inicial.jogos;let campeao=null;const camp={formato,ordem,grupos:inicial.grupos};let passos=0;
- while(!campeao&&passos++<70){const j=Object.values(jogos).sort((a,b)=>a.ordem-b.ordem).find(j=>j.casa&&j.fora&&j.golsCasa===null);assert.ok(j,'precisa haver jogo apto');const r=D.registrarResultadoCT(camp,ins,jogos,j.id,{golsCasa:1,golsFora:0});jogos=r.jogos;campeao=r.campeaoTimeId;}
+ while(!campeao&&passos++<70){const j=Object.values(jogos).sort((a,b)=>a.ordem-b.ordem).find(j=>j.casa&&j.fora&&j.golsCasa===null);assert.ok(j,'precisa haver jogo apto');const r=D.registrarResultadoCT(camp,ins,jogos,j.id,V(j,{golsCasa:1,golsFora:0}));jogos=r.jogos;campeao=r.campeaoTimeId;}
  assert.ok(campeao);assert.ok(ordem.includes(campeao));assert.ok(Object.values(jogos).every(j=>j.status==='finalizado'));
  if(formato==='grupos_mata'){assert.equal(Object.values(jogos).filter(j=>!j.grupo).length,n/2-1);const g=Object.values(jogos).find(j=>j.grupo);assert.equal(D.resultadoEditavelCT(g,jogos),false);}
 });
 test('estatísticas por time, atletas externos e pênaltis inválidos são recusados',()=>{
  const ins=inscritos(4),ordem=ins.map(i=>i.timeId),{jogos}=D.gerarJogosCT('mata',ordem),j=Object.values(jogos)[0],camp={formato:'mata',ordem,grupos:{}};const uid=ins.find(i=>i.timeId===j.casa).jogadores[0].id;
- assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,{golsCasa:1,golsFora:3,assistencias:{[uid]:2}}),/ultrapassam/);
- assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,{golsCasa:1,golsFora:0,gols:{intruso:1}}),/inscrito/);
- assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,{golsCasa:0,golsFora:0,penaltis:[3,3]}));
+ assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,V(j,{golsCasa:1,golsFora:3,assistencias:{[uid]:2}})),/ultrapassam/);
+ assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,V(j,{golsCasa:1,golsFora:0,gols:{intruso:1}})),/inscrito/);
+ assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,V(j,{golsCasa:0,golsFora:0,penaltis:[3,3]})));
 });
 test('paginação por cursor preserva campeonatos criados no mesmo milissegundo',async()=>{
  const db=new DB();for(let n=0;n<23;n++){const id='ct_'+n.toString(16).padStart(24,'0');db.data.set('campeonatosTimes/'+id,{status:'inscricoes',criadoEm:NOW,inscricoesAte:Date.now()+86400000});}
@@ -135,9 +138,9 @@ test('liberação de grupos é conferida em transação e retry já criado não 
 });
 test('contagem zero do formulário é normalizada e resultado salvo aceita retry idêntico após fechar fase',()=>{
  const ins=inscritos(4),ordem=ins.map(i=>i.timeId);let{jogos}=D.gerarJogosCT('mata',ordem);const camp={formato:'mata',ordem,grupos:{}},j=Object.values(jogos)[0],uid=ins.find(i=>i.timeId===j.casa).jogadores[0].id;
- const body={golsCasa:1,golsFora:0,gols:{[uid]:0},assistencias:{[uid]:0}};jogos=D.registrarResultadoCT(camp,ins,jogos,j.id,body).jogos;assert.deepEqual(jogos[j.id].gols,{});
- while(Object.values(jogos).some(j=>j.golsCasa===null)){const p=Object.values(jogos).find(j=>j.casa&&j.fora&&j.golsCasa===null);const r=D.registrarResultadoCT(camp,ins,jogos,p.id,{golsCasa:1,golsFora:0});jogos=r.jogos;camp.campeaoTimeId=r.campeaoTimeId;}
- const repetido=D.registrarResultadoCT(camp,ins,jogos,j.id,body);assert.equal(repetido.campeaoTimeId,camp.campeaoTimeId);assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,{golsCasa:0,golsFora:1}),/fechado/);
+ const body=V(j,{golsCasa:1,golsFora:0,gols:{[uid]:0},assistencias:{[uid]:0}});jogos=D.registrarResultadoCT(camp,ins,jogos,j.id,body).jogos;assert.deepEqual(jogos[j.id].gols,{});
+ while(Object.values(jogos).some(j=>j.golsCasa===null)){const p=Object.values(jogos).find(j=>j.casa&&j.fora&&j.golsCasa===null);const r=D.registrarResultadoCT(camp,ins,jogos,p.id,V(p,{golsCasa:1,golsFora:0}));jogos=r.jogos;camp.campeaoTimeId=r.campeaoTimeId;}
+ const repetido=D.registrarResultadoCT(camp,ins,jogos,j.id,body);assert.equal(repetido.campeaoTimeId,camp.campeaoTimeId);assert.throws(()=>D.registrarResultadoCT(camp,ins,jogos,j.id,V(jogos[j.id],{golsCasa:0,golsFora:1})),/fechado/);
 });
 test('banner com falha fica na fila durável; limpeza recupera órfão e preserva mídia referenciada',async()=>{
  const{db,id,base}=await cenario();let destruicoes=0;
@@ -153,4 +156,120 @@ test('catálogo exclui prazos vencidos, meus mantém o histórico e filtros resp
  const db=new DB(),id=n=>'ct_'+n.toString(16).padStart(24,'0');
  for(const [n,prazo,cidade,modalidade]of [[1,-100,'palmas_to','futsal'],[2,100000,'palmas_to','futsal'],[3,200000,'goiania_go','campo']])db.data.set('campeonatosTimes/'+id(n),{status:'inscricoes',envolvidos:['a'],criadoEm:NOW,inscricoesAte:Date.now()+prazo,cityId:cidade,modalidade});
  assert.equal((await S.listarCT(db,'a',{filtro:'abertos'})).campeonatos.length,2);assert.equal((await S.listarCT(db,'a',{filtro:'meus'})).campeonatos.length,3);assert.equal((await S.listarCT(db,'a',{filtro:'abertos',cityId:'palmas_to',modalidade:'futsal'})).campeonatos.length,1);
+});
+
+test('catálogo por região: minha cidade e todas as cidades do meu estado, a partir do perfil (nunca do cliente)',async()=>{
+ const db=new DB(),id=n=>'ct_'+n.toString(16).padStart(24,'0');
+ db.data.set('users/a',{name:'A',status:'active',location:{city:'Palmas',state:'TO',cityId:'palmas_to'}});
+ db.data.set('users/semlocal',{name:'B',status:'active'});
+ for(const [n,cidade,uf,modalidade]of [[1,'palmas_to','TO','futsal'],[2,'araguaina_to','TO','campo'],[3,'goiania_go','GO','futsal'],[4,'palmas_to','TO','campo']])db.data.set('campeonatosTimes/'+id(n),{status:'inscricoes',envolvidos:[],criadoEm:NOW,inscricoesAte:Date.now()+100000*n,cityId:cidade,estado:uf,modalidade});
+ const cidade=await S.listarCT(db,'a',{filtro:'abertos',escopo:'cidade',cityId:'goiania_go'});
+ assert.deepEqual(cidade.campeonatos.map(c=>c.id),[id(1),id(4)]);assert.deepEqual({...cidade.local},{cidade:'Palmas',uf:'TO'});
+ assert.deepEqual((await S.listarCT(db,'a',{filtro:'abertos',escopo:'estado'})).campeonatos.map(c=>c.id),[id(1),id(2),id(4)]);
+ assert.deepEqual((await S.listarCT(db,'a',{filtro:'abertos',escopo:'estado',modalidade:'campo'})).campeonatos.map(c=>c.id),[id(2),id(4)]);
+ const sem=await S.listarCT(db,'semlocal',{filtro:'abertos',escopo:'cidade'});assert.equal(sem.campeonatos.length,0);assert.equal(sem.semLocalizacao,true);
+ await assert.rejects(S.listarCT(db,'a',{filtro:'abertos',escopo:'pais'}),/Região inválida/);
+});
+
+const jogosDe = (x) => Object.fromEntries([...x.db.data].filter(([p]) => p.startsWith(x.base + '/jogos/')).map(([, j]) => [j.id, structuredClone(j)]));
+
+test('CT-A01/A07: chave corrigida recusa formulário antigo da final; outra semifinal não fecha a primeira', async () => {
+  const x = await cenario({ formato: 'mata', maxTimes: 4 }); x.db.data.set('users/d', perfil('D')); x.db.data.set('times/d_1', time('d'));
+  for (const u of ['a', 'b', 'c', 'd']) { await S.inscreverCT(x.db, u, pedido(x.id, u), NOW); await S.responderCT(x.db, 'org', { ...pedido(x.id, u), aceitar: true }, NOW); }
+  await S.iniciarCT(x.db, 'org', { campeonatoId: x.id }, NOW);
+  const semis = Object.values(jogosDe(x)).filter((j) => j.casa && j.fora).sort((a, b) => a.ordem - b.ordem);
+  for (const j of semis) await S.resultadoCT(x.db, 'org', V(jogosDe(x)[j.id], { campeonatoId: x.id, jogoId: j.id, golsCasa: 1, golsFora: 0 }), NOW);
+  let todos = jogosDe(x);
+  // A07: com a final ainda sem placar, as duas semifinais continuam corrigíveis.
+  for (const j of semis) assert.equal(D.resultadoEditavelCT(todos[j.id], todos), true);
+  const aberto = todos.final; // formulário da final aberto no celular 1
+  const ultima = semis.at(-1);
+  await S.resultadoCT(x.db, 'org', V(todos[ultima.id], { campeonatoId: x.id, jogoId: ultima.id, golsCasa: 0, golsFora: 1 }), NOW + 1);
+  todos = jogosDe(x);
+  assert.notDeepEqual([aberto.casa, aberto.fora], [todos.final.casa, todos.final.fora]);
+  assert.equal(todos.final.versao, aberto.versao + 1);
+  // A01: o formulário antigo não grava o placar no confronto novo.
+  await assert.rejects(S.resultadoCT(x.db, 'org', V(aberto, { campeonatoId: x.id, jogoId: 'final', golsCasa: 4, golsFora: 0 }), NOW + 2),
+    (e) => e.status === 409 && e.code === 'jogo_desatualizado');
+  assert.equal(x.db.data.get(x.base + '/jogos/final').golsCasa, null);
+  // Atualizado, grava; e aí a semifinal que alimenta a final fecha.
+  await S.resultadoCT(x.db, 'org', V(todos.final, { campeonatoId: x.id, jogoId: 'final', golsCasa: 4, golsFora: 0 }), NOW + 3);
+  todos = jogosDe(x);
+  for (const j of semis) assert.equal(D.resultadoEditavelCT(todos[j.id], todos), false);
+});
+
+test('CT-A01: segunda edição sobre tela antiga é recusada; retry idêntico continua aceito', async () => {
+  const y = await completo(); await S.iniciarCT(y.db, 'org', { campeonatoId: y.id }, NOW);
+  const jogo = Object.values(jogosDe(y))[0];
+  const corpo = V(jogo, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 0 });
+  await S.resultadoCT(y.db, 'org', corpo, NOW);
+  await S.resultadoCT(y.db, 'org', corpo, NOW + 1); // resposta perdida: repete igual
+  await assert.rejects(S.resultadoCT(y.db, 'org', V(jogo, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 0 }), NOW + 2), (e) => e.code === 'jogo_desatualizado');
+  assert.equal(y.db.data.get(y.base + '/jogos/' + jogo.id).golsCasa, 2);
+  await assert.rejects(S.resultadoCT(y.db, 'org', { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 0, casaEsperada: jogo.casa, foraEsperada: jogo.fora }, NOW + 3), /Versão/);
+  const atual = jogosDe(y)[jogo.id];
+  await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 0 }), NOW + 4);
+  assert.equal(y.db.data.get(y.base + '/jogos/' + jogo.id).golsCasa, 1);
+});
+
+test('CT-A05: retry da mesma tentativa não reabre pedido recusado; nova tentativa reenvia', async () => {
+  const z = await cenario();
+  const p = { ...pedido(z.id, 'a'), tentativaId: 'tentativa_0001' };
+  await S.inscreverCT(z.db, 'a', p, NOW);
+  await S.responderCT(z.db, 'org', { ...pedido(z.id, 'a'), aceitar: false, motivo: 'Elenco incompleto' }, NOW);
+  await S.inscreverCT(z.db, 'a', p, NOW + 1);
+  assert.equal(z.db.data.get(z.base + '/inscricoes/a_1').status, 'recusada');
+  await S.inscreverCT(z.db, 'a', { ...p, tentativaId: 'tentativa_0002' }, NOW + 2);
+  assert.equal(z.db.data.get(z.base + '/inscricoes/a_1').status, 'pendente');
+  await assert.rejects(S.inscreverCT(z.db, 'a', { ...p, tentativaId: 'x' }, NOW + 3), /Tentativa/);
+  const det = await S.lerDetalheCT(z.db, 'org', { campeonatoId: z.id });
+  assert.ok(det.inscricoes.every((i) => !('tentativaId' in i)));
+});
+
+test('CT-A03: falha numa imagem não interrompe o lote; item volta com espera e sai após várias falhas', async () => {
+  const x = await cenario(); const conta = { cloud_name: 'teste', api_key: 'teste', api_secret: 'teste' }; const tentou = [];
+  const M = carregar('campeonatosTimesMidia', { 'cloudinary': { v2: { uploader: { destroy: async (id) => { tentou.push(id); if (id.endsWith('imagem0')) throw Error('falha transitória'); return { result: 'ok' }; } } } }, './config': { getAccount: () => conta } }, true);
+  for (let i = 0; i < 2; i++) x.db.data.set('midiaCampeonatosTimes/job' + i, { uid: 'org', campeonatoId: x.id, publicId: `turmas/org/campeonatos/${x.id}/imagem${i}`, status: 'pendente', criadoEm: Date.now() - 86400000 - 100 + i, leaseAte: null });
+  x.db.data.set('midiaCampeonatosTimes/ruim', { uid: 'org', campeonatoId: x.id, publicId: 'https://fora/x', status: 'pendente', criadoEm: Date.now() - 86400000 - 200, leaseAte: null });
+  const r = await M.limparBannersCT(x.db, Date.now() + 10000);
+  assert.deepEqual({ ...r }, { apagados: 1, mantidos: 0, falhas: 1, adiados: 0, invalidos: 1 });
+  assert.equal(tentou.length, 2); assert.equal(x.db.data.has('midiaCampeonatosTimes/job1'), false);
+  const falho = x.db.data.get('midiaCampeonatosTimes/job0');
+  assert.equal(falho.tentativas, 1); assert.equal(falho.leaseAte, null); assert.ok(falho.criadoEm > Date.now() - 86400000, 'reagendado para depois');
+  assert.equal(x.db.data.get('midiaCampeonatosTimes/ruim').status, 'invalido');
+  assert.ok(!/transitória/.test(falho.ultimoErro), 'erro externo não vai cru para o registro');
+  // Na oitava falha, sai da fila.
+  Object.assign(falho, { tentativas: 7, criadoEm: Date.now() - 86400001 });
+  await M.limparBannersCT(x.db, Date.now() + 10000);
+  assert.equal(x.db.data.get('midiaCampeonatosTimes/job0').status, 'falhou');
+});
+
+test('CT-A04: retry da mesma imagem reaproveita o arquivo; nada novo vai para a fila de exclusão', async () => {
+  const x = await cenario(); const conta = { cloud_name: 'teste', api_key: 'teste', api_secret: 'teste' }; const envios = [];
+  const M = carregar('campeonatosTimesMidia', { 'cloudinary': { v2: { uploader: { upload: async (_img, o) => { envios.push(o.public_id); return { public_id: o.public_id, secure_url: 'https://res.cloudinary.com/t/' + o.public_id }; } } } }, './config': { getAccount: () => conta } }, true);
+  const corpo = { acao: 'patrocinador', campeonatoId: x.id, patrocinadorId: 'p_00000000000000aa', nome: 'Loja', imagem: 'data:image/jpeg;base64,/9j/AAAA' };
+  await M.patrocinadorCT(x.db, 'org', corpo);
+  await M.patrocinadorCT(x.db, 'org', corpo); // resposta perdida: o app repete
+  assert.equal(envios.length, 1);
+  const fila = () => [...x.db.data.keys()].filter((p) => p.startsWith('midiaCampeonatosTimes/'));
+  assert.deepEqual(fila(), []);
+  assert.equal(x.db.data.get(x.base).patrocinadores.length, 1);
+  // Upload feito mas resposta final perdida (reserva ficou): o retry renova a reserva em vez de recusar.
+  const outra = { ...corpo, imagem: 'data:image/jpeg;base64,/9j/BBBB' };
+  await M.patrocinadorCT(x.db, 'org', outra);
+  assert.equal(envios.length, 2); assert.notEqual(envios[0], envios[1]);
+  assert.equal(fila().length, 1, 'só a imagem substituída vai para exclusão');
+});
+
+test('revalidação: T1 atrasada depois de T2 recusada não reabre inscrição e ID não pode mudar elenco', async () => {
+ const z=await cenario(),p={...pedido(z.id,'a'),tentativaId:'tentativa_0001'};
+ await S.inscreverCT(z.db,'a',p,NOW);
+ await S.responderCT(z.db,'org',{...pedido(z.id,'a'),aceitar:false},NOW);
+ await S.inscreverCT(z.db,'a',{...p,tentativaId:'tentativa_0002'},NOW+1);
+ await S.responderCT(z.db,'org',{...pedido(z.id,'a'),aceitar:false},NOW+2);
+ await S.inscreverCT(z.db,'a',p,NOW+3);
+ assert.equal(z.db.data.get(z.base+'/inscricoes/a_1').status,'recusada');
+ await assert.rejects(S.inscreverCT(z.db,'a',{...p,jogadorIds:['b']},NOW+4),/dados desta tentativa/);
+ await assert.rejects(S.inscreverCT(z.db,'a',pedido(z.id,'a'),NOW+4),/nova tentativa/);
+ const d=await S.lerDetalheCT(z.db,'org',{campeonatoId:z.id});assert.ok(d.inscricoes.every(i=>!('tentativasTotal' in i)));
 });
