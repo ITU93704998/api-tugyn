@@ -1,3 +1,4 @@
+import { completarFotosInscricoesCT } from "./campeonatosTimesFotos";
 import { createHash } from "node:crypto";
 import { FieldPath, type Firestore, type Transaction, type DocumentSnapshot } from "firebase-admin/firestore";
 import { calcularTrofeusTimes } from "./campeonatosTimesTrofeus";
@@ -6,7 +7,7 @@ import { sortear } from "./campeonato/tabela";
 import { localizacaoDoPerfil } from "./mapaUsuarios";
 import {
   COLECAO_CT, ID_CT, ID_TIME_CT, ID_JOGO_CT, MAX_ATIVOS_CT, RecusaCT, exigirCT, objetoCT, textoCT, numeroCT,
-  novoCT, elencoCT, gerarJogosCT, tabelaCT, registrarResultadoCT, resultadoEditavelCT, tentativaCT, type Dados, type InscricaoCT, type JogoCT,
+  novoCT, elencoCT, fotoAtletaCT, gerarJogosCT, tabelaCT, registrarResultadoCT, resultadoEditavelCT, tentativaCT, type Dados, type InscricaoCT, type JogoCT,
 } from "./campeonatosTimesDominio";
 
 const raiz = (db: Firestore, id: string) => db.doc(`${COLECAO_CT}/${id}`);
@@ -78,7 +79,7 @@ export async function listarCT(db: Firestore, uid: string, body: Dados): Promise
 export async function lerDetalheCT(db: Firestore, uid: string, body: Dados): Promise<Dados> {
   const id = campoId(body), ref = raiz(db, id);
   // Mesmo instante de leitura para metadados, elencos e tabela; não mistura fases durante início/resultado concorrente.
-  return db.runTransaction(async (tx) => {
+  const ler = () => db.runTransaction(async (tx) => {
   const camp = snapCT(await tx.get(ref));
   const organizador = camp.organizadorId === uid;
   const [insc, minhas, js] = await Promise.all([
@@ -89,10 +90,18 @@ export async function lerDetalheCT(db: Firestore, uid: string, body: Dados): Pro
   const inscricoes = [...new Map([...insc.docs, ...(minhas?.docs ?? [])].map((s) => [s.id, { ...s.data(), timeId: s.id } as unknown as InscricaoCT])).values()];
   const jogos = Object.fromEntries(js.docs.map((s) => [s.id, { ...s.data(), id: s.id } as JogoCT]));
   const aprovadas = inscricoes.filter((i) => i.status === "aprovada");
-  const visiveis = inscricoes.map(({ tentativaId: _interno, tentativasTotal: _total, ...i }) => ({ ...i, pago: organizador || i.donoId === uid ? i.pago : false, motivo: organizador || i.donoId === uid ? i.motivo : null }));
-  return { campeonato: detalheCT(id, camp), inscricoes: visiveis, jogos: Object.values(jogos).map((j) => ({ ...j, versao: Number(j.versao ?? 0), podeEditarResultado: organizador && (camp.status === "em_andamento" || camp.status === "encerrado") && Boolean(j.casa && j.fora) && resultadoEditavelCT(j, jogos) })),
-    classificacao: Object.keys(jogos).length ? tabelaCT(aprovadas, jogos, (camp.ordem ?? []) as string[], objetoCT(camp.grupos) as Record<string, string[]>) : [] };
+  const antigas = inscricoes.filter(i => i.jogadores.some(j => !Object.prototype.hasOwnProperty.call(j, "foto"))).map(i => i.timeId);
+  const comFotos = inscricoes.map(i => ({ ...i, jogadores: i.jogadores.map(j => ({ ...j, foto: fotoAtletaCT(j.foto) })) }));
+  const visiveis = comFotos.map(({ tentativaId: _interno, tentativasTotal: _total, ...i }) => ({ ...i, pago: organizador || i.donoId === uid ? i.pago : false, motivo: organizador || i.donoId === uid ? i.motivo : null }));
+  return { antigas, detalhe: { campeonato: detalheCT(id, camp), inscricoes: visiveis, jogos: Object.values(jogos).map((j) => ({ ...j, versao: Number(j.versao ?? 0), podeEditarResultado: organizador && (camp.status === "em_andamento" || camp.status === "encerrado") && Boolean(j.casa && j.fora) && resultadoEditavelCT(j, jogos) })),
+    classificacao: Object.keys(jogos).length ? tabelaCT(aprovadas, jogos, (camp.ordem ?? []) as string[], objetoCT(camp.grupos) as Record<string, string[]>) : [] } };
   }, { readOnly: true });
+  const primeira = await ler();
+  if (!primeira.antigas.length) return primeira.detalhe;
+  // A migração não bloqueia nem modifica o snapshot de jogos: transação separada só das fotos.
+  await completarFotosInscricoesCT(db, id, primeira.antigas);
+  // Relê mesmo se outro pedido já recuperou tudo, mantendo o DTO coerente e atual.
+  return (await ler()).detalhe;
 }
 
 export async function criarCT(db: Firestore, uid: string, body: Dados, gruposLiberado: boolean, agora = Date.now()): Promise<Dados> {
@@ -164,7 +173,7 @@ export async function inscreverCT(db: Firestore, uid: string, body: Dados, agora
     const registro: InscricaoCT = { timeId: tid, donoId: uid, timeNome: textoCT(time.nome, 60, "Time", true),
       escudoUrl: typeof time.escudoUrl === "string" && time.escudoUrl.startsWith("https://") ? time.escudoUrl.slice(0, 800) : null,
       cor: typeof time.cor === "string" && /^#[a-f0-9]{6}$/i.test(time.cor) ? time.cor : null,
-      jogadores, status: "pendente", pago: anterior.pago === true, motivo: null, criadoEm: Number(anterior.criadoEm ?? agora), atualizadoEm: agora, tentativaId, tentativasTotal: Number(anterior.tentativasTotal ?? 0) + 1 };
+      jogadores: jogadores.map((j, k) => ({ ...j, foto: fotoAtletaCT(perfis[k].get("profileImage")) })), status: "pendente", pago: anterior.pago === true, motivo: null, criadoEm: Number(anterior.criadoEm ?? agora), atualizadoEm: agora, tentativaId, tentativasTotal: Number(anterior.tentativasTotal ?? 0) + 1 };
     const envolvidos = Array.isArray(camp.envolvidos) ? camp.envolvidos as string[] : [];
     if (tentativaRef) tx.create(tentativaRef, { assinatura, criadoEm: agora });
     // Compatibilidade com a primeira versão que só guardava o último ID: preserva-o antes de substituir.
@@ -199,7 +208,7 @@ export async function responderCT(db: Firestore, uid: string, body: Dados, agora
       const travas = await tx.getAll(...refs);
       exigirCT(travas.every((s) => !s.exists || s.get("timeId") === tid), "Um atleta já está inscrito por outro time neste campeonato.", 409);
       refs.forEach((r) => tx.set(r, { timeId: tid }));
-      tx.update(ir, { status: "aprovada", jogadores: atuais, motivo: null, atualizadoEm: agora });
+      tx.update(ir, { status: "aprovada", jogadores: atuais.map((j, k) => ({ ...j, foto: fotoAtletaCT(perfis[k + 1].get("profileImage")) })), motivo: null, atualizadoEm: agora });
     } else tx.update(ir, { status: "recusada", motivo: motivo || null, atualizadoEm: agora });
     tx.update(ref, { aprovados: Number(camp.aprovados) + (body.aceitar ? 1 : 0), pendentes: Math.max(0, Number(camp.pendentes) - 1), atualizadoEm: agora });
   });

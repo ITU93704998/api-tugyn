@@ -58,7 +58,16 @@ export function novoCT(body: Dados, agora: number, gruposLiberado: boolean): Nov
     premiacao: { valorCentavos: numeroCT(p.valorCentavos ?? 0, 0, 100_000_000, "Prêmio em dinheiro"), trofeus: p.trofeus === true, medalhas: p.medalhas === true, texto: textoCT(p.texto, 1000, "Premiação") },
     regrasTexto: textoCT(body.regrasTexto, 5000, "Regulamento"), genero: String(genero), faixaEtaria: String(faixaEtaria), minJogadores, maxJogadores };
 }
-export interface AtletaCT { id: string; nome: string; numero: number | null; posicao: string | null }
+/** URL da foto existente: não recebe arquivo/base64 nem provoca upload no campeonato. */
+export function fotoAtletaCT(valor: unknown): string | null {
+  if (typeof valor !== "string" || valor.length > 1000) return null;
+  try {
+    const u = new URL(valor);
+    return u.protocol === "https:" && u.hostname === "res.cloudinary.com" && !u.username && !u.password && !u.port
+      && /^\/[A-Za-z0-9_-]+\/image\/upload\//.test(u.pathname) ? u.href : null;
+  } catch { return null; }
+}
+export interface AtletaCT { id: string; nome: string; numero: number | null; posicao: string | null; foto?: string | null }
 export interface InscricaoCT {
   timeId: string; donoId: string; timeNome: string; escudoUrl: string | null; cor: string | null;
   jogadores: AtletaCT[]; status: "pendente" | "aprovada" | "recusada" | "cancelada";
@@ -85,7 +94,7 @@ export function elencoCT(time: Dados, camp: Dados, quem: string, ids: unknown): 
     exigirCT(membros.includes(id) && Object.prototype.hasOwnProperty.call(jogadores, id), "Selecione apenas jogadores que já fazem parte do elenco do time.");
     const jogador = objetoCT(jogadores[id]), camisa = objetoCT(camisas[id]);
     exigirCT(camisa.posicao !== "treinador", "Treinador não conta como atleta inscrito.");
-    return { id, nome: textoCT(jogador.nome, 80, "Nome do jogador", true),
+    return { id, nome: textoCT(jogador.nome, 80, "Nome do jogador", true), foto: fotoAtletaCT(jogador.foto),
       numero: typeof camisa.numero === "number" && Number.isInteger(camisa.numero) && camisa.numero >= 0 && camisa.numero <= 99 ? camisa.numero : null,
       posicao: typeof camisa.posicao === "string" ? camisa.posicao.slice(0, 30) : null };
   });

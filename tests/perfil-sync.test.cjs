@@ -91,3 +91,18 @@ test('rota rejeita anônimo e método errado; só enfileira o uid autenticado',a
  r=response();await module.exports.handlePerfilSync({method:'POST'},r);assert.equal(r.code,401);assert.equal(called,null);
  logged=true;r=response();await module.exports.handlePerfilSync({method:'POST',body:{uid:'vitima',foto:'injetada'}},r);assert.equal(r.code,200);assert.equal(called,'ana');
 });
+
+test('campeonato: foto atualiza/remova sem alterar nomes históricos, placares, camisa ou revisão',async()=>{
+ const url='https://res.cloudinary.com/teste/image/upload/v1/usuarios/ana/profile.jpg';
+ const data=base();data['users/ana'].profileImage=url;
+ data['campeonatosTimes/ct_teste']={envolvidos:['ana'],status:'encerrado',premiacaoVersao:7};
+ data['campeonatosTimes/ct_teste/inscricoes/a_1']={status:'aprovada',jogadores:[{id:'ana',nome:'Nome inscrito',foto:null,numero:9,posicao:'atacante'},{id:'outro',nome:'Outro',foto:null}]};
+ data['campeonatosTimes/ct_teste/jogos/final']={gols:{ana:3},status:'finalizado'};
+ const a=fakeDb(data);await sync.enfileirarPerfil(a.db,'ana');await sync.processarPerfil(a.db,'ana');
+ const linha=a.docs.get('campeonatosTimes/ct_teste/inscricoes/a_1').jogadores;
+ assert.equal(linha[0].foto,url);assert.equal(linha[0].nome,'Nome inscrito');assert.equal(linha[0].numero,9);assert.equal(linha[1].foto,null);
+ assert.equal(a.docs.get('campeonatosTimes/ct_teste').premiacaoVersao,7);assert.equal(a.docs.get('campeonatosTimes/ct_teste/jogos/final').gols.ana,3);
+ a.docs.get('users/ana').profileImage='';await sync.enfileirarPerfil(a.db,'ana');await sync.processarPerfil(a.db,'ana');
+ assert.equal(a.docs.get('campeonatosTimes/ct_teste/inscricoes/a_1').jogadores[0].foto,null);
+ assert.equal(a.writes.some(([,p])=>p==='campeonatosTimes/ct_teste'),false,'foto não dispara nova premiação');
+});

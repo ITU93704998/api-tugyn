@@ -1,3 +1,4 @@
+import { administrarRegioesTimes } from "./regioesTimes";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { FieldValue, getFirestore, type Firestore } from "firebase-admin/firestore";
 import { getFirebaseApp, requireUser } from "./auth";
@@ -357,6 +358,13 @@ const saude = async (db: Firestore, atualizar: boolean) => {
   };
 };
 
+/** Configuração sem contar filas ou ler rotinas: as novas páginas não pagam o monitoramento. */
+export const lerConfiguracaoAdmin = async (db: Firestore, incluirVersoes: boolean, atualizar: boolean) => {
+  const agora = Date.now(); esquecerConfig();
+  const [config, historico, versoes] = await Promise.all([lerConfig(db, agora), lerHistorico(db), incluirVersoes ? lerVersoes(db, agora, atualizar).catch(() => null) : Promise.resolve(null)]);
+  return { geradoEm: agora, nivel: "sem_dados", rotinas: [], filas: [], config, historico, versoes, vercel: configDaVercel() };
+};
+
 export async function handleAdminSistema(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "no-store");
   if (handleCors(req, res)) return;
@@ -372,6 +380,10 @@ export async function handleAdminSistema(req: VercelRequest, res: VercelResponse
   const body = req.body ?? {};
   try {
     const db = getFirestore(getFirebaseApp());
+    if (body.action === "regioes-times-ler" || body.action === "regioes-times-salvar") {
+      const r = await administrarRegioesTimes(db, user.uid, body); return res.status(r.status).json(r.body);
+    }
+    if (body.action === "configuracao") return res.status(200).json(await lerConfiguracaoAdmin(db, body.incluirVersoes === true, body.atualizar === true));
     if (body.action === "saude") return res.status(200).json(await saude(db, body.atualizar === true));
     if (body.action === "salvar-config") {
       const parsed = parseConfigEnviada(body.config);

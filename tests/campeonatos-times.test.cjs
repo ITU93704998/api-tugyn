@@ -54,7 +54,7 @@ class DB {
   const prior=this.tail;let release;this.tail=new Promise(r=>release=r);await prior;
   const writes=[];let escreveu=false;
   const read=async r=>{assert.equal(escreveu,false,'leitura depois de escrita');return r.get();};
-  const tx={get:read,getAll:async(...refs)=>Promise.all(refs.map(read)),create:(r,d)=>{escreveu=true;writes.push(['create',r,d]);},set:(r,d)=>{escreveu=true;writes.push(['set',r,d]);},update:(r,d)=>{escreveu=true;writes.push(['update',r,d]);},delete:r=>{escreveu=true;writes.push(['delete',r]);}};
+  const tx={get:read,getAll:async(...refs)=>Promise.all(refs.filter(r=>typeof r.get==='function').map(read)),create:(r,d)=>{escreveu=true;writes.push(['create',r,d]);},set:(r,d)=>{escreveu=true;writes.push(['set',r,d]);},update:(r,d)=>{escreveu=true;writes.push(['update',r,d]);},delete:r=>{escreveu=true;writes.push(['delete',r]);}};
   try{const result=await fn(tx);for(const [op,r,d]of writes){if(op==='create')assert.equal(this.data.has(r.path),false);if(op==='update')assert.equal(this.data.has(r.path),true);if(op==='delete')this.data.delete(r.path);else this.data.set(r.path,clone(op==='update'?{...this.data.get(r.path),...d}:d));}return result;}finally{release();}
  }
 }
@@ -325,4 +325,95 @@ test('finalização: falha de transação não apresenta campeonato encerrado',a
  const x=await prontoParaFinalizar();x.db.runTransaction=async()=>{throw Error('rede indisponível');};
  await assert.rejects(S.finalizarCT(x.db,'org',{campeonatoId:x.id,revisaoEsperada:x.revisaoEsperada},NOW),/rede indisponível/);
  assert.equal(x.db.data.get(x.base).status,'em_andamento');assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,1);
+});
+
+const FOTO_A='https://res.cloudinary.com/teste/image/upload/v1/usuarios/a/profile.jpg';
+test('fotos: inscrição e aprovação usam perfil canônico já lido, ignorando foto enviada no pedido',async()=>{
+ const x=await cenario();x.db.data.get('users/a').profileImage=FOTO_A;
+ x.db.data.get('times/a_1').jogadores.a.foto='https://site.invalid/forjada.jpg';
+ await S.inscreverCT(x.db,'a',{...pedido(x.id,'a'),foto:'https://site.invalid/injetada.jpg'},NOW);
+ assert.equal(x.db.data.get(x.base+'/inscricoes/a_1').jogadores[0].foto,FOTO_A);
+ const nova=FOTO_A.replace('/v1/','/v2/');x.db.data.get('users/a').profileImage=nova;
+ await S.responderCT(x.db,'org',{...pedido(x.id,'a'),aceitar:true},NOW);
+ assert.equal(x.db.data.get(x.base+'/inscricoes/a_1').jogadores[0].foto,nova);
+ const d=await S.lerDetalheCT(x.db,'b',{campeonatoId:x.id});assert.equal(d.inscricoes[0].jogadores[0].foto,nova);
+});
+test('fotos: valida URLs e protocolos de imagens',()=>{
+ assert.equal(D.fotoAtletaCT(FOTO_A),FOTO_A);
+ for(const v of [null,'','javascript:alert(1)','data:image/png;base64,x','http://res.cloudinary.com/teste/image/upload/a.jpg','https://res.cloudinary.com.evil.invalid/teste/image/upload/a.jpg','https://res.cloudinary.com@evil.invalid/teste/image/upload/a.jpg','https://site.invalid/a.jpg'])assert.equal(D.fotoAtletaCT(v),null);
+});
+
+test('FOTO-01/02: inscrição antiga recupera perfil canônico mesmo sem time, persiste e não relê usuários',async()=>{
+ const x=await completo(),ir=x.base+'/inscricoes/a_1';delete x.db.data.get(ir).jogadores[0].foto;
+ const antes=clone(x.db.data.get(ir)),campeonatoAntes=clone(x.db.data.get(x.base));
+ x.db.data.get('users/a').profileImage=FOTO_A;x.db.data.get('users/a').name='Nome atual do perfil';x.db.data.delete('times/a_1');
+ const snap=x.db.snap.bind(x.db),lidas=[];x.db.snap=p=>{lidas.push(p);return snap(p);};
+ const d=await S.lerDetalheCT(x.db,'org',{campeonatoId:x.id});
+ assert.equal(d.inscricoes.find(i=>i.timeId==='a_1').jogadores[0].foto,FOTO_A);
+ assert.equal(x.db.data.get(ir).jogadores[0].foto,FOTO_A);
+ assert.deepEqual(x.db.data.get(ir),{...antes,jogadores:antes.jogadores.map(j=>({...j,foto:FOTO_A}))});
+ assert.deepEqual(x.db.data.get(x.base),campeonatoAntes,'não regrava raiz/títulos/revisão');
+ assert.equal(lidas.filter(p=>p==='users/a').length,1);assert.equal(lidas.some(p=>p.startsWith('times/')),false);
+ lidas.length=0;
+ for(let i=0;i<3;i++)await S.lerDetalheCT(x.db,'org',{campeonatoId:x.id});
+ assert.equal(lidas.some(p=>p.startsWith('users/')||p.startsWith('times/')),false,'sem leituras recorrentes de perfil ou time');
+});
+
+test('fotos: null explícito não é substituído nem consultado, e conta ausente/em exclusão vira null',async()=>{
+ const x=await completo();x.db.data.get('users/a').profileImage=FOTO_A;
+ delete x.db.data.get(x.base+'/inscricoes/b_1').jogadores[0].foto;
+ delete x.db.data.get(x.base+'/inscricoes/c_1').jogadores[0].foto;
+ x.db.data.get('users/b').profileImage=FOTO_A;x.db.data.get('users/b').excluindoEm=NOW;x.db.data.delete('users/c');
+ const snap=x.db.snap.bind(x.db),lidas=[];x.db.snap=p=>{lidas.push(p);return snap(p);};
+ const d=await S.lerDetalheCT(x.db,'org',{campeonatoId:x.id});
+ assert.equal(d.inscricoes.find(i=>i.timeId==='a_1').jogadores[0].foto,null);
+ assert.equal(lidas.includes('users/a'),false);
+ assert.equal(x.db.data.get(x.base+'/inscricoes/b_1').jogadores[0].foto,null);
+ assert.equal(x.db.data.get(x.base+'/inscricoes/c_1').jogadores[0].foto,null);
+ assert.equal(x.db.data.has('users/c'),false);
+});
+
+test('fotos: visitante não recupera nem recebe pedido pendente de outro dono',async()=>{
+ const x=await cenario();await S.inscreverCT(x.db,'a',pedido(x.id,'a'),NOW);
+ const ir=x.base+'/inscricoes/a_1';delete x.db.data.get(ir).jogadores[0].foto;x.db.data.get('users/a').profileImage=FOTO_A;
+ const d=await S.lerDetalheCT(x.db,'b',{campeonatoId:x.id});assert.equal(d.inscricoes.length,0);
+ assert.equal(Object.hasOwn(x.db.data.get(ir).jogadores[0],'foto'),false);
+ await S.lerDetalheCT(x.db,'a',{campeonatoId:x.id});assert.equal(x.db.data.get(ir).jogadores[0].foto,FOTO_A);
+});
+
+test('fotos: recuperação concorrente é idempotente e não recria inscrição/campeonato excluídos',async()=>{
+ const x=await completo(),ir=x.base+'/inscricoes/a_1';delete x.db.data.get(ir).jogadores[0].foto;x.db.data.get('users/a').profileImage=FOTO_A;
+ const F=carregar('campeonatosTimesFotos');
+ const r=await Promise.all([F.completarFotosInscricoesCT(x.db,x.id,['a_1']),F.completarFotosInscricoesCT(x.db,x.id,['a_1'])]);
+ assert.deepEqual(r,[1,0]);assert.equal(x.db.data.get(ir).jogadores[0].foto,FOTO_A);
+ x.db.data.delete(ir);assert.equal(await F.completarFotosInscricoesCT(x.db,x.id,['a_1']),0);assert.equal(x.db.data.has(ir),false);
+ x.db.data.delete(x.base);assert.equal(await F.completarFotosInscricoesCT(x.db,x.id,['b_1']),0);assert.equal(x.db.data.has(x.base),false);
+});
+
+test('fotos: migração com falha pode ser repetida sem declarar gravação antes do commit',async()=>{
+ const x=await completo(),ir=x.base+'/inscricoes/a_1';delete x.db.data.get(ir).jogadores[0].foto;x.db.data.get('users/a').profileImage=FOTO_A;
+ const real=x.db.runTransaction.bind(x.db);let chamadas=0;x.db.runTransaction=fn=>++chamadas===2?Promise.reject(Error('falha de conexão simulada')):real(fn);
+ await assert.rejects(S.lerDetalheCT(x.db,'org',{campeonatoId:x.id}),/conexão simulada/);
+ assert.equal(Object.hasOwn(x.db.data.get(ir).jogadores[0],'foto'),false);
+ x.db.runTransaction=real;await S.lerDetalheCT(x.db,'org',{campeonatoId:x.id});assert.equal(x.db.data.get(ir).jogadores[0].foto,FOTO_A);
+});
+
+
+test('fotos: excluir conta remove foto da inscrição junto da identidade',async()=>{
+ const x=await completo();x.db.data.get(x.base+'/inscricoes/a_1').jogadores[0].foto=FOTO_A;
+ const E=carregar('campeonatosTimesExclusao');await E.excluirIdentidadeCT(x.db,'a');
+ const a=x.db.data.get(x.base+'/inscricoes/a_1').jogadores[0];assert.equal(a.nome,'Usuário removido');assert.equal(a.foto,null);assert.notEqual(a.id,'a');
+});
+
+test('saídas regionais: lista só envolvimentos e inscrições da conta, sem dados privados e sem aceitar filtro forjado',async()=>{
+ const R=carregar('saidasRegionaisCT');const id='ct_'+ 'a'.repeat(24), outro='ct_'+'b'.repeat(24);
+ const db=new DB({['campeonatosTimes/'+id]:{nome:'Minha copa',envolvidos:['a'],organizadorId:'a',status:'inscricoes',criadoEm:100},['campeonatosTimes/'+outro]:{nome:'Privado',envolvidos:['b'],organizadorId:'b',status:'inscricoes',criadoEm:99},['campeonatosTimes/'+id+'/inscricoes/a_1']:{donoId:'a',timeNome:'Meu time',status:'pendente',pago:true,jogadores:[{id:'segredo'}]},['campeonatosTimes/'+id+'/inscricoes/b_1']:{donoId:'b',timeNome:'Outro time',status:'aprovada',pago:true}});
+ const r=await R.listarSaidasRegionaisCT(db,'a',{filtro:'abertos',uid:'b'});
+ assert.deepEqual(r.itens,[{id,nome:'Minha copa',podeCancelar:true,inscricoes:[{timeId:'a_1',nome:'Meu time'}]}]);
+ assert.equal(JSON.stringify(r).includes('segredo'),false);assert.equal(JSON.stringify(r).includes('pago'),false);
+ db.data.get('campeonatosTimes/'+id).status='encerrado';const fim=await R.listarSaidasRegionaisCT(db,'a',{});assert.equal(fim.itens[0].podeCancelar,false);assert.deepEqual(fim.itens[0].inscricoes,[]);
+});
+test('saídas regionais: cursor pagina sem repetir nem revelar campeonatos de terceiros',async()=>{
+ const R=carregar('saidasRegionaisCT'),seed={};for(let i=1;i<=22;i++)seed['campeonatosTimes/ct_'+i.toString(16).padStart(24,'0')]={nome:'Copa '+i,envolvidos:['a'],organizadorId:'b',status:'cancelado',criadoEm:100};
+ const db=new DB(seed),p1=await R.listarSaidasRegionaisCT(db,'a',{}),p2=await R.listarSaidasRegionaisCT(db,'a',{cursor:p1.proximoCursor});assert.equal(p1.itens.length,20);assert.equal(p2.itens.length,2);assert.equal(new Set([...p1.itens,...p2.itens].map(c=>c.id)).size,22);
 });

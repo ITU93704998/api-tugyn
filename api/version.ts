@@ -1,3 +1,4 @@
+import { lerRegioesTimes } from "./_lib/regioesTimes";
 import { handleCampeonatosTimes } from "./_lib/campeonatosTimesApi";
 import { handlePerfilSync } from "./_lib/perfilSyncApi";
 import { handleDepartamentoMedico } from "./_lib/departamentoMedico";
@@ -72,6 +73,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Firebase Admin indisponível: segue só com as variáveis.
   }
   const policy = aplicarConfigRemota(base, config, platform);
+  try { const r = await lerRegioesTimes(getFirestore(getFirebaseApp())); if (r.existe) Object.assign(policy, { regioesTimes: r.config }); } catch { Object.assign(policy, { regioesTimesIndisponiveis: true }); }
 
   // Registro (sem dados pessoais) de quantas instalações estão sendo bloqueadas.
   const rawVersion = Array.isArray(query.version) ? query.version[0] : query.version;

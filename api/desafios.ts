@@ -1,3 +1,4 @@
+import { exigirRegiaoTimes, ErroRegioesTimes } from "./_lib/regioesTimes";
 import { limparBannersCT } from "./_lib/campeonatosTimesMidia";
 import { timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
@@ -544,11 +545,14 @@ const tratarAmistoso = async (req: VercelRequest, res: VercelResponse, uid: stri
     return res.status(500).json({ error: "Servidor não configurado." });
   }
   try {
+    const limpeza = parsed.value.action === "time_encerrar" || parsed.value.action === "amistoso_cancelar" || parsed.value.action === "amistoso_responder" && !parsed.value.aceitar;
+    if (!limpeza) await exigirRegiaoTimes(db, uid, "times");
     const resultado = await executarAmistoso(db, uid, parsed.value);
     if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
     console.log(JSON.stringify({ evt: parsed.value.action }));
     return res.status(200).json({ success: true, ...(resultado.body ?? {}) });
   } catch (erro) {
+    if (erro instanceof ErroRegioesTimes) return res.status(erro.status).json({ error: erro.message, code: erro.code });
     console.error(JSON.stringify({ evt: "amistosos_failed", action: parsed.value.action, message: (erro as Error)?.message ?? String(erro) }));
     return res.status(502).json({ error: "Não foi possível concluir agora. Tente novamente." });
   }

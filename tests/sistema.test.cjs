@@ -147,3 +147,9 @@ test('sem Firebase Functions (plano gratuito): rotinas das Functions ficam "não
   assert.equal(A.ajustarFilaSemFunctions(A.avaliarFila('push_pendentes', 1, AGORA - 51 * HORA, AGORA)).nivel, 'critico');
   assert.equal(A.ajustarFilaSemFunctions(A.avaliarFila('push_pendentes', null, 0, AGORA)).nivel, 'sem_dados');
 });
+
+test('configuração administrativa leve não conta filas, rotinas ou distribuição de versões',async()=>{
+ const leituras=[];const historico={orderBy:()=>historico,limit:n=>{assert.equal(n,10);return historico;},get:async()=>{leituras.push('historico');return{docs:[]};}};
+ const db={doc:p=>{assert.equal(p,'sistema/config');return{get:async()=>{leituras.push(p);return{exists:true,data:()=>S.CONFIG_PADRAO};},collection:n=>{assert.equal(n,'historico');return historico;}};},collection:()=>{throw Error('Não deve consultar coleções operacionais');}};
+ const r=await A.lerConfiguracaoAdmin(db,false,false);assert.deepEqual(leituras.sort(),['historico','sistema/config']);assert.deepEqual(r.rotinas,[]);assert.deepEqual(r.filas,[]);assert.equal(r.versoes,null);assert.ok(r.config.funcoes);assert.ok(r.vercel.versoes);
+});

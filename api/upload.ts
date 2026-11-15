@@ -1,3 +1,4 @@
+import { exigirRegiaoTimes, ErroRegioesTimes } from "./_lib/regioesTimes";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { createHmac } from "node:crypto";
 import { v2 as cloudinary } from "cloudinary";
@@ -99,6 +100,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: "Informe o time para enviar o escudo." });
   }
 
+  if (ehEscudo) {
+    try { await exigirRegiaoTimes(getFirestore(getFirebaseApp()), user.uid, "times"); }
+    catch (e) { if (e instanceof ErroRegioesTimes) return res.status(e.status).json({ error: e.message, code: e.code }); return res.status(503).json({ error: "Não foi possível conferir a região." }); }
+  }
   const limiteUsuario = bucket === "anuncios" ? 80 : MAX_UPLOADS_POR_USUARIO_HORA;
   if (!(await dentroDoLimite(user.uid, "upload", limiteUsuario, 3600))) {
     return res.status(429).json({ error: "Muitos envios em pouco tempo. Tente novamente mais tarde." });

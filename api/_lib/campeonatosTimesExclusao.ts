@@ -20,7 +20,7 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
       let aprovados = Number(c.aprovados), pendentes = Number(c.pendentes);
       for (const s of afetadas) {
         const i = s.data() as InscricaoCT;
-        const jogadores = i.jogadores.map((a) => a.id === uid ? { id: anon, nome: "Usuário removido", numero: null, posicao: null } : a);
+        const jogadores = i.jogadores.map((a) => a.id === uid ? { id: anon, nome: "Usuário removido", numero: null, posicao: null, foto: null } : a);
         const mudanca: Dados = { jogadores, atualizadoEm: Date.now() };
         if (i.donoId === uid) Object.assign(mudanca, { donoId: "", escudoUrl: null });
         if (antes && (i.status === "pendente" || i.status === "aprovada")) {

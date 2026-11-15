@@ -1,3 +1,4 @@
+import { fotoAtletaCT } from "./campeonatosTimesDominio";
 import { createHash, randomBytes } from "node:crypto";
 import { FieldPath, FieldValue, type Firestore, type Query, type QuerySnapshot } from "firebase-admin/firestore";
 import { isSafeUid } from "./validation";
@@ -33,7 +34,7 @@ export async function enfileirarPerfil(db:Firestore,uid:string,now=Date.now()):P
 const fases=[
   ["turmas","participantes"],["turmas","pendingParticipants"],["turmas","creatorId"],
   ["times","membros"],["times","convidados"],["times","solicitantes"],
-  ["desafios","participantes"],
+  ["desafios","participantes"],["campeonatosTimes","envolvidos"],
 ] as const;
 function consulta(db:Firestore,uid:string,etapa:number,cursor:string|null):Query {
   const [collection,field]=fases[etapa];
@@ -95,6 +96,16 @@ async function atualizarAlvo(db:Firestore,uid:string,job:Data,lease:string,path:
         Object.assign(patch,patchIdentidade(map(entry),`${field}.${uid}`,{...(id.nome?{nome:id.nome}:{}),foto:id.foto,userName:id.userName}));
       }
       if(Object.keys(patch).length)tx.update(ref,{...patch,atualizadoEm:FieldValue.serverTimestamp()});
+    }else if(path.startsWith("campeonatosTimes/")){
+      if(!Array.isArray(d.envolvidos)||!d.envolvidos.includes(uid))return;
+      // Só a foto: inscrição, camisa, resultados e revisão da finalização ficam intactos.
+      const inscricoes=await tx.get(db.collection(`${path}/inscricoes`).limit(129));
+      const foto=fotoAtletaCT(id.foto);
+      for(const inscricao of inscricoes.docs){
+        const lista=Array.isArray(inscricao.data().jogadores)?inscricao.data().jogadores:[];
+        if(!lista.some((a:Data)=>a.id===uid&&a.foto!==foto))continue;
+        tx.update(inscricao.ref,{jogadores:lista.map((a:Data)=>a.id===uid?{...a,foto}:a),atualizadoEm:Date.now()});
+      }
     }else{
       const patch:Data={};
       for(const [side,field]of [["desafiante","desafianteId"],["desafiado","desafiadoId"]])if(d[field]===uid){
