@@ -90,12 +90,15 @@ test('mesmo atleta não é aprovado por dois times em pedidos concorrentes',asyn
 test('cancelamento libera vaga e trava do atleta; início incompleto falha sem gravar jogos',async()=>{
  const{db,id,base}=await completo();await S.cancelarInscricaoCT(db,'a',pedido(id,'a'),NOW);assert.equal(db.data.has(base+'/atletas/a'),false);await assert.rejects(S.iniciarCT(db,'org',{campeonatoId:id},NOW),/3 times/);assert.equal([...db.data.keys()].some(p=>p.startsWith(base+'/jogos/')),false);
 });
-test('início e resultado confirmam gravação, controlam proprietário e encerram campeonato',async()=>{
+test('último resultado aguarda finalização explícita do organizador',async()=>{
  const{db,id,base}=await completo();await assert.rejects(S.iniciarCT(db,'a',{campeonatoId:id},NOW),/organizador/);await S.iniciarCT(db,'org',{campeonatoId:id},NOW);
  let detalhe=await S.lerDetalheCT(db,'org',{campeonatoId:id});assert.equal(detalhe.jogos.length,3);
  const j=detalhe.jogos[0];await assert.rejects(S.resultadoCT(db,'a',V(j,{campeonatoId:id,jogoId:j.id,golsCasa:2,golsFora:0}),NOW),/organizador/);
  for(const jogo of detalhe.jogos)await S.resultadoCT(db,'org',V(jogo,{campeonatoId:id,jogoId:jogo.id,golsCasa:2,golsFora:0}),NOW);
- assert.equal(db.data.get(base).status,'encerrado');assert.ok(db.data.get(base).campeaoTimeId);assert.equal(db.data.get('controleCampeonatosTimes/org').ativos,0);
+ assert.equal(db.data.get(base).status,'em_andamento');assert.ok(db.data.get(base).campeaoTimeId);assert.equal(db.data.get('controleCampeonatosTimes/org').ativos,1);
+ const revisaoEsperada=db.data.get(base).premiacaoVersao;
+ await S.finalizarCT(db,'org',{campeonatoId:id,revisaoEsperada},NOW+1);
+ assert.equal(db.data.get(base).status,'encerrado');assert.equal(db.data.get('controleCampeonatosTimes/org').ativos,0);
 });
 test('privacidade: pedido pendente e pagamento só para organizador e dono da inscrição',async()=>{
  const{db,id,base}=await cenario();await S.inscreverCT(db,'a',pedido(id,'a'),NOW);let d=await S.lerDetalheCT(db,'b',{campeonatoId:id});assert.equal(d.inscricoes.length,0);
@@ -272,4 +275,54 @@ test('revalidação: T1 atrasada depois de T2 recusada não reabre inscrição e
  await assert.rejects(S.inscreverCT(z.db,'a',{...p,jogadorIds:['b']},NOW+4),/dados desta tentativa/);
  await assert.rejects(S.inscreverCT(z.db,'a',pedido(z.id,'a'),NOW+4),/nova tentativa/);
  const d=await S.lerDetalheCT(z.db,'org',{campeonatoId:z.id});assert.ok(d.inscricoes.every(i=>!('tentativasTotal' in i)));
+});
+
+async function prontoParaFinalizar() {
+ const x=await completo();await S.iniciarCT(x.db,'org',{campeonatoId:x.id},NOW);
+ const d=await S.lerDetalheCT(x.db,'org',{campeonatoId:x.id});
+ for(const j of d.jogos)await S.resultadoCT(x.db,'org',V(j,{campeonatoId:x.id,jogoId:j.id,golsCasa:2,golsFora:0}),NOW);
+ return {...x,revisaoEsperada:x.db.data.get(x.base).premiacaoVersao};
+}
+test('finalização: somente organizador, com todos os jogos e revisão atual',async()=>{
+ const x=await completo(),body={campeonatoId:x.id,revisaoEsperada:0};
+ await assert.rejects(S.finalizarCT(x.db,'a',body,NOW),e=>e.status===403);
+ await assert.rejects(S.finalizarCT(x.db,'org',body,NOW),/em andamento/);
+ await S.iniciarCT(x.db,'org',{campeonatoId:x.id},NOW);
+ await assert.rejects(S.finalizarCT(x.db,'org',body,NOW),/Conclua todos/);
+ assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,1);
+ const y=await prontoParaFinalizar();
+ await assert.rejects(S.finalizarCT(y.db,'org',{campeonatoId:y.id},NOW),/Revise os resultados/);
+ await assert.rejects(S.finalizarCT(y.db,'org',{campeonatoId:y.id,revisaoEsperada:y.revisaoEsperada-1},NOW),e=>e.code==='campeonato_desatualizado');
+ assert.equal(y.db.data.get(y.base).status,'em_andamento');
+});
+test('finalização: dados manipulados não geram encerramento nem liberam cota',async()=>{
+ const x=await prontoParaFinalizar();x.db.data.get(x.base).campeaoTimeId='falso';
+ await assert.rejects(S.finalizarCT(x.db,'org',{campeonatoId:x.id,revisaoEsperada:x.revisaoEsperada},NOW),/validar o campeão/);
+ assert.equal(x.db.data.get(x.base).status,'em_andamento');assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,1);
+});
+test('finalização: dois aparelhos e retry não duplicam encerramento/cota; retorno perdido pode ser repetido',async()=>{
+ const x=await prontoParaFinalizar(),b={campeonatoId:x.id,revisaoEsperada:x.revisaoEsperada};
+ await Promise.all([S.finalizarCT(x.db,'org',b,NOW+1),S.finalizarCT(x.db,'org',b,NOW+2)]);
+ await S.finalizarCT(x.db,'org',b,NOW+3);
+ assert.equal(x.db.data.get(x.base).finalizadoEm,NOW+1);assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,0);
+});
+test('finalização: corrigir resultado reabre para revisão e exige nova confirmação',async()=>{
+ const x=await prontoParaFinalizar(),b={campeonatoId:x.id,revisaoEsperada:x.revisaoEsperada};
+ await S.finalizarCT(x.db,'org',b,NOW+1);
+ const antes=await S.lerDetalheCT(x.db,'org',{campeonatoId:x.id}),j=antes.jogos[0];
+ // Retry idêntico do placar original não reabre o campeonato.
+ await S.resultadoCT(x.db,'org',V(j,{campeonatoId:x.id,jogoId:j.id,golsCasa:2,golsFora:0}),NOW+2);
+ assert.equal(x.db.data.get(x.base).status,'encerrado');
+ await S.resultadoCT(x.db,'org',V(j,{campeonatoId:x.id,jogoId:j.id,golsCasa:0,golsFora:2}),NOW+3);
+ assert.equal(x.db.data.get(x.base).status,'em_andamento');assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,1);
+ assert.equal(x.db.data.get(x.base).finalizadoEm,null);
+ await assert.rejects(S.finalizarCT(x.db,'org',b,NOW+4),e=>e.code==='campeonato_desatualizado');
+ const revisaoEsperada=x.db.data.get(x.base).premiacaoVersao;
+ await S.finalizarCT(x.db,'org',{campeonatoId:x.id,revisaoEsperada},NOW+5);
+ assert.equal(x.db.data.get(x.base).status,'encerrado');assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,0);
+});
+test('finalização: falha de transação não apresenta campeonato encerrado',async()=>{
+ const x=await prontoParaFinalizar();x.db.runTransaction=async()=>{throw Error('rede indisponível');};
+ await assert.rejects(S.finalizarCT(x.db,'org',{campeonatoId:x.id,revisaoEsperada:x.revisaoEsperada},NOW),/rede indisponível/);
+ assert.equal(x.db.data.get(x.base).status,'em_andamento');assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,1);
 });

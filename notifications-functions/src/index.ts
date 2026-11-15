@@ -1,3 +1,4 @@
+import { sincronizarTrofeusTimes } from "../../api/_lib/campeonatosTimesTrofeusSync";
 import { enfileirarPerfil, mudouIdentidade, processarPerfil, recuperarPerfis } from "../../api/_lib/perfilSync";
 import { captureLiveAttendance, dispatchLiveAttendance, invalidateLiveUser, sweepLiveAttendance } from "../../api/_lib/liveActivities";
 import { getApps, initializeApp } from "firebase-admin/app";
@@ -146,4 +147,14 @@ export const cancelarJogosAbandonados = onSchedule({
 }, async () => {
   const r = await cancelarAbandonados(db);
   if (r.vistos) console.log(JSON.stringify({ evt: "campeonatos_abandonados", ...r }));
+});
+
+/** Resultados/correções são gravados pela API junto com a revisão da raiz. */
+export const syncCampeonatoTimesTrofeus = onDocumentWritten({ ...triggerOptions, document: "campeonatosTimes/{campeonatoId}" }, async event => {
+  if (!event.data || !/^ct_[a-f0-9]{24}$/.test(event.params.campeonatoId)) return;
+  const antes = event.data.before.exists ? event.data.before.data() : null;
+  const depois = event.data.after.exists ? event.data.after.data() : null;
+  if (!mexeNosTrofeus(antes, depois)) return;
+  const r = await sincronizarTrofeusTimes(db, event.params.campeonatoId);
+  console.log(JSON.stringify({ evt: "trofeus_times_sync", ...r }));
 });

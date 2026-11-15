@@ -6,9 +6,9 @@ import { handleCors } from "./cors";
 import { dentroDoLimite } from "./rateLimit";
 import { RecusaCT, exigirCT, objetoCT } from "./campeonatosTimesDominio";
 import { patrocinadorCT, patrocinadoresPublicosCT } from "./campeonatosTimesMidia";
-import { criarCT, listarCT, lerDetalheCT, gruposLiberadosCT, inscreverCT, responderCT, cancelarInscricaoCT, iniciarCT, resultadoCT, administrarCT } from "./campeonatosTimesServico";
+import { criarCT, listarCT, lerDetalheCT, gruposLiberadosCT, inscreverCT, responderCT, cancelarInscricaoCT, iniciarCT, resultadoCT, finalizarCT, administrarCT } from "./campeonatosTimesServico";
 
-const ACOES = new Set(["recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar"]);
+const ACOES = new Set(["recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "finalizar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar"]);
 export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "private, no-store");
   if (handleCors(req, res)) return;
@@ -36,6 +36,7 @@ export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResp
       case "cancelarInscricao": await cancelarInscricaoCT(db, uid, b); break;
       case "iniciar": await iniciarCT(db, uid, b); break;
       case "resultado": await resultadoCT(db, uid, b); break;
+      case "finalizar": await finalizarCT(db, uid, b); break;
       case "patrocinador": case "removerPatrocinador": await patrocinadorCT(db, uid, b); break;
       default: await administrarCT(db, uid, b);
     }

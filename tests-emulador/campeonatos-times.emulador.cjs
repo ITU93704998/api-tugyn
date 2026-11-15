@@ -32,6 +32,8 @@ async function main(){
   await Promise.all([S.iniciarCT(db,org,{campeonatoId:id},agora),S.iniciarCT(db,org,{campeonatoId:id},agora)]);
   const jogos=await ref.collection('jogos').get();assert.equal(jogos.size,3,'duplo toque não duplica tabela');
   await Promise.all(jogos.docs.map(j=>S.resultadoCT(db,org,{campeonatoId:id,jogoId:j.id,golsCasa:1,golsFora:0,casaEsperada:j.get("casa"),foraEsperada:j.get("fora"),versaoEsperada:Number(j.get("versao")??0)},agora)));
+  const pronto=await ref.get();assert.equal(pronto.get('status'),'em_andamento');assert.ok(pronto.get('campeaoTimeId'));
+  await Promise.all([1,2].map(()=>S.finalizarCT(db,org,{campeonatoId:id,revisaoEsperada:Number(pronto.get('premiacaoVersao')??0)},agora)));
   const final=await ref.get();assert.equal(final.get('status'),'encerrado');assert.ok(final.get('campeaoTimeId'));
   const detalhe=await S.lerDetalheCT(db,org,{campeonatoId:id});assert.equal(detalhe.campeonato.status,'encerrado');assert.equal(detalhe.jogos.length,3);assert.equal(detalhe.classificacao.length,3);
   assert.equal((await db.doc('controleCampeonatosTimes/'+org).get()).get('ativos'),2,'encerramento decrementa cota só uma vez');

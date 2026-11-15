@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { FieldPath, type Firestore, type Transaction, type DocumentSnapshot } from "firebase-admin/firestore";
+import { calcularTrofeusTimes } from "./campeonatosTimesTrofeus";
 import { perfilDisponivel } from "./suspensao";
 import { sortear } from "./campeonato/tabela";
 import { localizacaoDoPerfil } from "./mapaUsuarios";
@@ -22,6 +23,7 @@ export function resumoCT(id: string, d: Dados): Dados {
 }
 export function detalheCT(id: string, d: Dados): Dados {
   const dto = resumoCT(id, d);
+  dto.revisaoResultados = Number(d.premiacaoVersao ?? 0);
   for (const k of ["locais", "premiacao", "regrasTexto", "genero", "faixaEtaria", "minJogadores", "maxJogadores", "patrocinadores", "campeaoTimeId", "motivoCancelamento", "grupos"]) dto[k] = d[k] ?? null;
   return dto;
 }
@@ -255,14 +257,43 @@ export async function resultadoCT(db: Firestore, uid: string, body: Dados, agora
     let novo: ReturnType<typeof registrarResultadoCT>;
     try { novo = registrarResultadoCT(camp, ins.docs.map((s) => s.data() as InscricaoCT), anteriores, jid, body); }
     catch (e) { if (e instanceof RecusaCT) throw e; throw new RecusaCT(400, e instanceof Error ? e.message : "Resultado inválido."); }
-    for (const [j, jogo] of Object.entries(novo.jogos)) if (JSON.stringify(anteriores[j]) !== JSON.stringify(jogo)) tx.set(ref.collection("jogos").doc(j), jogo);
-    const status = novo.campeaoTimeId ? "encerrado" : "em_andamento";
-    if (status !== camp.status) {
-      const ativos = Number(ct.get("ativos") ?? 0) + (status === "encerrado" ? -1 : 1);
+    const alterados = Object.entries(novo.jogos).filter(([j, jogo]) => JSON.stringify(anteriores[j]) !== JSON.stringify(jogo));
+    // Retry idêntico após a finalização não reabre nem altera a revisão.
+    if (!alterados.length) return;
+    for (const [j, jogo] of alterados) tx.set(ref.collection("jogos").doc(j), jogo);
+    // Ter campeão calculado significa pronto para revisão, não autorização para premiar.
+    const status = "em_andamento";
+    if (camp.status === "encerrado") {
+      const ativos = Number(ct.get("ativos") ?? 0) + 1;
       exigirCT(ativos <= MAX_ATIVOS_CT, "Encerre outro campeonato antes de reabrir este.", 409);
       tx.set(controle(db, uid), { ativos: Math.max(0, ativos) });
     }
-    tx.update(ref, { status, campeaoTimeId: novo.campeaoTimeId, atualizadoEm: agora });
+    tx.update(ref, { status, campeaoTimeId: novo.campeaoTimeId, atualizadoEm: agora, finalizadoEm: null, premiacaoVersao: Number(camp.premiacaoVersao ?? 0) + 1 });
+  });
+}
+
+/** Finaliza explicitamente sobre a revisão que o organizador conferiu. A mesma transação
+ * valida o estado atual e libera a cota uma única vez; o gatilho durável distribui os títulos. */
+export async function finalizarCT(db: Firestore, uid: string, body: Dados, agora = Date.now()): Promise<void> {
+  const id = campoId(body), ref = raiz(db, id);
+  await db.runTransaction(async tx => {
+    await autorUsuario(tx, db, uid);
+    const camp = snapCT(await tx.get(ref)); dono(camp, uid);
+    exigirCT(typeof body.revisaoEsperada === "number" && Number.isSafeInteger(body.revisaoEsperada) && body.revisaoEsperada >= 0, "Revise os resultados antes de finalizar.");
+    if (body.revisaoEsperada !== Number(camp.premiacaoVersao ?? 0)) throw new RecusaCT(409, "Os resultados mudaram. Confira o campeonato antes de finalizar.", "campeonato_desatualizado");
+    if (camp.status === "encerrado") return; // resposta perdida: não duplica cota nem prêmios
+    exigirCT(camp.status === "em_andamento", "Somente um campeonato em andamento pode ser finalizado.", 409);
+    const [ins, js, cota] = await Promise.all([
+      tx.get(ref.collection("inscricoes").where("status", "==", "aprovada").limit(17)),
+      tx.get(ref.collection("jogos").limit(64)), tx.get(controle(db, uid)),
+    ]);
+    exigirCT(js.docs.length > 0 && js.docs.every(j => j.get("status") === "finalizado"), "Conclua todos os jogos antes de finalizar o campeonato.", 409);
+    const inscricoes = ins.docs.map(s => s.data() as InscricaoCT);
+    const jogos = Object.fromEntries(js.docs.map(s => [s.id, { ...s.data(), id: s.id } as JogoCT]));
+    // Recalcula campeão e confere placares/estatísticas; nenhum vencedor vem do cliente.
+    exigirCT(calcularTrofeusTimes(id, { ...camp, status: "encerrado" }, inscricoes, jogos).size > 0, "Não foi possível validar o campeão e os resultados. Confira os jogos antes de finalizar.", 409);
+    tx.update(ref, { status: "encerrado", finalizadoEm: agora, atualizadoEm: agora });
+    tx.set(controle(db, uid), { ativos: Math.max(0, Number(cota.get("ativos") ?? 0) - 1) });
   });
 }
 
