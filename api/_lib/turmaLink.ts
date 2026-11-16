@@ -90,11 +90,12 @@ interface PaginaParams {
   plataforma: Plataforma;
   iconUrl?: string | null;
   paginaUrl?: string | null;
+  cartaoUrl?: string | null;
   previa?: PreviaTurma | null;
 }
 
 /** Convite de turma: o banner (ou o ícone), o nome, o local, os dias e o horário, e o botão que abre o convite no app. */
-export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, previa }: PaginaParams): string => {
+export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl, previa }: PaginaParams): string => {
   const abrir = `tugyn://turma/${encodeURIComponent(id)}`;
   const titulo = previa ? `${previa.nome} · Tugyn` : "Convite para uma turma no Tugyn";
   const detalhes = previa ? [previa.arenaNome, previa.dias, previa.horario].filter(Boolean).join(" · ") : "";
@@ -131,6 +132,7 @@ export const renderizarPagina = ({ id, lojaIos, lojaAndroid, plataforma, iconUrl
     imagemMeta,
     iconUrl,
     paginaUrl,
+    cartaoUrl,
     conteudo: `  ${topo}
   <div class="faixa"><span class="faixa-icone" aria-hidden="true">✓</span>Abra no app para pedir para entrar. O organizador confirma a sua entrada.</div>
   <a class="btn" href="${esc(abrir)}">Abrir convite no Tugyn</a>

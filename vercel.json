@@ -29,6 +29,44 @@
     {
       "source": "/api/campeonato/:id",
       "destination": "/api/turma/:id?tipo=campeonato"
+    },
+    {
+      "source": "/imagem/:tipo(turma|time|convite|campeonato)/:id",
+      "destination": "/api/turma/:id?tipo=:tipo&formato=imagem"
+    },
+    {
+      "source": "/campeonato/:id",
+      "destination": "/api/turma/:id?tipo=campeonato"
+    },
+    {
+      "source": "/convocacao/:codigo",
+      "destination": "/api/turma/:codigo?tipo=convite"
+    },
+    {
+      "source": "/time/:linkId",
+      "destination": "/api/turma/:linkId?tipo=time"
+    },
+    {
+      "source": "/turma/:id",
+      "destination": "/api/turma/:id"
     }
-  ]
+  ],
+  "redirects": [
+    {
+      "source": "/",
+      "has": [
+        {
+          "type": "host",
+          "value": "link.tugyntec.com.br"
+        }
+      ],
+      "destination": "https://tugyntec.com.br",
+      "permanent": false
+    }
+  ],
+  "functions": {
+    "api/turma/[id].ts": {
+      "includeFiles": "api/assets/**"
+    }
+  }
 }

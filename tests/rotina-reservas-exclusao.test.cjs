@@ -141,8 +141,10 @@ test('paresDosDesafios: adversário de cada desafio, ignorando ids estranhos', (
 });
 
 test('etapasPendentes / deveProcessar', () => {
-  assert.deepEqual(exc.etapasPendentes(undefined), ['avaliacoesDadas', 'vagasAdversarios', 'imagens']);
-  assert.deepEqual(exc.etapasPendentes({ avaliacoesDadas: { ok: true, tentativas: 1 }, imagens: { ok: false, tentativas: 2, pendencias: ['bucket_turmas_sem_credenciais'] } }), ['vagasAdversarios', 'imagens']);
+  assert.deepEqual(exc.etapasPendentes(undefined), ['avaliacoesDadas', 'vagasAdversarios', 'imagens', 'exMembros']);
+  assert.deepEqual(exc.etapasPendentes({ avaliacoesDadas: { ok: true, tentativas: 1 }, imagens: { ok: false, tentativas: 2, pendencias: ['bucket_turmas_sem_credenciais'] } }), ['vagasAdversarios', 'imagens', 'exMembros']);
+  // Jobs antigos (sem a etapa nova) também passam pela anonimização das turmas deixadas.
+  assert.deepEqual(exc.etapasPendentes({ avaliacoesDadas: { ok: true, tentativas: 1 }, vagasAdversarios: { ok: true, tentativas: 1 }, imagens: { ok: true, tentativas: 1 } }), ['exMembros']);
   const agora = 10 * 3600_000;
   assert.equal(exc.deveProcessar({ estado: 'pos_exclusao', atualizadaEmMs: agora }, agora), true);
   assert.equal(exc.deveProcessar({ estado: 'excluindo', atualizadaEmMs: agora - 60_000 }, agora), false); // em andamento agora

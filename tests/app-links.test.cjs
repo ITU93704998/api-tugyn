@@ -24,13 +24,13 @@ const pedir = (resource, env) => {
   return res;
 };
 
-test('iOS: appID = Team ID + bundle, só os caminhos de turma e time, application/json', () => {
+test('iOS: appID = Team ID + bundle, só os caminhos dos links (curtos e antigos), application/json', () => {
   const res = pedir('apple-app-site-association', { APPLE_TEAM_ID: 'abcde12345' });
   assert.equal(res.statusCode, 200);
   assert.equal(res.headers['Content-Type'], 'application/json');
   const d = res.body.applinks.details[0];
   assert.deepEqual(d.appIDs, ['ABCDE12345.com.tugyn.tugynfut']);
-  assert.deepEqual(json(d.components), [{ '/': '/api/turma/*' }, { '/': '/api/time/*' }, { '/': '/api/campeonato/*' }]);
+  assert.deepEqual(json(d.components), ['/turma/*', '/time/*', '/convocacao/*', '/campeonato/*', '/api/turma/*', '/api/time/*', '/api/campeonato/*'].map((c) => ({ '/': c })));
   // Só o formato moderno: nada do antigo misturado.
   assert.deepEqual(Object.keys(d).sort(), ['appIDs', 'components']);
   assert.deepEqual(Object.keys(res.body.applinks), ['details']);
@@ -58,5 +58,6 @@ test('vercel.json: os dois arquivos chegam na rota certa, sem redirecionamento',
   const de = (s) => v.rewrites.find((r) => r.source === s)?.destination;
   assert.equal(de('/.well-known/apple-app-site-association'), '/api/version?resource=apple-app-site-association');
   assert.equal(de('/.well-known/assetlinks.json'), '/api/version?resource=assetlinks');
-  assert.equal(v.redirects, undefined);
+  // O único redirecionamento é a raiz de link.tugyntec.com.br (vai para o site); os arquivos nunca redirecionam.
+  assert.deepEqual((v.redirects ?? []).map((x) => [x.source, x.has?.[0]?.value]), [['/', 'link.tugyntec.com.br']]);
 });

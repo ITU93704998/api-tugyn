@@ -85,9 +85,21 @@ export const documentoPublico = (p: {
   imagemMeta: string;
   iconUrl?: string | null;
   paginaUrl?: string | null;
+  /** Cartão da prévia gerado pelo servidor (1200x630, PNG): quando existe, substitui a imagem pequena/banner. */
+  cartaoUrl?: string | null;
   conteudo: string;
 }): string => {
-  const { titulo, descricao, imagemMeta, iconUrl, paginaUrl, conteudo } = p;
+  const { titulo, descricao, iconUrl, paginaUrl, cartaoUrl, conteudo } = p;
+  const imagemMeta = cartaoUrl
+    ? `<meta property="og:image" content="${esc(cartaoUrl)}">
+<meta property="og:image:secure_url" content="${esc(cartaoUrl)}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${esc(titulo)}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="${esc(cartaoUrl)}">`
+    : p.imagemMeta;
   return `<!doctype html>
 <html lang="pt-BR">
 <head>

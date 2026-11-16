@@ -1,5 +1,5 @@
 import { FieldValue, type Firestore, Timestamp } from "firebase-admin/firestore";
-import { campoDaTemporada, ehOrganizadorTemporario } from "./estatisticas";
+import { campoDaTemporada, ehOrganizadorTemporario, turmaAtiva } from "./estatisticas";
 import { isSafeUid } from "./validation";
 
 /**
@@ -50,9 +50,16 @@ export interface PartidaEnviada {
   gerado: boolean;
   modalidade: "futebol" | "futsal" | null;
   jogadores: JogadorDoc[];
+  /**
+   * Revisão da partida que o aparelho conhece (a devolvida no último envio confirmado; 0 se nunca enviou). Null: não informada
+   * (app antigo ou partida enviada por versão anterior): vale só para partida NOVA e para reenvio idêntico; mudar uma partida
+   * já gravada sem revisão é recusado com 409 (`partida_desatualizada`, com `revisaoAtual` para a pessoa conferir e
+   * substituir de propósito). Revisão diferente da gravada: 409 também.
+   */
+  revisaoEsperada: number | null;
 }
 
-export type Negado = { ok: false; status: 400 | 403 | 404 | 409; code: string; error: string };
+export type Negado = { ok: false; status: 400 | 403 | 404 | 409; code: string; error: string; revisaoAtual?: number };
 
 type Dados = Record<string, unknown>;
 
@@ -70,6 +77,9 @@ export const parsePartidaEnviada = (body: Dados): { ok: true; value: PartidaEnvi
   if (typeof body.partidaId !== "string" || !PARTIDA_ID.test(body.partidaId)) return recusa("Partida sem identificador válido.");
   const p = (typeof body.partida === "object" && body.partida !== null ? body.partida : {}) as Dados;
   if (!Array.isArray(body.jogadores) || body.jogadores.length > MAX_JOGADORES_PARTIDA * 2) return recusa("Lista de jogadores inválida.");
+  // Ausente/null = não informada; presente e malformada é recusada (não vira "sem conferência").
+  const rev = body.revisaoEsperada;
+  if (rev !== undefined && rev !== null && !(typeof rev === "number" && Number.isSafeInteger(rev) && rev >= 0)) return recusa("Revisão da partida inválida.");
 
   const brutos = body.jogadores.filter((j): j is Dados => typeof j === "object" && j !== null);
   for (const j of brutos) {
@@ -107,6 +117,7 @@ export const parsePartidaEnviada = (body: Dados): { ok: true; value: PartidaEnvi
       gerado: p.gerado === true,
       modalidade: p.modalidade === "futsal" ? "futsal" : p.modalidade === "futebol" ? "futebol" : null,
       jogadores,
+      revisaoEsperada: typeof rev === "number" ? rev : null,
     },
   };
 };
@@ -200,7 +211,7 @@ const millis = (v: unknown): number | undefined => {
 };
 
 export type ResultadoEnvio =
-  | { ok: true; atualizacao: boolean; alterado: boolean; participantesAlterados: string[]; corrigivelAte: number }
+  | { ok: true; atualizacao: boolean; alterado: boolean; participantesAlterados: string[]; corrigivelAte: number; revisao: number }
   | Negado;
 
 /**
@@ -228,6 +239,10 @@ export const enviarPartida = async (db: Firestore, uid: string, p: PartidaEnviad
     if (turma.creatorId !== uid && !ehOrganizadorTemporario(uid, turma, agora, participantes.get(uid) ?? null)) {
       return { ok: false, status: 403, code: "sem_permissao", error: "Só o organizador (ou o organizador temporário, no prazo) envia partidas desta turma." };
     }
+    // Turma encerrada pela moderação não recebe mais nada; encerrada pelo organizador só aceita correção (no prazo) de
+    // partida já enviada, nunca partida nova.
+    if (turma.encerradaPor === "moderacao") return { ok: false, status: 403, code: "turma_encerrada", error: "Esta turma foi encerrada pela moderação e não recebe mais partidas." };
+    if (!turmaAtiva(turma) && !armazenado) return { ok: false, status: 409, code: "turma_encerrada", error: "Esta turma foi encerrada e não recebe partidas novas." };
 
     // Cada jogador da lista é um membro aprovado (ou já estava nesta partida antes: correção de quem saiu depois).
     const antesNaPartida = new Set(porParticipante(anteriores.filter((j): j is Dados => typeof j === "object" && j !== null)).keys());
@@ -256,8 +271,21 @@ export const enviarPartida = async (db: Firestore, uid: string, p: PartidaEnviad
     const prazoGravado = millis(armazenado?.corrigivelAte);
     const corrigivelAte = prazoGravado ?? calcularCorrigivelAte(Date.parse(data), agora, armazenado ? (salvadoEm ?? agora) : undefined);
 
+    const revisaoAtual = armazenado ? inteiroEntre(armazenado.revisao, 0, Number.MAX_SAFE_INTEGER, 0) : 0;
+    // Reenvio idêntico ao que está gravado (retry de uma resposta perdida): confirma de novo, sem conferir revisão.
     if (!mudouConteudo && deltas.size === 0) {
-      return { ok: true, atualizacao: true, alterado: false, participantesAlterados: [], corrigivelAte };
+      return { ok: true, atualizacao: true, alterado: false, participantesAlterados: [], corrigivelAte, revisao: revisaoAtual };
+    }
+    // Conteúdo diferente de uma partida JÁ GRAVADA: só com a revisão que está gravada. Sem revisão (app antigo, partida de
+    // versão anterior) não há como saber se o aparelho viu a última correção: recusa e devolve a revisão atual, para o app
+    // pedir confirmação antes de substituir. Partida nova sem revisão vale como 0.
+    if (armazenado ? p.revisaoEsperada !== revisaoAtual : p.revisaoEsperada !== null && p.revisaoEsperada !== 0) {
+      return {
+        ok: false, status: 409, code: "partida_desatualizada", revisaoAtual,
+        error: p.revisaoEsperada === null
+          ? "Esta partida já está na turma e pode ter sido corrigida depois. Atualize o app, confira a versão da turma e confirme se quer substituí-la."
+          : "Esta partida foi alterada depois (em outro aparelho ou numa correção mais nova). Confira a versão da turma antes de enviar de novo.",
+      };
     }
     if (armazenado && corrigivelAte <= agora) {
       return { ok: false, status: 409, code: "prazo_encerrado", error: "O prazo de correção desta partida terminou." };
@@ -278,6 +306,7 @@ export const enviarPartida = async (db: Firestore, uid: string, p: PartidaEnviad
       atualizadoEm: FieldValue.serverTimestamp(),
       jogadores: p.jogadores,
       enviadaPor: uid,
+      revisao: revisaoAtual + 1,
     };
 
     const hoje = diaDeBrasilia(agora);
@@ -333,6 +362,6 @@ export const enviarPartida = async (db: Firestore, uid: string, p: PartidaEnviad
       );
     }
     tx.update(turmaRef, { ultimaAtividade: FieldValue.serverTimestamp() });
-    return { ok: true, atualizacao: Boolean(armazenado), alterado: true, participantesAlterados: alterados, corrigivelAte };
+    return { ok: true, atualizacao: Boolean(armazenado), alterado: true, participantesAlterados: alterados, corrigivelAte, revisao: revisaoAtual + 1 };
   });
 };

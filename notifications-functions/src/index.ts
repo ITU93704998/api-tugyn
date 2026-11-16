@@ -6,7 +6,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { onDocumentCreated, onDocumentWritten } from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { defineSecret } from "firebase-functions/params";
-import { type Change, participantEvents, gameEvents } from "./events";
+import { type Change, participantEvents, gameEvents, timeEvents } from "./events";
 import { dispatchEvent, enqueueEvent, sweepEvents } from "./outbox";
 import { isSafeUid } from "../../api/_lib/validation";
 import { consultarRecibos, recuperarAvisosPendentes } from "../../api/_lib/pushEnvio";
@@ -47,6 +47,23 @@ export const captureTurmaGameNotification = onDocumentWritten({ ...triggerOption
   const [turma, current] = await Promise.all([db.doc(`turmas/${event.params.turmaId}`).get(), event.data.after.ref.get()]);
   const change: Change = { id: event.id, source: event.source, timeMs: event.data.after.updateTime?.toMillis() ?? Date.parse(event.time), turmaId: event.params.turmaId, before, after };
   for (const planned of gameEvents(change, event.params.dayId, turma.data() ?? null, current.data() ?? null, Date.now())) await enqueueEvent(db, planned);
+});
+
+// Times: convocação, pedido pelo link e aprovação viram aviso a partir da mudança salva (antes dependiam do app chamar a API
+// depois da gravação; fechar o app nesse intervalo perdia o aviso). Mesma fila durável e mesmas chaves da rota antiga.
+export const captureTimeNotification = onDocumentWritten({ ...triggerOptions, document: "times/{timeId}" }, async event => {
+  if (!event.data || !safe(event.params.timeId)) return;
+  const before = event.data.before.exists ? event.data.before.data()! : null;
+  const after = event.data.after.exists ? event.data.after.data()! : null;
+  if (!after) return;
+  const novos = (campo: string) => {
+    const antes = new Set(Array.isArray(before?.[campo]) ? before![campo] : []);
+    return (Array.isArray(after[campo]) ? after[campo] : []).some((id: unknown) => !antes.has(id));
+  };
+  if (!novos("convidados") && !novos("solicitantes") && !(after.ultimoAprovado && novos("membros"))) return;
+  const current = await event.data.after.ref.get();
+  const change: Change = { id: event.id, source: event.source, timeMs: event.data.after.updateTime?.toMillis() ?? Date.parse(event.time), turmaId: "", before, after };
+  for (const planned of timeEvents(change, event.params.timeId, current.data() ?? null)) await enqueueEvent(db, planned);
 });
 
 export const deliverTurmaNotification = onDocumentCreated({ ...triggerOptions, document: "turmaPushEvents/{eventId}", secrets: [expoAccessToken] }, async event => {

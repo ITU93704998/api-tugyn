@@ -18,102 +18,134 @@ import {
   type ConvitePublico,
   type TimePublico,
 } from "../_lib/timeLink";
-import { campeonatoDoDocumento, isValidCampeonatoId, renderizarPaginaCampeonato, type CampeonatoPublico } from "../_lib/campeonatoLink";
+import { campeonatoDoDocumento, cartaoDoCampeonato, isValidCampeonatoId, renderizarPaginaCampeonato, type CampeonatoPublico } from "../_lib/campeonatoLink";
+import { CODIGO_CAMPEONATO, CODIGO_TURMA, caminhoPublico, campeonatoPorCodigo, turmaPorCodigo, type TipoLink } from "../_lib/linkCurto";
+import { gerarCartao, type DadosCartao } from "../_lib/cartaoLink";
 
 /**
- * GET /api/turma/<id>  (link de convite compartilhado)
+ * Páginas públicas dos links compartilhados (não exigem login: quem recebe o link talvez nem tenha o app).
+ * vercel.json reescreve para cá, sem criar outra função na Vercel:
  *
- * Público: não exige login (quem recebe o link talvez nem tenha o app).
- * Lê só a cópia pública `turmaPreviews/<id>` (já liberada para leitura nas regras) para a prévia do link;
- * se demorar ou falhar, a página sai genérica em vez de travar.
+ *   /turma/<código ou id>        (e o antigo /api/turma/<id>)        prévia `turmaPreviews/<id>`
+ *   /time/<linkId>               (e o antigo /api/time/<linkId>)     ?tipo=time
+ *   /convocacao/<codigo>         (e o antigo /api/time/c/<codigo>)   ?tipo=convite: link de 1 hora, `convitesTime/<codigo>`
+ *   /campeonato/<código ou id>   (e o antigo /api/campeonato/<id>)   ?tipo=campeonato: `campeonatosTimes/<id>`
+ *   /imagem/<tipo>/<código>      ?formato=imagem: o cartão 1200x630 da prévia (WhatsApp etc.)
+ *   /turma|campeonato/<código>?formato=id   o id (JSON) para o app abrir a tela quando o link curto abre direto nele.
+ *                                Nada novo fica público: a página já leva o id no botão tugyn://.
  *
- * GET /api/time/<linkId>  (vercel.json reescreve para cá com ?tipo=time: a página pública de um time, sem função nova)
- * GET /api/time/c/<codigo>  (?tipo=convite: o link de convocação de 1 hora; lê convitesTime/<codigo>)
- * GET /api/campeonato/<id>  (?tipo=campeonato: a página pública de um campeonato entre times; lê campeonatosTimes/<id>)
- * Os links das lojas vêm das MESMAS variáveis do /api/version (APP_STORE_URL[_IOS|_ANDROID]), já validadas.
+ * Se a leitura demorar ou falhar, a página sai genérica em vez de travar. Os links das lojas vêm das MESMAS variáveis do
+ * /api/version (APP_STORE_URL[_IOS|_ANDROID]), já validadas.
  */
 const PREVIA_TIMEOUT_MS = 2500;
 
-const lerPrevia = async (turmaId: string): Promise<PreviaTurma | null> => {
+const comPrazo = async <T>(leitura: Promise<T>, rotulo: string): Promise<T | null> => {
   let timer: NodeJS.Timeout | undefined;
   try {
-    const leitura = getFirestore(getFirebaseApp()).collection("turmaPreviews").doc(turmaId).get();
     const limite = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
     });
-    const snap = await Promise.race([leitura, limite]);
-    return snap && snap.exists ? previaDoDocumento(snap.data()) : null;
+    return await Promise.race([leitura, limite]);
   } catch (error) {
-    console.warn("[turma-link] prévia indisponível:", error instanceof Error ? error.message : error);
+    console.warn(`[${rotulo}] indisponível:`, error instanceof Error ? error.message : error);
     return null;
   } finally {
     if (timer) clearTimeout(timer);
   }
 };
-/** O time pelo `linkId` (1 leitura; só os campos que a página mostra). null se não existir, demorar ou falhar. */
-const lerTime = async (linkId: string): Promise<TimePublico | null> => {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const leitura = getFirestore(getFirebaseApp())
+
+const db = () => getFirestore(getFirebaseApp());
+
+/** Turma pelo código de convite (6 letras) ou pelo id: o id resolvido e a prévia pública. */
+const lerTurma = async (idOuCodigo: string): Promise<{ turmaId: string; previa: PreviaTurma | null } | null> =>
+  comPrazo(
+    (async () => {
+      const turmaId = CODIGO_TURMA.test(idOuCodigo) ? await turmaPorCodigo(db(), idOuCodigo) : idOuCodigo;
+      if (!turmaId) return null;
+      const snap = await db().collection("turmaPreviews").doc(turmaId).get();
+      return { turmaId, previa: snap.exists ? previaDoDocumento(snap.data()) : null };
+    })(),
+    "turma-link",
+  );
+
+/** O time pelo `linkId` (1 leitura; só os campos que a página mostra). */
+const lerTime = async (linkId: string): Promise<TimePublico | null> =>
+  comPrazo(
+    db()
       .collection("times")
       .where("linkId", "==", linkId)
       .select("nome", "cor", "donoId", "jogadores", "sigla", "modalidade", "genero", "faixaEtaria", "cidade", "escudoUrl", "camisas")
       .limit(1)
-      .get();
-    const limite = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
-    });
-    const snap = await Promise.race([leitura, limite]);
-    return snap && !snap.empty ? timeDoDocumento(snap.docs[0].data()) : null;
-  } catch (error) {
-    console.warn("[time-link] time indisponível:", error instanceof Error ? error.message : error);
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-};
+      .get()
+      .then((snap) => (snap.empty ? null : timeDoDocumento(snap.docs[0].data()))),
+    "time-link",
+  );
 
-/** Prévia do link de convocação (1 leitura). null se não existir, demorar ou falhar. */
-const lerConvite = async (codigo: string): Promise<ConvitePublico | null> => {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const leitura = getFirestore(getFirebaseApp()).collection("convitesTime").doc(codigo).get();
-    const limite = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
-    });
-    const snap = await Promise.race([leitura, limite]);
-    return snap && snap.exists ? conviteDoDocumento(snap.data()) : null;
-  } catch (error) {
-    console.warn("[time-convite] convite indisponível:", error instanceof Error ? error.message : error);
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-};
+/** Prévia do link de convocação (1 leitura). */
+const lerConvite = async (codigo: string): Promise<ConvitePublico | null> =>
+  comPrazo(
+    db().collection("convitesTime").doc(codigo).get().then((snap) => (snap.exists ? conviteDoDocumento(snap.data()) : null)),
+    "time-convite",
+  );
 
-/** O campeonato (1 leitura; só os campos públicos do catálogo). null se não existir, for de teste, demorar ou falhar. */
-const lerCampeonato = async (id: string): Promise<CampeonatoPublico | null> => {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const leitura = getFirestore(getFirebaseApp()).collection("campeonatosTimes").doc(id).get();
-    const limite = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
-    });
-    const snap = await Promise.race([leitura, limite]);
-    return snap && snap.exists ? campeonatoDoDocumento(snap.data()) : null;
-  } catch (error) {
-    console.warn("[campeonato-link] campeonato indisponível:", error instanceof Error ? error.message : error);
-    return null;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-};
+/** O campeonato pelo id ou pelo código curto (só os campos públicos do catálogo). null se não existir, for de teste... */
+const lerCampeonato = async (idOuCodigo: string): Promise<{ id: string; campeonato: CampeonatoPublico } | null> =>
+  comPrazo(
+    (async () => {
+      const id = isValidCampeonatoId(idOuCodigo) ? idOuCodigo : await campeonatoPorCodigo(db(), idOuCodigo);
+      if (!id) return null;
+      const snap = await db().collection("campeonatosTimes").doc(id).get();
+      const campeonato = snap.exists ? campeonatoDoDocumento(snap.data()) : null;
+      return campeonato ? { id, campeonato } : null;
+    })(),
+    "campeonato-link",
+  );
 
 const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
-  // Sem scripts: a página é só HTML e CSS. Imagens: as do próprio servidor (ícone) e as do Cloudinary (escudo, fotos, banner).
+  // Sem scripts: a página é só HTML e CSS. Imagens: as do próprio servidor (ícone, cartão) e as do Cloudinary.
   "Content-Security-Policy": "default-src 'none'; img-src 'self' https://res.cloudinary.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+};
+
+const primeiro = (v: unknown): string | undefined => (Array.isArray(v) ? (typeof v[0] === "string" ? v[0] : undefined) : typeof v === "string" ? v : undefined);
+
+const tipoDaQuery = (tipo: string | undefined): TipoLink =>
+  tipo === "time" ? "time" : tipo === "convite" ? "convite" : tipo === "campeonato" ? "campeonato" : "turma";
+
+const idValido = (tipo: TipoLink, id: unknown): id is string =>
+  tipo === "campeonato"
+    ? isValidCampeonatoId(id) || (typeof id === "string" && CODIGO_CAMPEONATO.test(id))
+    : tipo === "time" || tipo === "convite"
+      ? isValidLinkId(id)
+      : isValidTurmaId(id);
+
+/** Dados do cartão para a imagem; null se não houver o que mostrar. */
+const dadosDoCartao = async (tipo: TipoLink, id: string): Promise<DadosCartao | null> => {
+  if (tipo === "campeonato") {
+    const r = await lerCampeonato(id);
+    return r ? cartaoDoCampeonato(r.campeonato, Date.now()) : null;
+  }
+  if (tipo === "time" || tipo === "convite") {
+    const t = tipo === "time" ? await lerTime(id) : await lerConvite(id);
+    if (!t) return null;
+    const jogadores = tipo === "time" ? (t as TimePublico).jogadores.length : 0;
+    return {
+      rotulo: tipo === "time" ? "Time" : "Convocação",
+      titulo: `${t.nome}${t.sigla ? ` (${t.sigla})` : ""}`,
+      detalhes: t.detalhes,
+      destaque: tipo === "time" ? `${jogadores} ${jogadores === 1 ? "jogador" : "jogadores"} no elenco` : "Toque para pedir para entrar no time",
+      escudo: { url: t.escudo, cor: t.cor, sigla: t.sigla },
+    };
+  }
+  const r = await lerTurma(id);
+  if (!r?.previa) return null;
+  return {
+    rotulo: "Convite para a turma",
+    titulo: r.previa.nome,
+    detalhes: [r.previa.arenaNome, r.previa.dias, r.previa.horario].filter(Boolean).join(" · "),
+    destaque: "Toque para pedir para entrar",
+  };
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -125,74 +157,93 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const query = req.query ?? {};
-  const bruto = Array.isArray(query.id) ? query.id[0] : query.id;
-  const tipo = Array.isArray(query.tipo) ? query.tipo[0] : query.tipo;
-  const ehTime = tipo === "time" || tipo === "convite";
-  const ehCampeonato = tipo === "campeonato";
-  if (ehCampeonato ? !isValidCampeonatoId(bruto) : ehTime ? !isValidLinkId(bruto) : !isValidTurmaId(bruto)) {
+  const bruto = primeiro(query.id);
+  const tipo = tipoDaQuery(primeiro(query.tipo));
+  if (!idValido(tipo, bruto)) {
     // Nunca devolve o que foi digitado.
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     return res.status(400).send("Link inválido.");
   }
 
+  const host = req.headers.host;
+  const origin = typeof host === "string" && /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host) ? `https://${host}` : null;
+  const iconUrl = origin ? new URL("/tugyn-icon.png", origin).toString() : null;
+
+  // ── Imagem da prévia ──
+  if (primeiro(query.formato) === "imagem") {
+    const dados = await dadosDoCartao(tipo, bruto);
+    try {
+      if (!dados) throw new Error("sem dados");
+      const png = await gerarCartao(dados);
+      res.setHeader("Content-Type", "image/png");
+      // 10 min na CDN e até 1 dia servindo a cópia anterior enquanto atualiza: vagas e situação mudam devagar.
+      res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=86400");
+      return res.status(200).send(png);
+    } catch (error) {
+      if (dados) console.warn("[link-cartao] falhou:", error instanceof Error ? error.message : error);
+      // Sem cartão: manda para o ícone (a prévia sai pequena, mas sai).
+      res.setHeader("Cache-Control", "public, s-maxage=60");
+      return res.redirect(302, "/tugyn-icon.png");
+    }
+  }
+
+  // ── Código → id (app) ──
+  if (primeiro(query.formato) === "id" && (tipo === "turma" || tipo === "campeonato")) {
+    const id = tipo === "turma" ? (await lerTurma(bruto))?.turmaId : (await lerCampeonato(bruto))?.id;
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Cache-Control", id ? "public, s-maxage=300" : "public, s-maxage=30");
+    return res.status(id ? 200 : 404).json(id ? { id } : { error: "nao_encontrado" });
+  }
+
   const lojaIos = resolvePolicy(process.env, "ios").policy.storeUrl;
   const lojaAndroid = resolvePolicy(process.env, "android").policy.storeUrl;
   const plataforma = detectarPlataforma(req.headers["user-agent"]);
-  const host = req.headers.host;
-  const origin =
-    typeof host === "string" && /^[a-z0-9.-]+(?::\d{1,5})?$/i.test(host)
-      ? `https://${host}`
-      : null;
-  const iconUrl = origin ? new URL("/tugyn-icon.png", origin).toString() : null;
-  const paginaUrl = origin
-    ? new URL(`/api/${ehCampeonato ? "campeonato" : tipo === "convite" ? "time/c" : ehTime ? "time" : "turma"}/${encodeURIComponent(bruto)}`, origin).toString()
-    : null;
-  // Escudos vêm do Cloudinary (a página da turma não mostra imagens de fora).
-  const cspComCloudinary =
-    "default-src 'none'; img-src 'self' https://res.cloudinary.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  // Endereço bonito (o mesmo que o app compartilha) no og:url e no cartão, em qualquer domínio deste projeto.
+  const enderecos = (idPublico: string) => ({
+    paginaUrl: origin ? new URL(caminhoPublico(tipo, idPublico), origin).toString() : null,
+    cartaoUrl: origin ? new URL(`/imagem/${tipo}${caminhoPublico(tipo, idPublico).replace(/^\/[a-z]+/, "")}`, origin).toString() : null,
+  });
+  // Escudos, fotos e banners vêm do Cloudinary.
+  res.setHeader("Content-Security-Policy", CABECALHOS_SEGURANCA["Content-Security-Policy"]);
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  // O conteúdo muda conforme o aparelho (qual loja mostrar): a CDN guarda uma cópia por User-Agent.
+  res.setHeader("Vary", "User-Agent");
 
-  if (ehCampeonato) {
-    const campeonato = await lerCampeonato(bruto);
-    res.setHeader("Content-Security-Policy", cspComCloudinary);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Vary", "User-Agent");
+  if (tipo === "campeonato") {
+    const r = await lerCampeonato(bruto);
     // 5 min na CDN: compartilhar no grupo não vira uma leitura por pessoa; vagas e situação se atualizam logo.
-    res.setHeader("Cache-Control", campeonato ? "public, s-maxage=300, stale-while-revalidate=600" : "public, s-maxage=60");
-    return res
-      .status(campeonato ? 200 : 404)
-      .send(renderizarPaginaCampeonato({ campeonato, id: bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
+    res.setHeader("Cache-Control", r ? "public, s-maxage=300, stale-while-revalidate=600" : "public, s-maxage=60");
+    const { paginaUrl, cartaoUrl } = enderecos(r?.id ?? bruto);
+    return res.status(r ? 200 : 404).send(
+      renderizarPaginaCampeonato({ campeonato: r?.campeonato ?? null, id: r?.id ?? bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: r ? cartaoUrl : null }),
+    );
   }
 
   if (tipo === "convite") {
     const convite = await lerConvite(bruto);
-    res.setHeader("Content-Security-Policy", cspComCloudinary);
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Vary", "User-Agent");
     // Pouco tempo na CDN: o link vence em 1 hora (o app confere o prazo de novo ao pedir).
     res.setHeader("Cache-Control", "public, s-maxage=60");
+    const { paginaUrl, cartaoUrl } = enderecos(bruto);
     return res
       .status(convite ? 200 : 404)
-      .send(renderizarPaginaConvite({ convite, codigo: bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
+      .send(renderizarPaginaConvite({ convite, codigo: bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: convite ? cartaoUrl : null }));
   }
 
-  if (ehTime) {
+  if (tipo === "time") {
     const time = await lerTime(bruto);
-    // As fotos dos jogadores vêm do Cloudinary (a página da turma não mostra imagens de fora).
-    res.setHeader(
-      "Content-Security-Policy",
-      "default-src 'none'; img-src 'self' https://res.cloudinary.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-    );
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Vary", "User-Agent");
     // 5 min na CDN: compartilhar no grupo não vira uma leitura por pessoa que abre; um jogador novo aparece logo.
     res.setHeader("Cache-Control", time ? "public, s-maxage=300, stale-while-revalidate=600" : "public, s-maxage=60");
-    return res.status(time ? 200 : 404).send(renderizarPaginaTime({ time, linkId: bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
+    const { paginaUrl, cartaoUrl } = enderecos(bruto);
+    return res
+      .status(time ? 200 : 404)
+      .send(renderizarPaginaTime({ time, linkId: bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: time ? cartaoUrl : null }));
   }
-  const previa = await lerPrevia(bruto);
 
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  // O conteúdo muda conforme o aparelho (qual loja mostrar): a CDN guarda uma cópia por User-Agent.
-  res.setHeader("Vary", "User-Agent");
+  const r = await lerTurma(bruto);
   res.setHeader("Cache-Control", "public, s-maxage=600, stale-while-revalidate=3600");
-  return res.status(200).send(renderizarPagina({ id: bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, previa }));
+  const { paginaUrl, cartaoUrl } = enderecos(bruto);
+  // O botão abre o app com o id da turma (resolvido do código); sem resolver, com o que veio (o app também resolve código).
+  return res.status(200).send(
+    renderizarPagina({ id: r?.turmaId ?? bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: r?.previa ? cartaoUrl : null, previa: r?.previa ?? null }),
+  );
 }

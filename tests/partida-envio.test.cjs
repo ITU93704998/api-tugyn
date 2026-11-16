@@ -118,7 +118,7 @@ test('LIB-01: reenviar o mesmo conteúdo não soma de novo (nem escreve)', async
 test('correção aplica só a diferença; tirar alguém da lista desconta', async () => {
   const { db, docs } = fakeDb(base());
   await enviar(db, 'org', corpo([...ANA1, { participanteId: 'bia', gols_partida: 2 }]));
-  await enviar(db, 'org', corpo([{ participanteId: 'ana', gols_partida: 3 }]));
+  await enviar(db, 'org', { ...corpo([{ participanteId: 'ana', gols_partida: 3 }]), revisaoEsperada: 1 });
   assert.equal(docs.get(`${T}/participantes/ana`).gols, 4);
   assert.equal(docs.get(`${T}/participantes/ana`).jogos, 2);
   assert.equal(docs.get(`${T}/participantes/bia`).gols, 0);
@@ -144,7 +144,7 @@ test('LIB-02: jogador que não é membro aprovado é recusado; números fora do 
 
 test('versão gravada adulterada (lista com 99999) não vira desconto/soma absurdo', async () => {
   const { db, docs } = fakeDb(base({ docs: { [`${T}/partidas/p1`]: { jogadores: [{ participanteId: 'ana', gols_partida: 99999 }], corrigivelAte: ts_(AGORA + HORA), salvadoEm: ts_(AGORA - HORA), temporada: 't2026_6', diaDoJogo: '2026-11-05' } } }));
-  await enviar(db, 'org', corpo(ANA1));
+  await enviar(db, 'org', { ...corpo(ANA1), revisaoEsperada: 0 }); // gravada sem revisão (versão anterior) = revisão 0
   // Antes tratado como 0 gols (fora do formato) com 1 jogo: agora 1 gol → +1 gol, jogos igual.
   assert.equal(docs.get(`${T}/participantes/ana`).gols, 2);
   assert.equal(docs.get(`${T}/participantes/ana`).jogos, 1);
@@ -167,7 +167,7 @@ test('organizador temporário no prazo envia; vencido, reaprovado depois ou memb
 
 test('prazo de correção encerrado e turma inexistente', async () => {
   const { db } = fakeDb(base({ docs: { [`${T}/partidas/p1`]: { jogadores: ANA1, corrigivelAte: ts_(AGORA - 1), salvadoEm: ts_(AGORA - 30 * HORA) } } }));
-  const r = await enviar(db, 'org', corpo([{ participanteId: 'ana', gols_partida: 2 }]));
+  const r = await enviar(db, 'org', { ...corpo([{ participanteId: 'ana', gols_partida: 2 }]), revisaoEsperada: 0 });
   assert.equal(r.code, 'prazo_encerrado');
   const vazio = fakeDb({});
   assert.equal((await enviar(vazio.db, 'org', corpo(ANA1))).code, 'turma_nao_encontrada');
@@ -176,7 +176,8 @@ test('prazo de correção encerrado e turma inexistente', async () => {
 test('modalidade e temporada gravadas não mudam na correção', async () => {
   const { db, docs } = fakeDb(base());
   await enviar(db, 'org', corpo(ANA1));
-  await enviar(db, 'org', corpo([{ participanteId: 'ana', gols_partida: 2 }], { modalidade: 'futebol' }));
+  const corr = await enviar(db, 'org', { ...corpo([{ participanteId: 'ana', gols_partida: 2 }], { modalidade: 'futebol' }), revisaoEsperada: 1 });
+  assert.equal(corr.ok, true);
   assert.equal(docs.get(`${T}/partidas/p1`).modalidade, 'futsal');
   assert.equal(docs.get(`${T}/partidas/p1`).temporada, 't2026_6');
 });
@@ -186,4 +187,51 @@ test('prazo igual ao do app: meio-dia do dia seguinte, no máximo 35 h do 1º en
   assert.equal(mod.calcularCorrigivelAte(jogo, jogo), Date.parse('2026-11-06T15:00:00Z'));
   const tarde = Date.parse('2026-11-06T18:00:00Z');
   assert.equal(mod.calcularCorrigivelAte(jogo, tarde), tarde + 2 * HORA);
+});
+
+test('auditoria: turma encerrada pela moderação recusa envio do dono; encerrada pelo organizador só aceita correção', async () => {
+  const mod1 = fakeDb(base({ turma: { status: 'encerrada', ativo: false, encerradaPor: 'moderacao' } }));
+  const r1 = await enviar(mod1.db, 'org', corpo(ANA1));
+  assert.equal(r1.ok, false); assert.equal(r1.code, 'turma_encerrada'); assert.equal(mod1.docs.has(`${T}/partidas/p1`), false);
+  assert.equal(mod1.docs.get(`${T}/participantes/ana`).gols, 1);
+  const vol = fakeDb(base({ turma: { status: 'encerrada', ativo: false } }));
+  assert.equal((await enviar(vol.db, 'org', corpo(ANA1))).code, 'turma_encerrada', 'partida nova recusada');
+  const comPartida = fakeDb(base());
+  await enviar(comPartida.db, 'org', corpo(ANA1));
+  comPartida.docs.get(T).status = 'encerrada'; comPartida.docs.get(T).ativo = false;
+  const corr = await enviar(comPartida.db, 'org', { ...corpo([{ ...ANA1[0], gols_partida: 2 }]), revisaoEsperada: 1 });
+  assert.equal(corr.ok, true, 'correção no prazo de partida já enviada continua possível');
+});
+
+test('auditoria: reenvio antigo não desfaz a correção mais nova (revisão); retry idêntico continua confirmado', async () => {
+  const { db, docs } = fakeDb(base());
+  const r1 = await enviar(db, 'org', { ...corpo(ANA1), revisaoEsperada: 0 });
+  assert.equal(r1.revisao, 1);
+  const r2 = await enviar(db, 'org', { ...corpo([{ ...ANA1[0], gols_partida: 5 }]), revisaoEsperada: 1 });
+  assert.equal(r2.ok, true); assert.equal(r2.revisao, 2);
+  const velho = await enviar(db, 'org', { ...corpo(ANA1), revisaoEsperada: 1 });
+  assert.equal(velho.ok, false); assert.equal(velho.code, 'partida_desatualizada'); assert.equal(velho.status, 409);
+  assert.equal(docs.get(`${T}/partidas/p1`).jogadores[0].gols_partida, 5);
+  const retry = await enviar(db, 'org', { ...corpo([{ ...ANA1[0], gols_partida: 5 }]), revisaoEsperada: 1 });
+  assert.equal(retry.ok, true, 'mesmo conteúdo já gravado: idempotente'); assert.equal(retry.revisao, 2);
+  // Sem revisão (app antigo ou partida enviada por versão anterior): não muda partida já gravada; devolve a revisão atual.
+  const antigo = await enviar(db, 'org', corpo([{ ...ANA1[0], gols_partida: 3 }]));
+  assert.equal(antigo.ok, false); assert.equal(antigo.code, 'partida_desatualizada'); assert.equal(antigo.revisaoAtual, 2);
+  assert.equal(docs.get(`${T}/partidas/p1`).jogadores[0].gols_partida, 5);
+  // Retry idêntico sem revisão continua confirmado (resposta perdida de app antigo).
+  assert.equal((await enviar(db, 'org', corpo([{ ...ANA1[0], gols_partida: 5 }]))).ok, true);
+  // Substituição consciente: com a revisão atual devolvida no conflito.
+  const subst = await enviar(db, 'org', { ...corpo([{ ...ANA1[0], gols_partida: 3 }]), revisaoEsperada: antigo.revisaoAtual });
+  assert.equal(subst.ok, true); assert.equal(subst.revisao, 3);
+});
+
+test('revalidação AUD-04: revisão malformada é recusada; partida nova aceita sem revisão ou com 0, nunca com outra', async () => {
+  for (const ruim of ['1', -1, 1.5, true, {}]) {
+    const r = mod.parsePartidaEnviada({ ...corpo(ANA1), revisaoEsperada: ruim });
+    assert.equal(r.ok, false); assert.equal(r.status, 400, 'revisão ' + JSON.stringify(ruim));
+  }
+  assert.equal((await enviar(fakeDb(base()).db, 'org', corpo(ANA1))).ok, true);
+  assert.equal((await enviar(fakeDb(base()).db, 'org', { ...corpo(ANA1), revisaoEsperada: null })).ok, true);
+  const outra = await enviar(fakeDb(base()).db, 'org', { ...corpo(ANA1), revisaoEsperada: 3 });
+  assert.equal(outra.code, 'partida_desatualizada'); assert.equal(outra.revisaoAtual, 0);
 });

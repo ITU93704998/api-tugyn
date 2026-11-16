@@ -154,6 +154,7 @@ interface PaginaTimeParams {
   plataforma: Plataforma;
   iconUrl?: string | null;
   paginaUrl?: string | null;
+  cartaoUrl?: string | null;
 }
 
 /** Imagem da prévia do link: o escudo (600x600) quando existe; senão, o ícone do app. */
@@ -185,10 +186,11 @@ interface PaginaConviteParams {
   plataforma: Plataforma;
   iconUrl?: string | null;
   paginaUrl?: string | null;
+  cartaoUrl?: string | null;
 }
 
 /** Página do link de convocação (vale 1 hora): o time e o botão que abre o app para pedir para entrar. */
-export const renderizarPaginaConvite = ({ convite, codigo, agoraMs, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaConviteParams): string => {
+export const renderizarPaginaConvite = ({ convite, codigo, agoraMs, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl }: PaginaConviteParams): string => {
   const valido = Boolean(convite && convite.expiraEmMs > agoraMs);
   const titulo = convite ? `Convocação: ${convite.nome}${convite.sigla ? ` (${convite.sigla})` : ""}` : "Convocação para um time no Tugyn";
   const descricao = convite && valido
@@ -210,6 +212,7 @@ export const renderizarPaginaConvite = ({ convite, codigo, agoraMs, lojaIos, loj
     imagemMeta: metaDaImagem(convite?.imagem ?? "", iconUrl),
     iconUrl,
     paginaUrl,
+    cartaoUrl,
     conteudo: `${corpo}
   ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}`,
   });
@@ -242,7 +245,7 @@ const cartaoDoJogador = (j: JogadorPublico): string => {
     </li>`;
 };
 
-export const renderizarPaginaTime = ({ time, linkId, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaTimeParams): string => {
+export const renderizarPaginaTime = ({ time, linkId, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl }: PaginaTimeParams): string => {
   // Antes era só "tugyn://": abria o app na tela inicial, não o time.
   const abrir = time && linkId && isValidLinkId(linkId) ? `tugyn://time-link/${encodeURIComponent(linkId)}` : "tugyn://";
   const total = time?.jogadores.length ?? 0;
@@ -272,6 +275,7 @@ export const renderizarPaginaTime = ({ time, linkId, lojaIos, lojaAndroid, plata
     imagemMeta: metaDaImagem(time?.imagem ?? "", iconUrl),
     iconUrl,
     paginaUrl,
+    cartaoUrl,
     conteudo: `${corpo}
   <a class="btn" href="${esc(abrir)}">${time ? "Abrir o time no Tugyn" : "Abrir no Tugyn"}</a>
   ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}`,

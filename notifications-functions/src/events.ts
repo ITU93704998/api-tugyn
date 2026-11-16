@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   authorizeAttendanceConfirmed, authorizeGameOpened, authorizeJoinApproved, authorizeJoinRequest,
-  DEDUPE_MS, DEDUPE_PARTIDA_MS, diaDeBrasilia,
+  authorizeTimeAprovado, authorizeTimeConvocacao, authorizeTimePedido,
+  DEDUPE_MS, DEDUPE_PARTIDA_MS, DEDUPE_TIME_MS, diaDeBrasilia, type TimeForPush,
 } from "../../api/_lib/push";
 import type { Aviso } from "../../api/_lib/pushEnvio";
 import { isSafeUid } from "../../api/_lib/validation";
@@ -51,6 +52,38 @@ export function gameEvents(change: Change, dayId: string, turma: Data | null, cu
     if (!uid(actor) || Object.prototype.hasOwnProperty.call(previous, actor)) continue;
     const auth = authorizeAttendanceConfirmed(actor, change.turmaId, dayId, turma, current);
     if (auth.ok) events.push(plan(change, "presenca_confirmada", actor, { evento: "presenca_confirmada", turmaId: change.turmaId, dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_PARTIDA_MS, recipientUids: [auth.recipientUid], dedupeUid: actor, draft: auth.draft }));
+  }
+  return events;
+}
+
+const lista = (value: unknown): string[] => Array.isArray(value) ? value.filter(uid) : [];
+
+/**
+ * Times (convocação, pedido pelo link, aprovação): o aviso nasce da mudança salva, sem depender do aparelho continuar aberto.
+ * Mesmas autorizações e chaves de dedupe da rota `/api/push` (app antigo): as duas vias reservam a mesma ocorrência e o
+ * aviso sai uma vez só. `current` é o documento relido agora: mudança já desfeita não avisa.
+ */
+export function timeEvents(change: Change, timeId: string, current: Data | null): PlannedEvent[] {
+  if (!uid(timeId) || !change.after || !current) return [];
+  const time = current as TimeForPush;
+  const dono = current.donoId;
+  if (!uid(dono)) return [];
+  const events: PlannedEvent[] = [];
+  const antes = (campo: string) => new Set(lista(change.before?.[campo]));
+  const novos = (campo: string) => { const a = antes(campo); return lista(change.after?.[campo]).filter((id) => !a.has(id)); };
+  for (const alvo of novos("convidados")) {
+    const auth = authorizeTimeConvocacao(dono, timeId, alvo, time);
+    if (auth.ok) events.push(plan(change, "time_convocacao", alvo, { evento: "time_convocacao", turmaId: "", dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_TIME_MS, recipientUids: [auth.recipientUid], dedupeUid: auth.recipientUid, draft: auth.draft }));
+  }
+  for (const quem of novos("solicitantes")) {
+    const auth = authorizeTimePedido(quem, timeId, time);
+    if (auth.ok) events.push(plan(change, "time_pedido", quem, { evento: "time_pedido", turmaId: "", dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_TIME_MS, recipientUids: [auth.recipientUid], dedupeUid: auth.recipientUid, draft: auth.draft }));
+  }
+  const aprovado = change.after.ultimoAprovado;
+  // Só quem ENTROU nesta mudança pela aprovação (membro antigo ou quem aceitou convocação não recebe "você entrou").
+  if (uid(aprovado) && lista(change.after.membros).includes(aprovado) && !antes("membros").has(aprovado)) {
+    const auth = authorizeTimeAprovado(dono, timeId, aprovado, time);
+    if (auth.ok) events.push(plan(change, "time_aprovado", aprovado, { evento: "time_aprovado", turmaId: "", dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_TIME_MS, recipientUids: [auth.recipientUid], dedupeUid: auth.recipientUid, draft: auth.draft }));
   }
   return events;
 }

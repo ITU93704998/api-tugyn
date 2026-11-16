@@ -351,7 +351,8 @@ async function enviarPartidaRota(req: VercelRequest, res: VercelResponse, uid: s
   try {
     const db = getFirestore(getFirebaseApp());
     const resultado = await enviarPartida(db, uid, parsed.value);
-    if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
+    // Conflito de versão: devolve a revisão atual, para o app oferecer "substituir pela deste aparelho" de propósito.
+    if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error, ...(resultado.revisaoAtual !== undefined ? { revisaoAtual: resultado.revisaoAtual } : {}) });
     // Resumo geral do perfil de quem mudou (a pendência gravada na transação garante o recálculo se isto falhar).
     let pendentes: string[] = [];
     if (resultado.participantesAlterados.length) {
@@ -364,6 +365,7 @@ async function enviarPartidaRota(req: VercelRequest, res: VercelResponse, uid: s
       alterado: resultado.alterado,
       participantesAlterados: resultado.participantesAlterados,
       corrigivelAte: resultado.corrigivelAte,
+      revisao: resultado.revisao,
       ...(pendentes.length ? { pendentes } : {}),
     });
   } catch (erro) {

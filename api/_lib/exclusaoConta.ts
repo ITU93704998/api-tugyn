@@ -11,7 +11,11 @@
  *  - "pos_exclusao": etapas que dependem de a conta já ter saído, cada uma com estado e tentativas próprios:
  *      avaliacoesDadas  → cada avaliação que ela DEU sai do resumo do avaliado e é apagada;
  *      vagasAdversarios → a vaga que cada desafio dela ocupava no adversário é liberada;
- *      imagens          → todas as imagens dela em TODAS as contas do Cloudinary (conta sem credencial = pendente).
+ *      imagens          → todas as imagens dela em TODAS as contas do Cloudinary (conta sem credencial = pendente);
+ *      exMembros        → turmas que ela JÁ TINHA DEIXADO (só o documento de participante guarda nome/foto/histórico):
+ *                         anonimiza o participante e as partidas. Precisa do índice de grupo de coleções
+ *                         `participantes.id`; sem ele a etapa fica PENDENTE (`indice_participantes_ausente`) e a rotina
+ *                         tenta de novo, em vez de dar a limpeza por completa.
  *  - verificação final: confere que nada ficou; o que achar volta a ser pendente (ou refaz o fluxo principal).
  *
  * O que é APAGADO: perfil e subcoleções, usernames, tokens/avisos de push, desafios dela (os dois lados), avaliações
@@ -20,8 +24,8 @@
  * continuam ("Usuário removido", sem foto) e o organizador das turmas encerradas.
  */
 
-export type EtapaPosExclusao = "avaliacoesDadas" | "vagasAdversarios" | "imagens";
-export const ETAPAS_POS_EXCLUSAO: readonly EtapaPosExclusao[] = ["avaliacoesDadas", "vagasAdversarios", "imagens"];
+export type EtapaPosExclusao = "avaliacoesDadas" | "vagasAdversarios" | "imagens" | "exMembros";
+export const ETAPAS_POS_EXCLUSAO: readonly EtapaPosExclusao[] = ["avaliacoesDadas", "vagasAdversarios", "imagens", "exMembros"];
 
 export interface EstadoDaEtapa {
   ok: boolean;
@@ -68,6 +72,8 @@ export interface Restos {
   vagasDeAdversarios: number;
   pushTokens: number;
   reservas: number;
+  /** Participantes (turmas deixadas) ainda sem anonimizar; null: não deu para conferir (índice ausente). */
+  exMembros?: number | null;
 }
 
 /** Verificação final: o que ficou, se o fluxo principal precisa rodar de novo e quais etapas voltam a ser pendentes. */
@@ -85,6 +91,7 @@ export const avaliarRestos = (r: Restos): { pendencias: string[]; refazerExclusa
   const refazerEtapas: EtapaPosExclusao[] = [
     ...(r.avaliacoesDadas > 0 ? (["avaliacoesDadas"] as const) : []),
     ...(r.vagasDeAdversarios > 0 ? (["vagasAdversarios"] as const) : []),
+    ...(r.exMembros === null || (r.exMembros ?? 0) > 0 ? (["exMembros"] as const) : []),
   ];
   const pendencias = [...principais.filter(([, sobrou]) => sobrou).map(([nome]) => nome), ...refazerEtapas];
   return { pendencias, refazerExclusao: principais.some(([, sobrou]) => sobrou), refazerEtapas };

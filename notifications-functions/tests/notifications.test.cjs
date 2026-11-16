@@ -128,3 +128,37 @@ test('old day, game reopening, withdrawal and inactive turma do not create notif
   assert.equal(f.events.gameEvents(change(f,{...game,confirmados:{ana:{nome:'Ana'}}},game),'20261030',turma,game,f.options.now()).length,0);
   assert.equal(f.events.gameEvents(change(f,null,game),'20261030',{...turma,ativo:false},game,f.options.now()).length,0);
 });
+// AUD-07: avisos de times nascem da mudança salva (gatilho), com as mesmas chaves da rota antiga do app.
+const timeBase={nome:'Os Brabos',donoId:'owner',membros:['owner'],convidados:[],solicitantes:[],jogadores:{owner:{nome:'Dono',entrouEm:1000}},convites:{},pedidos:{},modalidade:'society'};
+function timeChange(f,before,after,id='time-event'){return{id,source:'firestore/test',timeMs:f.options.now(),turmaId:'',before,after};}
+test('times: convocação, pedido e aprovação geram um aviso cada; metadados não avisam',()=>{
+  const f=fixture();
+  const convocado={...timeBase,convidados:['ana'],convites:{ana:{nome:'Ana',em:5000}}};
+  const [conv]=f.events.timeEvents(timeChange(f,timeBase,convocado),'owner_1',convocado);
+  assert.equal(conv.aviso.evento,'time_convocacao');assert.deepEqual(Array.from(conv.aviso.recipientUids),['ana']);
+  assert.equal(conv.aviso.dedupeKey,'time_convocacao_owner_1_ana_5000');
+  const pedido={...timeBase,solicitantes:['beto'],pedidos:{beto:{nome:'Beto',em:7000}}};
+  const [ped]=f.events.timeEvents(timeChange(f,timeBase,pedido),'owner_1',pedido);
+  assert.equal(ped.aviso.evento,'time_pedido');assert.deepEqual(Array.from(ped.aviso.recipientUids),['owner']);
+  const aprovado={...timeBase,membros:['owner','beto'],ultimoAprovado:'beto',jogadores:{...timeBase.jogadores,beto:{nome:'Beto',entrouEm:9000}}};
+  const [apr]=f.events.timeEvents(timeChange(f,pedido,aprovado),'owner_1',aprovado);
+  assert.equal(apr.aviso.evento,'time_aprovado');assert.equal(apr.aviso.dedupeKey,'time_aprovado_owner_1_beto_9000');
+  // Renomear o time, mexer em quem já era membro ou mudança já desfeita (doc atual sem a convocação): nada.
+  assert.equal(f.events.timeEvents(timeChange(f,aprovado,{...aprovado,nome:'Novo'}),'owner_1',{...aprovado,nome:'Novo'}).length,0);
+  assert.equal(f.events.timeEvents(timeChange(f,timeBase,convocado),'owner_1',timeBase).length,0);
+});
+test('times: chamada antiga do app e gatilho enviam o aviso uma vez só',async()=>{
+  const f=fixture();f.token(A,'ana');
+  const convocado={...timeBase,convidados:['ana'],convites:{ana:{nome:'Ana',em:5000}}};
+  const [event]=f.events.timeEvents(timeChange(f,timeBase,convocado),'owner_1',convocado);
+  await f.consumer.enviarAviso(f.db,event.aviso,f.options);
+  await f.outbox.enqueueEvent(f.db,event,f.options.now());await f.outbox.dispatchEvent(f.db,ledger(f,event),f.options);
+  assert.equal(f.calls.length,1);
+});
+test('times: app fechado logo depois de salvar — o gatilho sozinho entrega',async()=>{
+  const f=fixture();f.token(A,'owner');
+  const pedido={...timeBase,solicitantes:['beto'],pedidos:{beto:{nome:'Beto',em:7000}}};
+  const [event]=f.events.timeEvents(timeChange(f,timeBase,pedido),'owner_1',pedido);
+  await f.outbox.enqueueEvent(f.db,event,f.options.now());await f.outbox.dispatchEvent(f.db,ledger(f,event),f.options);
+  assert.equal(f.calls.length,1);assert.equal(f.get(ledger(f,event).path).state,'done');
+});

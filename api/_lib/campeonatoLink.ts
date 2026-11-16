@@ -1,5 +1,5 @@
 /**
- * Página pública de um campeonato entre times: https://<servidor>/api/campeonato/<id>
+ * Página pública de um campeonato entre times: https://link.tugyntec.com.br/campeonato/<código> (ou o antigo /api/campeonato/<id>)
  * (vercel.json reescreve para /api/turma/<id>?tipo=campeonato, sem criar uma função nova; mesma lógica de turma e time).
  *
  * Mostra só o que o catálogo do app já mostra a qualquer pessoa: nome, situação, formato, modalidade, cidade, datas,
@@ -65,12 +65,13 @@ export const situacaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { t
 interface PaginaCampeonatoParams {
   campeonato: CampeonatoPublico | null; id: string; agoraMs: number;
   lojaIos: string | null; lojaAndroid: string | null; plataforma: Plataforma; iconUrl?: string | null; paginaUrl?: string | null;
+  cartaoUrl?: string | null;
 }
 
 const linhaInfo = (rotulo: string, valor: string): string =>
   `<li style="display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid var(--borda)"><span style="color:var(--texto2)">${esc(rotulo)}</span><strong style="text-align:right">${esc(valor)}</strong></li>`;
 
-export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }: PaginaCampeonatoParams): string => {
+export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl }: PaginaCampeonatoParams): string => {
   const abrir = c && isValidCampeonatoId(id) ? `tugyn://campeonato/${encodeURIComponent(id)}` : "tugyn://";
   const local = c ? [c.cidade, c.estado].filter(Boolean).join(", ") : "";
   const situacao = c ? situacaoDoCampeonato(c, agoraMs) : null;
@@ -105,9 +106,23 @@ export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos
   <div class="faixa faixa-aviso"><span class="faixa-icone" aria-hidden="true">!</span>O link pode estar errado ou o campeonato foi excluído.</div>`;
 
   return documentoPublico({
-    titulo, descricao, imagemMeta, iconUrl, paginaUrl,
+    titulo, descricao, imagemMeta, iconUrl, paginaUrl, cartaoUrl,
     conteudo: `${corpo}
   <a class="btn" href="${esc(abrir)}">${c ? "Abrir o campeonato no Tugyn" : "Abrir no Tugyn"}</a>
   ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}`,
   });
+};
+
+/** Dados do cartão da prévia (imagem 1200x630): só o que a página já mostra. */
+export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rotulo: string; titulo: string; detalhes: string; destaque: string } => {
+  const local = [c.cidade, c.estado].filter(Boolean).join(", ");
+  const vagas = Math.max(0, c.maxTimes - c.aprovados);
+  const destaque =
+    c.status === "cancelado" ? "Campeonato cancelado"
+    : c.status === "encerrado" ? "Encerrado · veja o campeão e a tabela"
+    : c.status === "em_andamento" ? "Em andamento · acompanhe os jogos e a tabela"
+    : c.inscricoesAte !== null && c.inscricoesAte <= agoraMs ? "Inscrições encerradas · começa em breve"
+    : [c.inscricoesAte !== null ? `Inscrições até ${dataBrasilia(c.inscricoesAte).slice(0, 5)}` : "Inscrições abertas",
+        `${vagas} ${vagas === 1 ? "vaga" : "vagas"}`, reais(c.inscricaoCentavos)].join(" · ");
+  return { rotulo: "Campeonato entre times", titulo: c.nome, detalhes: [c.formato, c.modalidade, local].filter(Boolean).join(" · "), destaque };
 };

@@ -1,0 +1,125 @@
+/**
+ * Imagem da prévia dos links (1200x630, PNG): o "cartão" grande que o WhatsApp, o Instagram e afins mostram ao colar o link.
+ * Gerada na hora pelo @vercel/og a partir dos MESMOS dados públicos da página (nada além do que a página já mostra) e
+ * guardada na CDN. Fontes (Inter) e logo vêm de dentro do projeto; banner e escudo, só do próprio Cloudinary, com prazo
+ * curto: se não vierem, o cartão sai sem eles em vez de falhar.
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+export interface DadosCartao {
+  /** Faixa de cima: "CAMPEONATO ENTRE TIMES", "CONVITE PARA A TURMA"... */
+  rotulo: string;
+  titulo: string;
+  /** Linha de detalhes ("Mata-mata · Society · Palmas, TO"). */
+  detalhes: string;
+  /** A chamada em destaque ("Inscrições abertas até 20/11 · 4 vagas"). */
+  destaque: string;
+  /** Banner do Cloudinary (fundo), ou "". */
+  fundo?: string;
+  /** Escudo do time (à direita): imagem do Cloudinary ou, sem ela, a sigla na cor do time. */
+  escudo?: { url: string; cor: string; sigla: string } | null;
+}
+
+export const LARGURA_CARTAO = 1200;
+export const ALTURA_CARTAO = 630;
+
+let fontes: { name: string; data: Buffer; weight: 400 | 700 | 800; style: "normal" }[] | null = null;
+let logo: string | null = null;
+const carregarFontes = () =>
+  (fontes ??= [
+    { name: "Inter", data: readFileSync(join(process.cwd(), "api", "assets", "fontes", "inter-400.woff")), weight: 400, style: "normal" },
+    { name: "Inter", data: readFileSync(join(process.cwd(), "api", "assets", "fontes", "inter-700.woff")), weight: 700, style: "normal" },
+    { name: "Inter", data: readFileSync(join(process.cwd(), "api", "assets", "fontes", "inter-800.woff")), weight: 800, style: "normal" },
+  ]);
+const carregarLogo = (): string => (logo ??= `data:image/png;base64,${readFileSync(join(process.cwd(), "api", "assets", "icon.png")).toString("base64")}`);
+
+const CLOUDINARY = /^https:\/\/res\.cloudinary\.com\/[a-z0-9_-]+\/image\/upload\/[A-Za-z0-9_\-./,]+$/i;
+const MAX_IMAGEM = 4 * 1024 * 1024;
+
+/** Imagem do Cloudinary como data URI (o gerador não busca nada sozinho). null se não for do Cloudinary, demorar ou falhar. */
+export const imagemComoDataUri = async (url: string | undefined, prazoMs = 2500): Promise<string | null> => {
+  if (!url || !CLOUDINARY.test(url)) return null;
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), prazoMs);
+  try {
+    const r = await fetch(url, { signal: controle.signal, redirect: "error" });
+    const tipo = r.headers.get("content-type") ?? "";
+    if (!r.ok || !/^image\/(png|jpe?g|webp)$/.test(tipo.split(";")[0].trim())) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    return buf.length > 0 && buf.length <= MAX_IMAGEM ? `data:${tipo.split(";")[0].trim()};base64,${buf.toString("base64")}` : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const cortar = (texto: string, max: number): string => (texto.length > max ? `${texto.slice(0, max - 1).trimEnd()}…` : texto);
+const corValida = (cor: string): string => (/^#[0-9A-Fa-f]{6}$/.test(cor) ? cor : "#FE7552");
+
+type No = { type: string; props: Record<string, unknown> };
+const div = (style: Record<string, unknown>, ...children: (No | string | null)[]): No => ({
+  type: "div",
+  props: { style: { display: "flex", ...style }, children: children.filter((c) => c !== null) },
+});
+const img = (src: string, style: Record<string, unknown>): No => ({ type: "img", props: { src, style } });
+
+/** A árvore do cartão (sem JSX: objetos no formato que o gerador aceita). Separada para os testes. */
+export const arvoreDoCartao = (d: DadosCartao, imagens: { logo: string; fundo: string | null; escudo: string | null }): No => {
+  const titulo = cortar(d.titulo, 60);
+  const tamanhoTitulo = titulo.length > 34 ? 60 : titulo.length > 22 ? 72 : 84;
+  const temEscudo = Boolean(d.escudo);
+  const escudo = d.escudo
+    ? imagens.escudo
+      ? div({ width: 280, height: 280, borderRadius: 140, background: "#FFFFFF", alignItems: "center", justifyContent: "center" },
+          img(imagens.escudo, { width: 230, height: 230, objectFit: "contain" }))
+      : div({ width: 280, height: 280, borderRadius: 140, background: corValida(d.escudo.cor), alignItems: "center", justifyContent: "center",
+            color: "#FFFFFF", fontSize: 96, fontWeight: 800, border: "8px solid rgba(255,255,255,0.85)" }, cortar(d.escudo.sigla || d.titulo.slice(0, 3).toUpperCase(), 3))
+    : null;
+
+  return div(
+    { width: LARGURA_CARTAO, height: ALTURA_CARTAO, position: "relative", background: "#17212F", fontFamily: "Inter", color: "#FFFFFF" },
+    imagens.fundo ? img(imagens.fundo, { position: "absolute", left: 0, top: 0, width: LARGURA_CARTAO, height: ALTURA_CARTAO, objectFit: "cover" }) : null,
+    // Véu: com banner, escurece para o texto ler bem; sem banner, o brilho laranja da marca.
+    div({
+      position: "absolute", left: 0, top: 0, width: LARGURA_CARTAO, height: ALTURA_CARTAO,
+      backgroundImage: imagens.fundo
+        ? "linear-gradient(90deg, rgba(14,20,29,0.94) 0%, rgba(14,20,29,0.82) 55%, rgba(14,20,29,0.45) 100%)"
+        : "radial-gradient(circle at 88% 0%, rgba(254,117,82,0.55) 0%, rgba(254,117,82,0) 55%), radial-gradient(circle at 0% 100%, rgba(254,117,82,0.18) 0%, rgba(254,117,82,0) 45%)",
+    }),
+    div(
+      { position: "absolute", left: 0, top: 0, width: LARGURA_CARTAO, height: ALTURA_CARTAO, padding: "56px 64px", flexDirection: "column", justifyContent: "space-between" },
+      // Marca
+      div({ alignItems: "center", gap: 18 },
+        img(imagens.logo, { width: 64, height: 64, borderRadius: 16 }),
+        div({ fontSize: 40, fontWeight: 800, letterSpacing: -1 }, "Tugyn")),
+      // Miolo
+      div({ alignItems: "center", justifyContent: "space-between", gap: 40 },
+        div({ flexDirection: "column", gap: 18, maxWidth: temEscudo ? 720 : 1072 },
+          div({ alignSelf: "flex-start", background: "#FE7552", color: "#FFFFFF", fontSize: 24, fontWeight: 800, letterSpacing: 2, padding: "8px 18px", borderRadius: 999 },
+            cortar(d.rotulo.toUpperCase(), 40)),
+          div({ fontSize: tamanhoTitulo, fontWeight: 800, lineHeight: 1.05, letterSpacing: -2 }, titulo),
+          d.detalhes ? div({ fontSize: 32, fontWeight: 400, color: "#E4DED8" }, cortar(d.detalhes, 70)) : null),
+        escudo),
+      // Rodapé
+      div({ alignItems: "center", justifyContent: "space-between" },
+        d.destaque ? div({ fontSize: 30, fontWeight: 700, color: "#FFB59E" }, cortar(d.destaque, 64)) : div({}),
+        div({ fontSize: 24, fontWeight: 700, color: "#B5AEA6" }, "Abra no app Tugyn")),
+    ),
+  );
+};
+
+/** PNG do cartão. Lança se o gerador falhar (quem chama responde com o ícone). */
+export const gerarCartao = async (d: DadosCartao): Promise<Buffer> => {
+  const [fundo, escudo] = await Promise.all([imagemComoDataUri(d.fundo), imagemComoDataUri(d.escudo?.url)]);
+  // Carregado só quando há imagem para gerar: as páginas (a maioria dos pedidos) não pagam o custo do gerador.
+  const { ImageResponse } = await import("@vercel/og");
+  const arvore = arvoreDoCartao(d, { logo: carregarLogo(), fundo, escudo });
+  const resposta = new ImageResponse(arvore as unknown as ConstructorParameters<typeof ImageResponse>[0], {
+    width: LARGURA_CARTAO,
+    height: ALTURA_CARTAO,
+    fonts: carregarFontes(),
+  });
+  return Buffer.from(await resposta.arrayBuffer());
+};

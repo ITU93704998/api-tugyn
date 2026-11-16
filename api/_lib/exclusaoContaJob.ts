@@ -1,6 +1,6 @@
 import { getAuth } from "firebase-admin/auth";
 import { FieldPath, FieldValue, type Firestore, type QueryDocumentSnapshot } from "firebase-admin/firestore";
-import { type DeletionOutcome, excluirConta } from "./accountDeletion";
+import { type DeletionOutcome, anonimizarTurmasDeixadas, contarTurmasDeixadasPendentes, excluirConta, isMissingIndex } from "./accountDeletion";
 import { getFirebaseApp } from "./auth";
 import { deltaDeRemocao, notasDe } from "./avaliacoes";
 import { apagarImagensDoUsuario } from "./cloudinaryCleanup";
@@ -133,6 +133,15 @@ const rodarEtapa = async (db: Firestore, uid: string, etapa: EtapaPosExclusao, j
       const pendencias = await apagarImagensDoUsuario(uid);
       if (pendencias.length) return { ok: false, tentativas, pendencias };
     }
+    if (etapa === "exMembros") {
+      try {
+        await anonimizarTurmasDeixadas(db, uid);
+      } catch (erro) {
+        // Sem o índice não dá para achar as turmas deixadas: pendente (e alerta), nunca "concluído com aviso".
+        if (isMissingIndex(erro)) return { ok: false, tentativas, pendencias: ["indice_participantes_ausente"] };
+        throw erro;
+      }
+    }
     return { ok: true, tentativas };
   } catch (erro) {
     return { ok: false, tentativas, erro: mensagem(erro) };
@@ -155,7 +164,7 @@ const verificarRestos = async (db: Firestore, uid: string, pares: Record<string,
   const vagasDeles = adversarios.length ? await db.getAll(...adversarios.map((o) => db.doc(`desafiosVagas/${o}`))) : [];
   const ids = new Set(Object.keys(pares));
   const vagasDeAdversarios = vagasDeles.filter((d) => Object.keys((d.get("ativos") as Record<string, unknown> | undefined) ?? {}).some((id) => ids.has(id))).length;
-  const [perfil, vagas, usernames, dadas, recebidas, criados, recebidos, pushTokens, reservas] = await Promise.all([
+  const [perfil, vagas, usernames, dadas, recebidas, criados, recebidos, pushTokens, reservas, exMembros] = await Promise.all([
     db.doc(`users/${uid}`).get(),
     db.doc(`desafiosVagas/${uid}`).get(),
     contar(db, "usernames", "uid", uid),
@@ -165,6 +174,7 @@ const verificarRestos = async (db: Firestore, uid: string, pares: Record<string,
     contar(db, "desafios", "desafiadoId", uid),
     contar(db, "pushTokens", "uid", uid),
     contar(db, COLECAO_RESERVAS, "uid", uid),
+    contarTurmasDeixadasPendentes(db, uid),
   ]);
   return avaliarRestos({
     perfil: perfil.exists,
@@ -177,6 +187,7 @@ const verificarRestos = async (db: Firestore, uid: string, pares: Record<string,
     vagasDeAdversarios,
     pushTokens,
     reservas,
+    exMembros,
   });
 };
 

@@ -1,5 +1,5 @@
 import { excluirIdentidadeCT } from "./campeonatosTimesExclusao";
-import { type DocumentData, FieldValue, type Firestore, type UpdateData, type WriteBatch } from "firebase-admin/firestore";
+import { type DocumentData, FieldValue, type Firestore, type QueryDocumentSnapshot, type UpdateData, type WriteBatch } from "firebase-admin/firestore";
 import { encerrarAmistososDoTime } from "./amistosos";
 
 /**
@@ -244,7 +244,8 @@ const sairDaTurma = async (
         batch.update(participanteRef, {
           nome: REMOVED_NAME,
           urlPhoto: "",
-          anonimizado: true,
+          // `anonimizado: true` só no fim, depois de TODAS as partidas (é o que diz que a turma está limpa).
+          anonimizado: false,
           status: turma.participante?.status === "aprovado" ? "saiu" : turma.participante?.status,
           ...(turma.participante?.status === "aprovado" ? { saiuEm: FieldValue.serverTimestamp() } : {}),
           atualizadoEm: FieldValue.serverTimestamp(),
@@ -260,7 +261,67 @@ const sairDaTurma = async (
   }
 
   await commitar(db, [...escritas, ...partidasAlteradas]);
+  // Conclusão: só agora, com nome/foto trocados E todas as partidas tratadas (uma falha num lote do meio deixa o marcador
+  // em false, e a próxima tentativa refaz a turma inteira — as escritas são idempotentes).
+  if (turma.participante && turma.participante.status !== "pendente") {
+    await participanteRef.update({ anonimizado: true, atualizadoEm: FieldValue.serverTimestamp() });
+  }
   return partidasAlteradas.length;
+};
+
+/**
+ * Turmas que a pessoa JÁ TINHA DEIXADO (achadas só pelo documento de participante, índice de grupo de coleções
+ * `participantes.id`): anonimiza o participante e as partidas das que ainda não foram. Idempotente. Sem o índice, lança
+ * (`isMissingIndex`): quem chama mantém a etapa pendente. Devolve quantas turmas foram anonimizadas agora.
+ */
+export const anonimizarTurmasDeixadas = async (db: Firestore, uid: string): Promise<number> => {
+  if (!SAFE_UID.test(uid)) throw new Error("uid inválido");
+  const snap = await db.collectionGroup("participantes").where("id", "==", uid).get();
+  let feitas = 0;
+  for (const doc of snap.docs) {
+    if (doc.get("anonimizado") === true) continue;
+    const turmaRef = doc.ref.parent.parent;
+    if (!turmaRef || doc.ref.id !== uid) continue;
+    const turmaSnap = await turmaRef.get();
+    if (!turmaSnap.exists) continue;
+    const dados = (turmaSnap.data() ?? {}) as Record<string, unknown>;
+    await sairDaTurma(db, uid, {
+      id: turmaRef.id,
+      nome: typeof dados.nome === "string" ? dados.nome : "Turma",
+      dados,
+      ehOrganizador: false,
+      outros: listaDe(dados.participantes).filter((p) => p !== uid).length,
+      participante: { status: String(doc.get("status") ?? "") },
+    }, false);
+    feitas += 1;
+  }
+  return feitas;
+};
+
+const PAGINA_CONFERENCIA = 300;
+const MAX_PAGINAS_CONFERENCIA = 100;
+
+/**
+ * Verificação final: participantes da pessoa ainda sem a limpeza concluída (`anonimizado !== true`), lendo TODAS as páginas.
+ * Null = não deu para conferir tudo (índice ausente ou acima do teto): o job fica pendente, nunca "limpo" por contagem parcial.
+ */
+export const contarTurmasDeixadasPendentes = async (db: Firestore, uid: string): Promise<number | null> => {
+  try {
+    let pendentes = 0;
+    let ultimo: QueryDocumentSnapshot | null = null;
+    for (let pagina = 0; pagina < MAX_PAGINAS_CONFERENCIA; pagina++) {
+      let consulta = db.collectionGroup("participantes").where("id", "==", uid).select("anonimizado").limit(PAGINA_CONFERENCIA);
+      if (ultimo) consulta = consulta.startAfter(ultimo);
+      const snap = await consulta.get();
+      pendentes += snap.docs.filter((d) => d.get("anonimizado") !== true).length;
+      if (snap.docs.length < PAGINA_CONFERENCIA) return pendentes;
+      ultimo = snap.docs[snap.docs.length - 1];
+    }
+    return null;
+  } catch (erro) {
+    if (isMissingIndex(erro)) return null;
+    throw erro;
+  }
 };
 
 // ─── Times ────────────────────────────────────────────────────────────────────
