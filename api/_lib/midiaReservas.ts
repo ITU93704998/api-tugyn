@@ -48,6 +48,15 @@ export const nomeDoEnvio = (tipo: TipoDeImagem, aleatorio: string, agoraMs: numb
 export const reservaAtiva = (r: { estado?: unknown; expiraEmMs?: number | null }, agoraMs: number): boolean =>
   (r.estado === "reservada" || r.estado === "enviada") && typeof r.expiraEmMs === "number" && r.expiraEmMs > agoraMs;
 
+/**
+ * Impede uma troca nova? Envio ainda em andamento ("reservada") sempre impede. Já enviado ("enviada") só impede na foto de
+ * perfil, que tem a confirmação depois. Escudo e banner não têm: se o app não conseguiu gravar a URL (demorou, caiu a
+ * conexão), uma nova tentativa precisa passar na hora, e não ficar presa por 10 minutos. O envio antigo segue para a rotina,
+ * que só apaga o que não estiver em uso.
+ */
+export const reservaImpedeTroca = (r: { estado?: unknown; expiraEmMs?: number | null; tipo: TipoDeImagem }, agoraMs: number): boolean =>
+  reservaAtiva(r, agoraMs) && (r.estado === "reservada" || r.tipo === "fotoPerfil");
+
 /** `public_id` de uma URL de entrega do Cloudinary (`.../image/upload/[v123/]<id>.<ext>`), ou null. */
 export const publicIdDaUrl = (url: unknown): string | null => {
   if (typeof url !== "string") return null;

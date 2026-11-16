@@ -16,15 +16,20 @@ import {
   nomeDoEnvio,
   proximoPasso,
   referenciaAponta,
-  reservaAtiva,
+  reservaImpedeTroca,
 } from "./midiaReservas";
 import { isSafeUid } from "./validation";
 
 /** Reservas de troca de imagem (protocolo em `midiaReservas.ts`). Só o servidor lê e grava (as regras negam tudo ao app). */
 export const COLECAO_RESERVAS = "midiaReservas";
 const LOTE_DE_LIMPEZA = 20;
-/** Reservas da mesma chave lidas na transação (vencidas somem na rotina; uma por 10 min no máximo). */
+/**
+ * Reservas da mesma chave lidas na transação. A consulta já filtra pelos estados que podem impedir a troca e pelo prazo
+ * (registros concluídos ou vencidos, por mais que se acumulem, não entram no limite e nunca escondem uma reserva ativa).
+ */
 const MAX_DA_CHAVE = 50;
+/** Estados que importam numa troca nova: "reservada" (envio em andamento) e "enviada" (pode impedir ou ser reaproveitada). */
+const ESTADOS_EM_ABERTO = ["reservada", "enviada"];
 
 const alvoDe = (db: Firestore, tipo: TipoDeImagem, uid: string, alvoId?: string | null): DocumentReference =>
   tipo === "fotoPerfil" ? db.doc(`users/${uid}`) : tipo === "escudoTime" ? db.doc(`times/${alvoId}`) : db.doc(`turmas/${alvoId}`);
@@ -37,7 +42,11 @@ const referenciaDe = (tipo: TipoDeImagem, alvo: Record<string, unknown> | null) 
     ? { url: (alvo?.profileImage as string | undefined) ?? null, publicId: (alvo?.profileImagePublicId as string | undefined) ?? null }
     : { url: (alvo?.[campoDaUrl(tipo)] as string | undefined) || null, publicId: null };
 
-export type ReservaFeita = { ok: true; reservaId: string; nome: string; pasta: string } | ({ ok: false } & Exclude<CheckResult, { allowed: true }>);
+export type ReservaFeita =
+  | { ok: true; reservaId: string; nome: string; pasta: string; reaproveitada?: undefined }
+  /** A MESMA imagem já tinha sido enviada nesta troca (o app desistiu de esperar ou não conseguiu gravar): devolve o envio pronto. */
+  | { ok: true; reservaId: string; reaproveitada: { url: string; publicId: string } }
+  | ({ ok: false } & Exclude<CheckResult, { allowed: true }>);
 
 /**
  * Reserva a troca numa transação: confere o prazo de 7 dias e a propriedade no documento-alvo e recusa (409) se já houver
@@ -45,7 +54,7 @@ export type ReservaFeita = { ok: true; reservaId: string; nome: string; pasta: s
  */
 export const reservarTrocaDeImagem = async (
   db: Firestore,
-  c: { uid: string; tipo: TipoDeImagem; turmaId?: unknown; timeId?: unknown; bucket: Bucket; pasta: string },
+  c: { uid: string; tipo: TipoDeImagem; turmaId?: unknown; timeId?: unknown; bucket: Bucket; pasta: string; assinatura?: string },
 ): Promise<ReservaFeita> => {
   if (c.tipo === "bannerTurma" && !isSafeUid(c.turmaId)) {
     return { ok: false, allowed: false, status: 400, error: "Identificador da turma inválido." };
@@ -64,13 +73,27 @@ export const reservarTrocaDeImagem = async (
 
   return db.runTransaction(async (tx): Promise<ReservaFeita> => {
     const alvoSnap = await tx.get(alvoDe(db, c.tipo, c.uid, alvoId));
-    const daChave = await tx.get(db.collection(COLECAO_RESERVAS).where("chave", "==", chave).limit(MAX_DA_CHAVE));
+    const daChave = await tx.get(
+      // Só as que ainda valem (estado e prazo filtrados ANTES do limite: registros vencidos nunca escondem uma ativa).
+      // Índice composto midiaReservas (chave, estado, expiraEm) em firestore.indexes.json.
+      db.collection(COLECAO_RESERVAS)
+        .where("chave", "==", chave)
+        .where("estado", "in", ESTADOS_EM_ABERTO)
+        .where("expiraEm", ">", Timestamp.fromMillis(agora))
+        .limit(MAX_DA_CHAVE),
+    );
     const alvo = alvoSnap.exists ? (alvoSnap.data() ?? null) : null;
     const prazo = checarIntervalo(c.uid, c.tipo, alvo, agora);
     if (!prazo.allowed) return { ok: false, ...prazo };
+    // Mesma imagem (mesma assinatura) já enviada e ainda dentro do prazo: reaproveita, sem novo envio ao Cloudinary.
+    const pronta = c.assinatura
+      ? daChave.docs.find((d) => d.get("estado") === "enviada" && d.get("assinatura") === c.assinatura && typeof d.get("url") === "string"
+          && (timestampMillis(d.get("expiraEm")) ?? 0) > agora)
+      : undefined;
+    if (pronta) return { ok: true, reservaId: pronta.id, reaproveitada: { url: pronta.get("url") as string, publicId: pronta.get("publicId") as string } };
     const ativa = daChave.docs
       .map((d) => timestampMillis(d.get("expiraEm")) ?? 0)
-      .filter((expira, i) => reservaAtiva({ estado: daChave.docs[i].get("estado"), expiraEmMs: expira }, agora));
+      .filter((expira, i) => reservaImpedeTroca({ estado: daChave.docs[i].get("estado"), expiraEmMs: expira, tipo: c.tipo }, agora));
     if (ativa.length) {
       return {
         ok: false,
@@ -89,6 +112,7 @@ export const reservarTrocaDeImagem = async (
       bucket: c.bucket,
       publicId: `${c.pasta}/${nome}`,
       url: null,
+      ...(c.assinatura ? { assinatura: c.assinatura } : {}),
       estado: "reservada",
       anterior: referenciaDe(c.tipo, alvo),
       criadaEm: FieldValue.serverTimestamp(),

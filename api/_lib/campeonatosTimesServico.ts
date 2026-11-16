@@ -455,11 +455,20 @@ export async function administrarCT(db: Firestore, uid: string, body: Dados, ago
     } else if (acao === "alterarDatas") {
       // Imprevisto antes do início: o organizador muda o fim das inscrições e/ou o início. Mesmas regras da criação.
       exigirCT(camp.status === "inscricoes", "As datas só podem mudar antes do início. Depois, marque a data de cada jogo.", 409);
-      const inscricoesAte = numeroCT(body.inscricoesAte, agora + 60_000, agora + 180 * 86_400_000, "Prazo de inscrição");
-      const dataInicio = body.dataInicio == null ? null : numeroCT(body.dataInicio, inscricoesAte, agora + 365 * 86_400_000, "Início do campeonato");
+      // Manter o prazo atual (mesmo já encerrado) é permitido: dá para mudar só o início. Um prazo NOVO segue a regra da criação.
+      const mantemPrazo = body.inscricoesAte === camp.inscricoesAte;
+      const inscricoesAte = mantemPrazo ? Number(camp.inscricoesAte) : numeroCT(body.inscricoesAte, agora + 60_000, agora + 180 * 86_400_000, "Prazo de inscrição");
+      // Início: no fim das inscrições ou depois, e não antes de ontem (o meio-dia de Brasília de hoje ainda vale).
+      const dataInicio = body.dataInicio == null ? null : numeroCT(body.dataInicio, Math.max(inscricoesAte, agora - 86_400_000), agora + 365 * 86_400_000, "Início do campeonato");
       if (inscricoesAte === camp.inscricoesAte && dataInicio === (camp.dataInicio ?? null)) return;
+      // Avisa quem está no campeonato AGORA (times aprovados e com pedido em análise, e os mesários), não o histórico de
+      // envolvidos (que inclui quem já saiu). Em lotes de até 500 pessoas por aviso.
+      const ativos = await tx.get(ref.collection("inscricoes").where("status", "in", ["aprovada", "pendente"]).limit(129));
+      const mesarios = Array.isArray(camp.mesarios) ? (camp.mesarios as { uid?: unknown }[]).map((m) => m?.uid).filter((u): u is string => typeof u === "string") : [];
+      const para = [...new Set([...ativos.docs.flatMap((s) => timeTodo(s.data() as InscricaoCT)), ...mesarios])].filter((u) => u !== uid);
       tx.update(ref, { inscricoesAte, dataInicio });
-      avisos = agendarAvisosCT(tx, db, [avisoCT("datas", id, `${inscricoesAte}_${dataInicio ?? 0}`, Array.isArray(camp.envolvidos) ? camp.envolvidos as string[] : [], ...textosCT.datas(camp, inscricoesAte, dataInicio), uid)], agora);
+      const lotes = Array.from({ length: Math.ceil(para.length / 500) }, (_, k) => para.slice(k * 500, k * 500 + 500));
+      avisos = agendarAvisosCT(tx, db, lotes.map((lote, k) => avisoCT("datas", id, `${inscricoesAte}_${dataInicio ?? 0}_${k}`, lote, ...textosCT.datas(camp, inscricoesAte, dataInicio), uid)), agora);
     } else if (acao === "marcarPagamento") {
       const tid = timeId(body); exigirCT(typeof body.pago === "boolean", "Pagamento inválido.");
       const ir = ref.collection("inscricoes").doc(tid), i = await tx.get(ir);

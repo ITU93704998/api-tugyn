@@ -6,6 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tacaSvg } from "./tacaSvg";
 
 export interface DadosCartao {
   /** Faixa de cima: "CAMPEONATO ENTRE TIMES", "CONVITE PARA A TURMA"... */
@@ -19,6 +20,8 @@ export interface DadosCartao {
   fundo?: string;
   /** Escudo do time (à direita): imagem do Cloudinary ou, sem ela, a sigla na cor do time. */
   escudo?: { url: string; cor: string; sigla: string } | null;
+  /** Campeonato: a taça escolhida (texto das peças; null = clássica), à direita no lugar do escudo. */
+  taca?: string | null;
 }
 
 export const LARGURA_CARTAO = 1200;
@@ -90,11 +93,12 @@ const img = (src: string, style: Record<string, unknown>): No => ({ type: "img",
 export const arvoreDoCartao = (d: DadosCartao, imagens: { logo: string; fundo: string | null; escudo: string | null }): No => {
   const titulo = cortar(d.titulo, 60);
   const tamanhoTitulo = titulo.length > 34 ? 60 : titulo.length > 22 ? 72 : 84;
-  const temEscudo = Boolean(d.escudo);
-  const escudo = d.escudo
+  const temEscudo = Boolean(d.escudo) || d.taca !== undefined;
+  const escudo = d.taca !== undefined
+    ? img(`data:image/svg+xml;base64,${Buffer.from(tacaSvg(d.taca, 480, 600, "cartao")).toString("base64")}`, { width: 336, height: 420 })
+    : d.escudo
     ? imagens.escudo
-      ? div({ width: 280, height: 280, borderRadius: 140, background: "#FFFFFF", alignItems: "center", justifyContent: "center" },
-          img(imagens.escudo, { width: 230, height: 230, objectFit: "contain" }))
+      ? img(imagens.escudo, { width: 288, height: 288, objectFit: "contain" })
       : div({ width: 280, height: 280, borderRadius: 140, background: corValida(d.escudo.cor), alignItems: "center", justifyContent: "center",
             color: "#FFFFFF", fontSize: 96, fontWeight: 800, border: "8px solid rgba(255,255,255,0.85)" }, cortar(d.escudo.sigla || d.titulo.slice(0, 3).toUpperCase(), 3))
     : null;
@@ -133,7 +137,7 @@ export const arvoreDoCartao = (d: DadosCartao, imagens: { logo: string; fundo: s
 
 /**
  * O @vercel/og só existe como ESM, e a API compila para CommonJS: um import() comum vira require(), que falha
- * em Node sem require(esm) (o cartão caía sempre no ícone). Este import é nativo; os arquivos do pacote vão no deploy pelo
+ * em Node sem require(esm) (o cartão caía sempre no ícone). Este import é nativo; o pacote inteiro (package.json + dist) vai no deploy pelo
  * includeFiles do vercel.json.
  */
 type Gerador = typeof import("@vercel/og");

@@ -120,7 +120,7 @@ export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos
 };
 
 /** Dados do cartão da prévia (imagem 1200x630): só o que a página já mostra. */
-export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rotulo: string; titulo: string; detalhes: string; destaque: string } => {
+export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rotulo: string; titulo: string; detalhes: string; destaque: string; taca: string | null } => {
   const local = [c.cidade, c.estado].filter(Boolean).join(", ");
   const vagas = Math.max(0, c.maxTimes - c.aprovados);
   const destaque =
@@ -130,5 +130,5 @@ export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rot
     : c.inscricoesAte !== null && c.inscricoesAte <= agoraMs ? "Inscrições encerradas · começa em breve"
     : [c.inscricoesAte !== null ? `Inscrições até ${dataBrasilia(c.inscricoesAte).slice(0, 5)}` : "Inscrições abertas",
         `${vagas} ${vagas === 1 ? "vaga" : "vagas"}`, reais(c.inscricaoCentavos)].join(" · ");
-  return { rotulo: "", titulo: c.nome, detalhes: [c.formato, c.modalidade, local].filter(Boolean).join(" · "), destaque };
+  return { taca: c.trofeu, rotulo: "", titulo: c.nome, detalhes: [c.formato, c.modalidade, local].filter(Boolean).join(" · "), destaque };
 };

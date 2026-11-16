@@ -98,6 +98,11 @@ test('reserva: chave por alvo, nome novo a cada envio, ativa só no prazo e sem 
   assert.equal(res.reservaAtiva({ estado: 'enviada', expiraEmMs: 2000 }, 1000), true);
   assert.equal(res.reservaAtiva({ estado: 'enviada', expiraEmMs: 1000 }, 1000), false);
   for (const estado of ['confirmada', 'promovida', 'falhou']) assert.equal(res.reservaAtiva({ estado, expiraEmMs: 9e15 }, 0), false);
+  // Escudo/banner já enviado e não gravado pelo app: a nova tentativa passa; envio em andamento ainda segura.
+  assert.equal(res.reservaImpedeTroca({ estado: 'enviada', expiraEmMs: 2000, tipo: 'escudoTime' }, 1000), false);
+  assert.equal(res.reservaImpedeTroca({ estado: 'enviada', expiraEmMs: 2000, tipo: 'bannerTurma' }, 1000), false);
+  assert.equal(res.reservaImpedeTroca({ estado: 'reservada', expiraEmMs: 2000, tipo: 'escudoTime' }, 1000), true);
+  assert.equal(res.reservaImpedeTroca({ estado: 'enviada', expiraEmMs: 2000, tipo: 'fotoPerfil' }, 1000), true);
 });
 
 test('proximoPasso: referenciada conclui/promove; sem referência apaga o envio', () => {

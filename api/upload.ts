@@ -1,6 +1,6 @@
 import { exigirRegiaoTimes, ErroRegioesTimes } from "./_lib/regioesTimes";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { v2 as cloudinary } from "cloudinary";
 import { getFirestore } from "firebase-admin/firestore";
 import { verificarAppCheck } from "./_lib/appCheck";
@@ -135,7 +135,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (tipo) {
     let feita: Awaited<ReturnType<typeof reservarTrocaDeImagem>>;
     try {
-      feita = await reservarTrocaDeImagem(getFirestore(getFirebaseApp()), { uid: user.uid, tipo, turmaId: body.turmaId, timeId: body.timeId, bucket, pasta });
+      // Assinatura do que seria enviado (imagem + opções): a mesma tentativa repetida reaproveita o envio já feito.
+      const assinatura = createHash("sha256").update(`${tipo}|${body.fundoLiso === true}|`).update(body.image as string).digest("hex").slice(0, 32);
+      feita = await reservarTrocaDeImagem(getFirestore(getFirebaseApp()), { uid: user.uid, tipo, turmaId: body.turmaId, timeId: body.timeId, bucket, pasta, assinatura });
     } catch (error) {
       console.error("[upload] falha ao reservar a troca da imagem:", error);
       return res.status(503).json({ error: "Não foi possível validar o prazo para trocar esta imagem." });
@@ -143,6 +145,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!feita.ok) {
       if (feita.retryAfterSeconds) res.setHeader("Retry-After", String(feita.retryAfterSeconds));
       return res.status(feita.status).json({ error: feita.error, retryAfterSeconds: feita.retryAfterSeconds });
+    }
+    if (feita.reaproveitada) {
+      return res.status(200).json({ url: feita.reaproveitada.url, public_id: feita.reaproveitada.publicId, reserva_id: feita.reservaId });
     }
     reserva = feita;
   }
