@@ -9,11 +9,12 @@ import { handleCors } from "./cors";
 import { dentroDoLimite } from "./rateLimit";
 import { RecusaCT, exigirCT, objetoCT } from "./campeonatosTimesDominio";
 import { excluirCT, patrocinadorCT, patrocinadoresPublicosCT } from "./campeonatosTimesMidia";
+import { alterarModelosTrofeuCT, lerModelosTrofeuCT } from "./campeonatosTimesServico";
 import { criarCT, listarCT, lerDetalheCT, gruposLiberadosCT, inscreverCT, responderCT, cancelarInscricaoCT, iniciarCT, resultadoCT, finalizarCT, administrarCT, transferirAtletaCT, mesarioCT, proximosJogosCT, estatisticasAtletaCT } from "./campeonatosTimesServico";
 import { dispararAvisosCT } from "./campeonatosTimesAvisos";
 import type { Aviso } from "./pushEnvio";
 
-const ACOES = new Set(["titulosTime", "saidasRegionais", "recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "finalizar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar", "excluir", "transferirAtleta", "mesario", "proximosJogos", "estatisticasAtleta"]);
+const ACOES = new Set(["titulosTime", "saidasRegionais", "recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "finalizar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar", "excluir", "transferirAtleta", "mesario", "proximosJogos", "estatisticasAtleta", "modelosTrofeu", "alterarModelosTrofeu"]);
 export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "private, no-store");
   if (handleCors(req, res)) return;
@@ -24,7 +25,7 @@ export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResp
   try {
     exigirCT(ACOES.has(acao), "Ação inválida.");
     exigirCT(Buffer.byteLength(JSON.stringify(b), "utf8") <= (acao === "patrocinador" ? 2_850_000 : 24_000), "Pedido muito grande.", 413);
-    const leitura = acao === "titulosTime" || acao === "saidasRegionais" || acao === "listar" || acao === "detalhe" || acao === "recursos" || acao === "proximosJogos" || acao === "estatisticasAtleta";
+    const leitura = acao === "titulosTime" || acao === "saidasRegionais" || acao === "listar" || acao === "detalhe" || acao === "recursos" || acao === "proximosJogos" || acao === "estatisticasAtleta" || acao === "modelosTrofeu";
     exigirCT(await dentroDoLimite(usuario.uid, `ct_${leitura ? "ler" : acao === "patrocinador" ? "midia" : "gravar"}`, leitura ? 300 : acao === "patrocinador" ? 15 : 120, 3600), "Muitas tentativas. Aguarde um pouco.", 429);
     const db = getFirestore(getFirebaseApp()), uid = usuario.uid;
     if (acao === "titulosTime") {
@@ -35,6 +36,9 @@ export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResp
     // Perfil e hub: leituras próprias, sem a liberação regional (estatística antiga continua visível).
     if (acao === "estatisticasAtleta") return res.status(200).json({ ok: true, ...await estatisticasAtletaCT(db, uid, b) });
     if (acao === "proximosJogos") return res.status(200).json({ ok: true, ...await proximosJogosCT(db, uid) });
+    // Editor de troféu: modelos salvos da conta.
+    if (acao === "modelosTrofeu") return res.status(200).json({ ok: true, ...await lerModelosTrofeuCT(db, uid) });
+    if (acao === "alterarModelosTrofeu") return res.status(200).json({ ok: true, ...await alterarModelosTrofeuCT(db, uid, b) });
     if (acao === "saidasRegionais") return res.status(200).json({ ok: true, ...await listarSaidasRegionaisCT(db, uid, b) });
     // Liberações da conta: só o formulário de criação precisa; listar e detalhe não pagam essa leitura a cada abertura.
     if (acao === "recursos") return res.status(200).json({ ok: true, recursos: { gruposMataLiberado: await gruposLiberadosCT(db, uid) } });

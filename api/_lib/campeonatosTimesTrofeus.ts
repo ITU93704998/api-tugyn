@@ -2,6 +2,7 @@ import { campeaoDe } from "./campeonato/classificacao";
 import { REGRAS_PADRAO } from "./campeonato/tabela";
 import { ID_CT, ID_PESSOA_CT, type Dados, type InscricaoCT, type JogoCT } from "./campeonatosTimesDominio";
 import type { Trofeu } from "./trofeus";
+import { normalizarDesenhoTrofeu } from "./desenhoTrofeu";
 
 export type TrofeuTimes = Trofeu & { origem: "times" };
 export const chaveTrofeuTimes = (id: string): string => `times:${id}`;
@@ -43,6 +44,7 @@ export function calcularTrofeusTimes(id: string, camp: Dados | null, inscricoes:
   const maxGols = Math.max(0, ...[...atletas.values()].map(a => a.gols));
   const maxAssist = Math.max(0, ...[...atletas.values()].map(a => a.assistencias));
   const resultado = vazio();
+  const desenho = normalizarDesenhoTrofeu(camp.trofeuDesenho);
   for (const [uid, a] of atletas) {
     const titulos: Trofeu["titulos"] = [];
     if (a.time.timeId === campeao) titulos.push("campeao");
@@ -50,7 +52,7 @@ export function calcularTrofeusTimes(id: string, camp: Dados | null, inscricoes:
     if (maxAssist > 0 && a.assistencias === maxAssist) titulos.push("garcom");
     if (!titulos.length) continue;
     resultado.set(uid, { origem: "times", turmaId: "", campeonatoId: id, modelo: "classica", campeonato: String(camp.nome || "Campeonato").slice(0, 60),
-      turma: "Campeonato de times", time: a.time.timeNome.slice(0, 80), cor: /^#[0-9a-f]{6}$/i.test(a.time.cor ?? "") ? a.time.cor! : "#FE7552", titulos, gols: a.gols, assistencias: a.assistencias });
+      turma: "Campeonato de times", time: a.time.timeNome.slice(0, 80), cor: /^#[0-9a-f]{6}$/i.test(a.time.cor ?? "") ? a.time.cor! : "#FE7552", titulos, gols: a.gols, assistencias: a.assistencias, ...(desenho ? { desenho } : {}) });
   }
   return resultado;
 }

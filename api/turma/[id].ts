@@ -54,19 +54,29 @@ const comPrazo = async <T>(leitura: Promise<T>, rotulo: string): Promise<T | nul
   }
 };
 
+/** Igual ao comPrazo, mas demora ou falha viram ERRO (não null): para quem precisa separar "não existe" de "indisponível". */
+const comPrazoEstrito = async <T>(leitura: Promise<T>): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const limite = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("prazo esgotado")), PREVIA_TIMEOUT_MS);
+    });
+    return await Promise.race([leitura, limite]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 const db = () => getFirestore(getFirebaseApp());
 
 /** Turma pelo código de convite (6 letras) ou pelo id: o id resolvido e a prévia pública. */
-const lerTurma = async (idOuCodigo: string): Promise<{ turmaId: string; previa: PreviaTurma | null } | null> =>
-  comPrazo(
-    (async () => {
-      const turmaId = CODIGO_TURMA.test(idOuCodigo) ? await turmaPorCodigo(db(), idOuCodigo) : idOuCodigo;
-      if (!turmaId) return null;
-      const snap = await db().collection("turmaPreviews").doc(turmaId).get();
-      return { turmaId, previa: snap.exists ? previaDoDocumento(snap.data()) : null };
-    })(),
-    "turma-link",
-  );
+const buscarTurma = async (idOuCodigo: string): Promise<{ turmaId: string; previa: PreviaTurma | null } | null> => {
+  const turmaId = CODIGO_TURMA.test(idOuCodigo) ? await turmaPorCodigo(db(), idOuCodigo) : idOuCodigo;
+  if (!turmaId) return null;
+  const snap = await db().collection("turmaPreviews").doc(turmaId).get();
+  return { turmaId, previa: snap.exists ? previaDoDocumento(snap.data()) : null };
+};
+const lerTurma = (idOuCodigo: string) => comPrazo(buscarTurma(idOuCodigo), "turma-link");
 
 /** O time pelo `linkId` (1 leitura; só os campos que a página mostra). */
 const lerTime = async (linkId: string): Promise<TimePublico | null> =>
@@ -89,17 +99,14 @@ const lerConvite = async (codigo: string): Promise<ConvitePublico | null> =>
   );
 
 /** O campeonato pelo id ou pelo código curto (só os campos públicos do catálogo). null se não existir, for de teste... */
-const lerCampeonato = async (idOuCodigo: string): Promise<{ id: string; campeonato: CampeonatoPublico } | null> =>
-  comPrazo(
-    (async () => {
-      const id = isValidCampeonatoId(idOuCodigo) ? idOuCodigo : await campeonatoPorCodigo(db(), idOuCodigo);
-      if (!id) return null;
-      const snap = await db().collection("campeonatosTimes").doc(id).get();
-      const campeonato = snap.exists ? campeonatoDoDocumento(snap.data()) : null;
-      return campeonato ? { id, campeonato } : null;
-    })(),
-    "campeonato-link",
-  );
+const buscarCampeonato = async (idOuCodigo: string): Promise<{ id: string; campeonato: CampeonatoPublico } | null> => {
+  const id = isValidCampeonatoId(idOuCodigo) ? idOuCodigo : await campeonatoPorCodigo(db(), idOuCodigo);
+  if (!id) return null;
+  const snap = await db().collection("campeonatosTimes").doc(id).get();
+  const campeonato = snap.exists ? campeonatoDoDocumento(snap.data()) : null;
+  return campeonato ? { id, campeonato } : null;
+};
+const lerCampeonato = (idOuCodigo: string) => comPrazo(buscarCampeonato(idOuCodigo), "campeonato-link");
 
 const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
@@ -189,8 +196,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   // ── Código → id (app) ──
   if (primeiro(query.formato) === "id" && (tipo === "turma" || tipo === "campeonato")) {
-    const id = tipo === "turma" ? (await lerTurma(bruto))?.turmaId : (await lerCampeonato(bruto))?.id;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
+    let id: string | undefined;
+    try {
+      id = tipo === "turma" ? (await comPrazoEstrito(buscarTurma(bruto)))?.turmaId : (await comPrazoEstrito(buscarCampeonato(bruto)))?.id;
+    } catch (error) {
+      // Demora ou falha do banco: NÃO é "não existe". 503 sem cache, e o app oferece tentar de novo.
+      console.warn("[link-id] indisponível:", error instanceof Error ? error.message : error);
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Retry-After", "5");
+      return res.status(503).json({ error: "indisponivel" });
+    }
     res.setHeader("Cache-Control", id ? "public, s-maxage=300" : "public, s-maxage=30");
     return res.status(id ? 200 : 404).json(id ? { id } : { error: "nao_encontrado" });
   }

@@ -1,3 +1,4 @@
+import { ID_MODELO_TROFEU, MAX_MODELOS_TROFEU, modelosGravados, nomeDoModelo, normalizarDesenhoTrofeu } from "./desenhoTrofeu";
 import { completarFotosInscricoesCT } from "./campeonatosTimesFotos";
 import { createHash, randomBytes } from "node:crypto";
 import { FieldPath, type Firestore, type Transaction, type DocumentSnapshot, type QuerySnapshot, type QueryDocumentSnapshot } from "firebase-admin/firestore";
@@ -54,7 +55,7 @@ export function resumoCT(id: string, d: Dados): Dados {
 export function detalheCT(id: string, d: Dados): Dados {
   const dto = resumoCT(id, d);
   dto.revisaoResultados = Number(d.premiacaoVersao ?? 0);
-  for (const k of ["locais", "premiacao", "regrasTexto", "genero", "faixaEtaria", "minJogadores", "maxJogadores", "requisitos", "patrocinadores", "campeaoTimeId", "motivoCancelamento", "grupos"]) dto[k] = d[k] ?? null;
+  for (const k of ["locais", "premiacao", "regrasTexto", "genero", "faixaEtaria", "minJogadores", "maxJogadores", "requisitos", "patrocinadores", "campeaoTimeId", "motivoCancelamento", "grupos", "trofeuDesenho"]) dto[k] = d[k] ?? null;
   dto.sorteio = d.sorteio === "manual" ? "manual" : "automatico";
   dto.mesarios = mesariosDoCT(d);
   return dto;
@@ -730,4 +731,47 @@ export async function avisosAgendadosCT(db: Firestore, agora = Date.now()): Prom
   // Sem transação de ação aqui: `enviarAviso` cria o registro da chave na fila (e não repete uma chave já enviada).
   await dispararAvisosCT(db, validos);
   return { prazos: validos.filter((a) => a.dedupeKey.startsWith("ct_prazo_")).length, lembretes: validos.filter((a) => a.dedupeKey.startsWith("ct_lembrete_")).length, truncado };
+}
+
+/** Modelos de troféu salvos da conta (até 10, num documento só: 1 leitura para abrir o editor). */
+export async function lerModelosTrofeuCT(db: Firestore, uid: string): Promise<Dados> {
+  const s = await db.doc(`users/${uid}/restrito/modelosTrofeu`).get();
+  return { modelos: modelosGravados(s.get("modelos")) };
+}
+
+/**
+ * Adiciona ou remove UM modelo, sempre sobre a lista atual lida na transação (nunca a lista que o aparelho tinha): dois
+ * aparelhos salvando ao mesmo tempo ficam com os dois modelos; remover um id que já saiu não apaga mais nada.
+ * Conta suspensa ou em exclusão não grava. Devolve a lista confirmada.
+ */
+export async function alterarModelosTrofeuCT(db: Firestore, uid: string, body: Dados, novoId: () => string = () => randomBytes(6).toString("hex")): Promise<Dados> {
+  const operacao = body.operacao;
+  exigirCT(operacao === "adicionar" || operacao === "remover", "Operação inválida.");
+  let novo: { nome: string; desenho: string } | null = null, removerId: string | null = null;
+  if (operacao === "adicionar") {
+    const nome = nomeDoModelo(body.nome), desenho = normalizarDesenhoTrofeu(body.desenho);
+    exigirCT(nome, "Dê um nome de até 30 letras ao modelo.");
+    exigirCT(desenho, "O troféu é inválido. Monte-o de novo no editor.");
+    novo = { nome, desenho };
+  } else {
+    exigirCT(typeof body.id === "string" && ID_MODELO_TROFEU.test(body.id), "Modelo inválido.");
+    removerId = body.id;
+  }
+  const ref = db.doc(`users/${uid}/restrito/modelosTrofeu`);
+  return db.runTransaction(async (tx) => {
+    await autorUsuario(tx, db, uid);
+    const atuais = modelosGravados((await tx.get(ref)).get("modelos"));
+    let modelos = atuais;
+    if (novo) {
+      // Repetir o mesmo pedido (toque duplo, nova tentativa) não cria uma cópia.
+      if (!atuais.some((m) => m.nome === novo!.nome && m.desenho === novo!.desenho)) {
+        exigirCT(atuais.length < MAX_MODELOS_TROFEU, `Você já tem ${MAX_MODELOS_TROFEU} modelos. Apague um para salvar outro.`, 409);
+        let id = novoId();
+        while (atuais.some((m) => m.id === id)) id = novoId();
+        modelos = [{ id, ...novo }, ...atuais];
+      }
+    } else modelos = atuais.filter((m) => m.id !== removerId);
+    if (modelos !== atuais) tx.set(ref, { modelos, atualizadoEm: Date.now() });
+    return { modelos };
+  });
 }

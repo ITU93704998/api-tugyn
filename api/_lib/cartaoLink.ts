@@ -37,6 +37,27 @@ const carregarLogo = (): string => (logo ??= `data:image/png;base64,${readFileSy
 const CLOUDINARY = /^https:\/\/res\.cloudinary\.com\/[a-z0-9_-]+\/image\/upload\/[A-Za-z0-9_\-./,]+$/i;
 const MAX_IMAGEM = 4 * 1024 * 1024;
 
+/**
+ * Corpo da resposta com no máximo `max` bytes: recusa pelo Content-Length declarado e, durante a leitura, para (e cancela o
+ * download) assim que passar do limite. Nunca junta na memória uma imagem maior que o limite.
+ */
+export const lerAteLimite = async (r: Response, max: number, controle?: AbortController): Promise<Buffer | null> => {
+  const declarado = Number(r.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declarado) && declarado > max) { controle?.abort(); return null; }
+  if (!r.body) return null;
+  const leitor = r.body.getReader();
+  const partes: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await leitor.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) { await leitor.cancel().catch(() => undefined); controle?.abort(); return null; }
+    partes.push(value);
+  }
+  return Buffer.concat(partes, total);
+};
+
 /** Imagem do Cloudinary como data URI (o gerador não busca nada sozinho). null se não for do Cloudinary, demorar ou falhar. */
 export const imagemComoDataUri = async (url: string | undefined, prazoMs = 2500): Promise<string | null> => {
   if (!url || !CLOUDINARY.test(url)) return null;
@@ -46,8 +67,8 @@ export const imagemComoDataUri = async (url: string | undefined, prazoMs = 2500)
     const r = await fetch(url, { signal: controle.signal, redirect: "error" });
     const tipo = r.headers.get("content-type") ?? "";
     if (!r.ok || !/^image\/(png|jpe?g|webp)$/.test(tipo.split(";")[0].trim())) return null;
-    const buf = Buffer.from(await r.arrayBuffer());
-    return buf.length > 0 && buf.length <= MAX_IMAGEM ? `data:${tipo.split(";")[0].trim()};base64,${buf.toString("base64")}` : null;
+    const buf = await lerAteLimite(r, MAX_IMAGEM, controle);
+    return buf && buf.length > 0 ? `data:${tipo.split(";")[0].trim()};base64,${buf.toString("base64")}` : null;
   } catch {
     return null;
   } finally {

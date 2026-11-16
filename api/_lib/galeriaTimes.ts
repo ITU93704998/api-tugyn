@@ -1,10 +1,11 @@
 import { FieldPath, type Firestore } from "firebase-admin/firestore";
 import { ID_CT, ID_TIME_CT, exigirCT, type Dados, type InscricaoCT } from "./campeonatosTimesDominio";
 import type { TrofeuTimes } from "./campeonatosTimesTrofeus";
+import { normalizarDesenhoTrofeu } from "./desenhoTrofeu";
 
 export const COLECAO_TITULOS_TIME = "titulosCampeonatos";
 export const milissegundosTime = (v: unknown): number => typeof v === "number" && Number.isFinite(v) ? v : v && typeof (v as { toMillis?: unknown }).toMillis === "function" ? (v as { toMillis(): number }).toMillis() : 0;
-export interface TituloDoTime { timeId: string; timeLinkId: string | null; timeCriadoEm: number | null; inscritoEm: number; dados: { campeonatoId: string; campeonato: string; time: string; cor: string; modelo: string; modalidade: string; formato: string; cidade: string; estado: string; conquistadoEm: number } }
+export interface TituloDoTime { timeId: string; timeLinkId: string | null; timeCriadoEm: number | null; inscritoEm: number; dados: { campeonatoId: string; campeonato: string; time: string; cor: string; modelo: string; modalidade: string; formato: string; cidade: string; estado: string; conquistadoEm: number; desenho?: string } }
 /** Deriva somente de uma premiação já validada; nunca aceita o campeão enviado pelo cliente. */
 export function tituloDoTime(camp: Dados | undefined, inscricoes: InscricaoCT[], premios: Map<string, TrofeuTimes>): TituloDoTime | null {
   const i = inscricoes.find(i => i.status === "aprovada" && i.timeId === camp?.campeaoTimeId);
@@ -14,6 +15,7 @@ export function tituloDoTime(camp: Dados | undefined, inscricoes: InscricaoCT[],
   const criado = Number(i.timeCriadoEm);
   return { timeId: i.timeId, timeLinkId: typeof i.timeLinkId === "string" ? i.timeLinkId : null, timeCriadoEm: Number.isFinite(criado) && criado > 0 ? criado : null, inscritoEm: Number(i.criadoEm ?? 0), dados: {
     campeonatoId: t.campeonatoId, campeonato: t.campeonato, time: t.time, cor: t.cor, modelo: t.modelo, modalidade: String(camp?.modalidade ?? ""), formato: String(camp?.formato ?? ""), cidade: String(camp?.cidade ?? "").slice(0, 100), estado: String(camp?.estado ?? "").slice(0, 40), conquistadoEm: Number(camp?.finalizadoEm ?? camp?.criadoEm ?? 0),
+    ...(t.desenho ? { desenho: t.desenho } : {}),
   } };
 }
 /** O id dono_1 pode ser reutilizado, e o link (escolhido pelo app na criação) também pode ser repetido num time novo.
@@ -53,6 +55,6 @@ export async function listarTitulosTime(db: Firestore, uid: string, body: Dados)
   // Só aparece título confirmado para esta criação do time. Título antigo, sem a criação registrada, fica oculto até o
   // reconciliador revalidá-lo (ele regrava com `timeCriadoEm` ou remove); link reaproveitado não herda nada.
   const daGeracao = (t: Dados) => criado > 0 && t.timeCriadoEm === criado;
-  const itens = pagina.filter(s => daGeracao(s.data())).map(s => { const t = s.data(); return { campeonatoId: s.id, campeonato: String(t.campeonato ?? "Campeonato").slice(0, 60), time: String(t.time ?? "").slice(0, 80), cor: /^#[a-f0-9]{6}$/i.test(t.cor) ? t.cor : "#FE7552", modelo: "classica", modalidade: String(t.modalidade ?? "").slice(0, 30), formato: String(t.formato ?? "").slice(0, 30), cidade: String(t.cidade ?? "").slice(0, 100), estado: String(t.estado ?? "").slice(0, 40), conquistadoEm: milissegundosTime(t.conquistadoEm) }; });
+  const itens = pagina.filter(s => daGeracao(s.data())).map(s => { const t = s.data(); return { campeonatoId: s.id, campeonato: String(t.campeonato ?? "Campeonato").slice(0, 60), time: String(t.time ?? "").slice(0, 80), cor: /^#[a-f0-9]{6}$/i.test(t.cor) ? t.cor : "#FE7552", modelo: "classica", modalidade: String(t.modalidade ?? "").slice(0, 30), formato: String(t.formato ?? "").slice(0, 30), cidade: String(t.cidade ?? "").slice(0, 100), estado: String(t.estado ?? "").slice(0, 40), conquistadoEm: milissegundosTime(t.conquistadoEm), desenho: normalizarDesenhoTrofeu(t.desenho) }; });
   return { itens, proximoCursor: s.docs.length > 6 ? pagina.at(-1)!.id : null };
 }

@@ -1,3 +1,4 @@
+import { normalizarDesenhoTrofeu } from "./desenhoTrofeu";
 import { gerarTabela, REGRAS_PADRAO } from "./campeonato/tabela";
 import { aplicarResultado, calcularClassificacao, campeaoDe, resolverJogos, temResultado } from "./campeonato/classificacao";
 import type { Campeonato, JogoCampeonato, TimeCampeonato } from "./campeonato/types";
@@ -38,6 +39,8 @@ export interface NovoCT {
   requisitos?: RequisitosCT;
   /** "manual": o organizador sorteia por fora e informa a ordem ao iniciar. Ausente = sorteio automático (padrão). */
   sorteio?: "manual";
+  /** Troféu personalizado (peças, ver desenhoTrofeu.ts). Ausente = a taça clássica. */
+  trofeuDesenho?: string;
 }
 // ── Requisitos de elenco por posição ──
 /** Titulares mínimos que a inscrição precisa cobrir: jogadores de linha e goleiros. */
@@ -90,6 +93,8 @@ export function novoCT(body: Dados, agora: number, gruposLiberado: boolean): Nov
     exigirCT(requisitos.linha + requisitos.goleiros <= minJogadores, `O mínimo de atletas por time (${minJogadores}) precisa cobrir os ${requisitos.linha + requisitos.goleiros} titulares.`);
   }
   exigirCT(body.sorteio == null || body.sorteio === "automatico" || body.sorteio === "manual", "Escolha como será o sorteio dos times.");
+  const trofeuDesenho = body.trofeu == null ? null : normalizarDesenhoTrofeu(body.trofeu);
+  exigirCT(body.trofeu == null || trofeuDesenho, "O troféu escolhido é inválido. Monte-o de novo no editor.");
   exigirCT(Array.isArray(body.locais) && body.locais.length >= 1 && body.locais.length <= 5, "Informe entre um e cinco locais de jogos.");
   const locais = body.locais.map((v) => { const l = objetoCT(v); return { nome: textoCT(l.nome, 80, "Local", true), endereco: textoCT(l.endereco, 200, "Endereço") }; });
   const p = objetoCT(body.premiacao);
@@ -99,7 +104,7 @@ export function novoCT(body: Dados, agora: number, gruposLiberado: boolean): Nov
     premiacao: { valorCentavos: numeroCT(p.valorCentavos ?? 0, 0, 100_000_000, "Prêmio em dinheiro"), trofeus: p.trofeus === true, medalhas: p.medalhas === true, texto: textoCT(p.texto, 1000, "Premiação") },
     regrasTexto: textoCT(body.regrasTexto, 5000, "Regulamento"), genero: String(genero), faixaEtaria: String(faixaEtaria), minJogadores, maxJogadores,
     // Só presente quando definido: a assinatura de pedidos antigos (criação idempotente) continua a mesma.
-    ...(requisitos ? { requisitos } : {}), ...(body.sorteio === "manual" ? { sorteio: "manual" as const } : {}) };
+    ...(requisitos ? { requisitos } : {}), ...(body.sorteio === "manual" ? { sorteio: "manual" as const } : {}), ...(trofeuDesenho ? { trofeuDesenho } : {}) };
 }
 
 /**

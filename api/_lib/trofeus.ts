@@ -35,6 +35,8 @@ export interface Trofeu {
   /** Gols e assistências da pessoa no campeonato (para "Artilheiro · 7 gols"). */
   gols: number;
   assistencias: number;
+  /** Troféu personalizado (campeonatos entre times). Só presente quando o campeonato tem um: os antigos não mudam. */
+  desenho?: string;
 }
 
 type Dados = Record<string, unknown> | null | undefined;
