@@ -65,7 +65,8 @@ export interface Topo {
   cor?: string;
   /** Escudo, ícone ou banner, já em HTML. */
   marca: string;
-  eyebrow: string;
+  /** Linha pequena acima do título (opcional). */
+  eyebrow?: string;
   titulo: string;
   /** Informações em pílulas abaixo do título (já sem vazios). */
   chips?: string[];
@@ -74,7 +75,7 @@ export interface Topo {
 export const topoHtml = ({ cor = COR_APP, marca, eyebrow, titulo, chips = [] }: Topo): string => `<header class="topo" style="--tinta:${comAlfa(cor, 0.42)}">
   <div class="orbita" aria-hidden="true"></div>
   ${marca}
-  <p class="eyebrow">${esc(eyebrow)}</p>
+  ${eyebrow ? `<p class="eyebrow">${esc(eyebrow)}</p>` : ""}
   <h1>${esc(titulo)}</h1>
   ${chips.length ? `<div class="chips">${chips.map((c) => `<span class="chip">${esc(c)}</span>`).join("")}</div>` : ""}
 </header>`;
@@ -137,6 +138,7 @@ ${iconUrl ? `<link rel="apple-touch-icon" href="${esc(iconUrl)}">
   .escudo { position:relative; width:88px; height:88px; margin:0 auto 14px; display:flex; align-items:center; justify-content:center; }
   .escudo img { width:88px; height:88px; object-fit:contain; filter:drop-shadow(0 6px 14px rgba(0,0,0,.35)); }
   .escudo svg { position:absolute; inset:0; filter:drop-shadow(0 6px 14px rgba(0,0,0,.35)); }
+  .escudo svg[viewBox="0 -12 240 300"] { position:static; }
   .escudo span { position:relative; margin-top:-4px; font-size:22px; font-weight:900; letter-spacing:.5px; }
   .marca { width:64px; height:64px; margin:0 auto 14px; border-radius:18px; display:block; object-fit:cover; }
   .marca-letra { display:flex; align-items:center; justify-content:center; background:var(--primaria); color:var(--escuro); font-size:28px; font-weight:900; }

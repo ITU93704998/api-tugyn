@@ -11,14 +11,14 @@ import type { Dados, InscricaoCT } from "./campeonatosTimesDominio";
  */
 export type EventoCT =
   | "pedido" | "aprovada" | "recusada" | "removida" | "desistiu" | "transferido" | "iniciado" | "cancelado"
-  | "jogo_marcado" | "resultado" | "suspenso" | "encerrado" | "mesario" | "prazo" | "lembrete";
+  | "jogo_marcado" | "resultado" | "suspenso" | "encerrado" | "mesario" | "prazo" | "lembrete" | "datas";
 
 const DIA = 24 * 3600_000;
 /** Janela da fila: um aviso igual (mesma chave) não sai de novo dentro dela. */
 const DEDUPE_CT: Record<EventoCT, number> = {
   pedido: 10 * 60_000, aprovada: 7 * DIA, recusada: 7 * DIA, removida: 7 * DIA, desistiu: 7 * DIA, transferido: 7 * DIA,
   iniciado: 30 * DIA, cancelado: 30 * DIA, jogo_marcado: 2 * DIA, resultado: 7 * DIA, suspenso: 7 * DIA, encerrado: 30 * DIA,
-  mesario: 7 * DIA, prazo: 30 * DIA, lembrete: 3 * DIA,
+  mesario: 7 * DIA, prazo: 30 * DIA, lembrete: 3 * DIA, datas: 2 * DIA,
 };
 const SEGURO = /[^A-Za-z0-9_-]/g;
 const curto = (v: unknown, max = 40): string => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "");
@@ -59,7 +59,12 @@ const nomeCT = (camp: Dados): string => curto(camp.nome, 50) || "Campeonato";
 const quandoTexto = (ms: number): string =>
   new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "short", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(ms).replace(".", "");
 
+const diaTexto = (ms: number): string =>
+  new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" }).format(ms);
+
 export const textosCT = {
+  datas: (camp: Dados, inscricoesAte: number, dataInicio: number | null) =>
+    ["Datas do campeonato mudaram", `${nomeCT(camp)}: inscrições até ${diaTexto(inscricoesAte)}${dataInicio ? ` · início em ${diaTexto(dataInicio)}` : ""}.`] as const,
   pedido: (camp: Dados, time: string) => ["Novo pedido de inscrição", `${curto(time)} quer participar de ${nomeCT(camp)}. Analise o elenco.`] as const,
   aprovadaDono: (camp: Dados, time: string) => ["Inscrição aprovada!", `${curto(time)} está confirmado em ${nomeCT(camp)}.`] as const,
   aprovadaAtleta: (camp: Dados, time: string) => ["Você foi inscrito num campeonato", `${curto(time)} vai disputar ${nomeCT(camp)} com você no elenco.`] as const,

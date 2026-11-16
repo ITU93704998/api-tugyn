@@ -7,7 +7,9 @@
  * Campeonatos de teste (`testeTugyn`) e os que estão sendo excluídos aparecem como "não encontrado".
  * O botão abre o app em `tugyn://campeonato/<id>`; com o app instalado, o próprio link https já abre o app.
  */
-import { blocoDasLojas, documentoPublico, esc, escudoHtml, topoHtml, type Plataforma } from "./paginaPublica";
+import { blocoDasLojas, documentoPublico, esc, topoHtml, type Plataforma } from "./paginaPublica";
+import { normalizarDesenhoTrofeu } from "./desenhoTrofeu";
+import { tacaSvg } from "./tacaSvg";
 import { fotoPequena } from "./timeLink";
 import { limpar } from "./turmaLink";
 
@@ -17,6 +19,8 @@ export interface CampeonatoPublico {
   nome: string; status: "inscricoes" | "em_andamento" | "encerrado" | "cancelado"; formato: string; modalidade: string;
   cidade: string; estado: string; inscricoesAte: number | null; dataInicio: number | null; inscricaoCentavos: number;
   maxTimes: number; aprovados: number; banner: string;
+  /** Taça escolhida pelo organizador (texto das peças); null = taça clássica. */
+  trofeu: string | null;
 }
 
 const FORMATOS: Record<string, string> = { triangular: "Triangular", quadrangular: "Quadrangular", mata: "Mata-mata", grupos_mata: "Grupos + mata-mata" };
@@ -44,6 +48,7 @@ export const campeonatoDoDocumento = (dados: unknown): CampeonatoPublico | null 
     inscricaoCentavos: num(d.inscricaoCentavos, 0, 1e9) ?? 0,
     maxTimes: num(d.maxTimes, 2, 64) ?? 0, aprovados: num(d.aprovados, 0, 64) ?? 0,
     banner: fotoPequena(d.bannerUrl, CORTE_BANNER_LINK),
+    trofeu: normalizarDesenhoTrofeu(d.trofeuDesenho),
   };
 };
 
@@ -87,11 +92,12 @@ export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos
     : iconUrl ? `<meta property="og:image" content="${esc(iconUrl)}">
 <meta property="og:image:width" content="512">
 <meta property="og:image:height" content="512">` : "";
-  const marca = escudoHtml({ escudo: "", cor: "#FE7552", nome: "Campeonato", sigla: "🏆" });
+  // A taça do campeonato no lugar do escudo, no mesmo quadro de 88px (a taça é 4:5: 70x88).
+  const marca = `<div class="escudo" role="img" aria-label="Troféu do campeonato">${tacaSvg(c?.trofeu ?? null, 70, 88)}</div>`;
 
   const corpo = c
     ? `  ${c.banner ? `<img src="${esc(c.banner)}" alt="" width="1200" height="630" style="display:block;width:100%;height:auto;border-radius:20px">` : ""}
-  ${topoHtml({ marca, eyebrow: "Campeonato entre times", titulo: c.nome, chips: [c.formato, c.modalidade, local].filter(Boolean) })}
+  ${topoHtml({ marca, titulo: c.nome, chips: [c.formato, c.modalidade, local].filter(Boolean) })}
   <div class="faixa${situacao!.aviso ? " faixa-aviso" : ""}"><span class="faixa-icone" aria-hidden="true">${situacao!.aviso ? "!" : "★"}</span>${esc(situacao!.texto)}</div>
   <section class="cartao">
     <p class="secao">Informações</p>
@@ -124,5 +130,5 @@ export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rot
     : c.inscricoesAte !== null && c.inscricoesAte <= agoraMs ? "Inscrições encerradas · começa em breve"
     : [c.inscricoesAte !== null ? `Inscrições até ${dataBrasilia(c.inscricoesAte).slice(0, 5)}` : "Inscrições abertas",
         `${vagas} ${vagas === 1 ? "vaga" : "vagas"}`, reais(c.inscricaoCentavos)].join(" · ");
-  return { rotulo: "Campeonato entre times", titulo: c.nome, detalhes: [c.formato, c.modalidade, local].filter(Boolean).join(" · "), destaque };
+  return { rotulo: "", titulo: c.nome, detalhes: [c.formato, c.modalidade, local].filter(Boolean).join(" · "), destaque };
 };

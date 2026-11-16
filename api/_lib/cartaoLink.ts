@@ -118,8 +118,8 @@ export const arvoreDoCartao = (d: DadosCartao, imagens: { logo: string; fundo: s
       // Miolo
       div({ alignItems: "center", justifyContent: "space-between", gap: 40 },
         div({ flexDirection: "column", gap: 18, maxWidth: temEscudo ? 720 : 1072 },
-          div({ alignSelf: "flex-start", background: "#FE7552", color: "#FFFFFF", fontSize: 24, fontWeight: 800, letterSpacing: 2, padding: "8px 18px", borderRadius: 999 },
-            cortar(d.rotulo.toUpperCase(), 40)),
+          d.rotulo ? div({ alignSelf: "flex-start", background: "#FE7552", color: "#FFFFFF", fontSize: 24, fontWeight: 800, letterSpacing: 2, padding: "8px 18px", borderRadius: 999 },
+            cortar(d.rotulo.toUpperCase(), 40)) : null,
           div({ fontSize: tamanhoTitulo, fontWeight: 800, lineHeight: 1.05, letterSpacing: -2 }, titulo),
           d.detalhes ? div({ fontSize: 32, fontWeight: 400, color: "#E4DED8" }, cortar(d.detalhes, 70)) : null),
         escudo),
@@ -131,11 +131,22 @@ export const arvoreDoCartao = (d: DadosCartao, imagens: { logo: string; fundo: s
   );
 };
 
+/**
+ * O @vercel/og só existe como ESM, e a API compila para CommonJS: um import() comum vira require(), que falha
+ * em Node sem require(esm) (o cartão caía sempre no ícone). Este import é nativo; os arquivos do pacote vão no deploy pelo
+ * includeFiles do vercel.json.
+ */
+type Gerador = typeof import("@vercel/og");
+// eslint-disable-next-line @typescript-eslint/no-implied-eval
+const importarNativo = new Function("m", "return import(m)") as (m: string) => Promise<Gerador>;
+let gerador: Promise<Gerador> | null = null;
+const importarGerador = (): Promise<Gerador> => (gerador ??= importarNativo("@vercel/og").catch((e) => { gerador = null; throw e; }));
+
 /** PNG do cartão. Lança se o gerador falhar (quem chama responde com o ícone). */
 export const gerarCartao = async (d: DadosCartao): Promise<Buffer> => {
   const [fundo, escudo] = await Promise.all([imagemComoDataUri(d.fundo), imagemComoDataUri(d.escudo?.url)]);
   // Carregado só quando há imagem para gerar: as páginas (a maioria dos pedidos) não pagam o custo do gerador.
-  const { ImageResponse } = await import("@vercel/og");
+  const { ImageResponse } = await importarGerador();
   const arvore = arvoreDoCartao(d, { logo: carregarLogo(), fundo, escudo });
   const resposta = new ImageResponse(arvore as unknown as ConstructorParameters<typeof ImageResponse>[0], {
     width: LARGURA_CARTAO,

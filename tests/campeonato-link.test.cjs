@@ -44,3 +44,15 @@ test('campeonato-link: situação de cada fase e nome escapado', () => {
   assert.match(sit({ status: 'cancelado' }), /cancelado/);
   assert.doesNotMatch(pagina(L.campeonatoDoDocumento(doc({ nome: '<script>x</script>' }))), /<script>x/);
 });
+
+test('campeonato-link: taça escolhida no lugar do escudo, sem o rótulo "Campeonato entre times"', () => {
+  const comTaca = pagina(L.campeonatoDoDocumento(doc({ trofeuDesenho: 'calice|asas|coroa|pedestal|pedra|prata||escudo||17212F' })));
+  assert.doesNotMatch(comTaca, /Campeonato entre times/);
+  assert.match(comTaca, /aria-label="Troféu do campeonato"><svg[^>]*viewBox="0 -12 240 300" width="70" height="88"/);
+  assert.match(comTaca, /#F4F7FA/, 'prata');
+  // Desenho inválido ou ausente: taça clássica dourada; nada do texto enviado entra na página.
+  const classica = pagina(L.campeonatoDoDocumento(doc({ trofeuDesenho: '<script>|x' })));
+  assert.match(classica, /#FBE08A/);
+  assert.doesNotMatch(classica, /<script>\|x/);
+  assert.equal(L.cartaoDoCampeonato(L.campeonatoDoDocumento(doc()), NOW).rotulo, '');
+});

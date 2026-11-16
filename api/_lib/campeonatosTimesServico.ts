@@ -452,6 +452,14 @@ export async function administrarCT(db: Firestore, uid: string, body: Dados, ago
       tx.update(ref, { status: "cancelado", motivoCancelamento: motivo, atualizadoEm: agora });
       tx.set(controle(db, uid), { ativos: Math.max(0, Number(cota.get("ativos") ?? 0) - 1) });
       avisos = agendarAvisosCT(tx, db, [avisoCT("cancelado", id, "1", Array.isArray(camp.envolvidos) ? camp.envolvidos as string[] : [], ...textosCT.cancelado(camp, motivo), uid)], agora);
+    } else if (acao === "alterarDatas") {
+      // Imprevisto antes do início: o organizador muda o fim das inscrições e/ou o início. Mesmas regras da criação.
+      exigirCT(camp.status === "inscricoes", "As datas só podem mudar antes do início. Depois, marque a data de cada jogo.", 409);
+      const inscricoesAte = numeroCT(body.inscricoesAte, agora + 60_000, agora + 180 * 86_400_000, "Prazo de inscrição");
+      const dataInicio = body.dataInicio == null ? null : numeroCT(body.dataInicio, inscricoesAte, agora + 365 * 86_400_000, "Início do campeonato");
+      if (inscricoesAte === camp.inscricoesAte && dataInicio === (camp.dataInicio ?? null)) return;
+      tx.update(ref, { inscricoesAte, dataInicio });
+      avisos = agendarAvisosCT(tx, db, [avisoCT("datas", id, `${inscricoesAte}_${dataInicio ?? 0}`, Array.isArray(camp.envolvidos) ? camp.envolvidos as string[] : [], ...textosCT.datas(camp, inscricoesAte, dataInicio), uid)], agora);
     } else if (acao === "marcarPagamento") {
       const tid = timeId(body); exigirCT(typeof body.pago === "boolean", "Pagamento inválido.");
       const ir = ref.collection("inscricoes").doc(tid), i = await tx.get(ir);

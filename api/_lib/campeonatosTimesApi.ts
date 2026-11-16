@@ -14,7 +14,7 @@ import { criarCT, listarCT, lerDetalheCT, gruposLiberadosCT, inscreverCT, respon
 import { dispararAvisosCT } from "./campeonatosTimesAvisos";
 import type { Aviso } from "./pushEnvio";
 
-const ACOES = new Set(["titulosTime", "saidasRegionais", "recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "finalizar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar", "excluir", "transferirAtleta", "mesario", "proximosJogos", "estatisticasAtleta", "modelosTrofeu", "alterarModelosTrofeu"]);
+const ACOES = new Set(["titulosTime", "saidasRegionais", "recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "finalizar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar", "excluir", "transferirAtleta", "mesario", "proximosJogos", "estatisticasAtleta", "modelosTrofeu", "alterarModelosTrofeu", "alterarDatas"]);
 export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "private, no-store");
   if (handleCors(req, res)) return;
