@@ -18,6 +18,7 @@ import {
   type ConvitePublico,
   type TimePublico,
 } from "../_lib/timeLink";
+import { campeonatoDoDocumento, isValidCampeonatoId, renderizarPaginaCampeonato, type CampeonatoPublico } from "../_lib/campeonatoLink";
 
 /**
  * GET /api/turma/<id>  (link de convite compartilhado)
@@ -28,6 +29,7 @@ import {
  *
  * GET /api/time/<linkId>  (vercel.json reescreve para cá com ?tipo=time: a página pública de um time, sem função nova)
  * GET /api/time/c/<codigo>  (?tipo=convite: o link de convocação de 1 hora; lê convitesTime/<codigo>)
+ * GET /api/campeonato/<id>  (?tipo=campeonato: a página pública de um campeonato entre times; lê campeonatosTimes/<id>)
  * Os links das lojas vêm das MESMAS variáveis do /api/version (APP_STORE_URL[_IOS|_ANDROID]), já validadas.
  */
 const PREVIA_TIMEOUT_MS = 2500;
@@ -89,6 +91,24 @@ const lerConvite = async (codigo: string): Promise<ConvitePublico | null> => {
   }
 };
 
+/** O campeonato (1 leitura; só os campos públicos do catálogo). null se não existir, for de teste, demorar ou falhar. */
+const lerCampeonato = async (id: string): Promise<CampeonatoPublico | null> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const leitura = getFirestore(getFirebaseApp()).collection("campeonatosTimes").doc(id).get();
+    const limite = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
+    });
+    const snap = await Promise.race([leitura, limite]);
+    return snap && snap.exists ? campeonatoDoDocumento(snap.data()) : null;
+  } catch (error) {
+    console.warn("[campeonato-link] campeonato indisponível:", error instanceof Error ? error.message : error);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
@@ -108,7 +128,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const bruto = Array.isArray(query.id) ? query.id[0] : query.id;
   const tipo = Array.isArray(query.tipo) ? query.tipo[0] : query.tipo;
   const ehTime = tipo === "time" || tipo === "convite";
-  if (ehTime ? !isValidLinkId(bruto) : !isValidTurmaId(bruto)) {
+  const ehCampeonato = tipo === "campeonato";
+  if (ehCampeonato ? !isValidCampeonatoId(bruto) : ehTime ? !isValidLinkId(bruto) : !isValidTurmaId(bruto)) {
     // Nunca devolve o que foi digitado.
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     return res.status(400).send("Link inválido.");
@@ -124,11 +145,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       : null;
   const iconUrl = origin ? new URL("/tugyn-icon.png", origin).toString() : null;
   const paginaUrl = origin
-    ? new URL(`/api/${tipo === "convite" ? "time/c" : ehTime ? "time" : "turma"}/${encodeURIComponent(bruto)}`, origin).toString()
+    ? new URL(`/api/${ehCampeonato ? "campeonato" : tipo === "convite" ? "time/c" : ehTime ? "time" : "turma"}/${encodeURIComponent(bruto)}`, origin).toString()
     : null;
   // Escudos vêm do Cloudinary (a página da turma não mostra imagens de fora).
   const cspComCloudinary =
     "default-src 'none'; img-src 'self' https://res.cloudinary.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+  if (ehCampeonato) {
+    const campeonato = await lerCampeonato(bruto);
+    res.setHeader("Content-Security-Policy", cspComCloudinary);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Vary", "User-Agent");
+    // 5 min na CDN: compartilhar no grupo não vira uma leitura por pessoa; vagas e situação se atualizam logo.
+    res.setHeader("Cache-Control", campeonato ? "public, s-maxage=300, stale-while-revalidate=600" : "public, s-maxage=60");
+    return res
+      .status(campeonato ? 200 : 404)
+      .send(renderizarPaginaCampeonato({ campeonato, id: bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl }));
+  }
 
   if (tipo === "convite") {
     const convite = await lerConvite(bruto);

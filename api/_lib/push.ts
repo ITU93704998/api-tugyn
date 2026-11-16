@@ -170,12 +170,16 @@ export interface PushDraft {
       | "time_pedido"
       | "time_aprovado"
       | "time_amistoso"
+      /** Campeonatos entre times (inscrição, tabela, jogo marcado, resultado, título): o toque abre o campeonato. */
+      | "campeonato_times"
       /** Notificação do painel para muitos usuários (Tugyn APP › Notificações): o toque só abre o app. */
       | "aviso_geral";
     /** Vazio nos avisos de desafio e de time. */
     turmaId: string;
     /** Só nos avisos de time: o toque abre o time (ou a convocação). */
     timeId?: string;
+    /** Só nos avisos de campeonato entre times: o toque abre o campeonato. */
+    campeonatoId?: string;
     /** Só nos avisos de desafio: o toque abre a aba destacando este desafio. */
     desafioId?: string;
     /** Identificador da ocorrência na outbox (não é uma chave idempotente do Expo). */

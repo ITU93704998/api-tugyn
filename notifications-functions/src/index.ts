@@ -13,6 +13,7 @@ import { consultarRecibos, recuperarAvisosPendentes } from "../../api/_lib/pushE
 import { registrarRotina } from "../../api/_lib/sistema";
 import { mexeNosTrofeus, sincronizarTrofeusCampeonato } from "../../api/_lib/trofeusSync";
 import { cancelarJogosAbandonados as cancelarAbandonados } from "../../api/_lib/campeonatoAbandonado";
+import { avisosAgendadosCT } from "../../api/_lib/campeonatosTimesServico";
 
 if (!getApps().length) initializeApp();
 const db = getFirestore();
@@ -147,6 +148,14 @@ export const cancelarJogosAbandonados = onSchedule({
 }, async () => {
   const r = await cancelarAbandonados(db);
   if (r.vistos) console.log(JSON.stringify({ evt: "campeonatos_abandonados", ...r }));
+});
+
+// Campeonatos entre times: aviso de prazo de inscrições encerrado (organizador) e lembrete na véspera do jogo (times).
+export const avisosCampeonatosTimes = onSchedule({
+  region, schedule: "every 30 minutes", timeZone: "America/Sao_Paulo", timeoutSeconds: 120, memory: "256MiB", maxInstances: 1, retryCount: 0, secrets: [expoAccessToken],
+}, async () => {
+  const r = await avisosAgendadosCT(db);
+  if (r.prazos || r.lembretes || r.truncado) console.log(JSON.stringify({ evt: "avisos_campeonatos_times", ...r }));
 });
 
 /** Resultados/correções são gravados pela API junto com a revisão da raiz. */

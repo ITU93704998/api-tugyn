@@ -21,7 +21,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 export const IOS_BUNDLE_PADRAO = "com.tugyn.tugynfut";
 export const ANDROID_PACKAGE_PADRAO = "com.tugynfut.tugyn";
 /** Caminhos que abrem o app (o resto do domínio continua só no navegador). */
-export const CAMINHOS_DO_APP = ["/api/turma/*", "/api/time/*"] as const;
+export const CAMINHOS_DO_APP = ["/api/turma/*", "/api/time/*", "/api/campeonato/*"] as const;
 
 type Env = Record<string, string | undefined>;
 

@@ -114,3 +114,28 @@ export async function limparBannersCT(db: Firestore, ate: number): Promise<Resul
   }
   return r;
 }
+
+/**
+ * Exclusão definitiva de um campeonato CANCELADO, só pelo organizador: apaga o campeonato com inscrições (e tentativas),
+ * elencos, jogos e controle da premiação. Os banners dos patrocinadores entram na fila de limpeza na mesma transação que
+ * marca a exclusão; a rotina diária os destrói quando o campeonato não existir mais. Os títulos/troféus (já retirados no
+ * cancelamento) são conferidos de novo pelo gatilho durável ao apagar o documento.
+ * Repetível: as subcoleções saem primeiro e o documento principal por último, então uma falha no meio permite repetir.
+ */
+export async function excluirCT(db: Firestore, uid: string, body: Dados): Promise<void> {
+  const cid = idDoCT(body), ref = db.doc(`${COLECAO_CT}/${cid}`);
+  const existe = await db.runTransaction(async (tx) => {
+    const [cs, perfil] = await tx.getAll(ref, db.doc(`users/${uid}`));
+    if (!cs.exists) return false; // já excluído (repetição após resposta perdida)
+    const camp = cs.data()!;
+    exigirCT(camp.organizadorId === uid, "Somente o organizador pode excluir o campeonato.", 403);
+    exigirCT(camp.status === "cancelado", "Só é possível excluir um campeonato cancelado. Cancele-o antes.", 409);
+    exigirCT(perfilDisponivel(perfil.data()), "Perfil indisponível.", 403);
+    for (const p of lista(camp)) if (p.publicId) tx.set(db.doc(`${FILA}/${chave(p.publicId)}`), { campeonatoId: cid, uid, publicId: p.publicId, status: "pendente", criadoEm: Date.now(), leaseAte: null, tentativas: 0 });
+    tx.update(ref, { excluindo: true, atualizadoEm: Date.now() });
+    return true;
+  });
+  if (!existe) return;
+  for (const col of await ref.listCollections()) await db.recursiveDelete(col);
+  await ref.delete();
+}

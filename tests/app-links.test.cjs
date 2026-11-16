@@ -30,7 +30,7 @@ test('iOS: appID = Team ID + bundle, só os caminhos de turma e time, applicatio
   assert.equal(res.headers['Content-Type'], 'application/json');
   const d = res.body.applinks.details[0];
   assert.deepEqual(d.appIDs, ['ABCDE12345.com.tugyn.tugynfut']);
-  assert.deepEqual(json(d.components), [{ '/': '/api/turma/*' }, { '/': '/api/time/*' }]);
+  assert.deepEqual(json(d.components), [{ '/': '/api/turma/*' }, { '/': '/api/time/*' }, { '/': '/api/campeonato/*' }]);
   // Só o formato moderno: nada do antigo misturado.
   assert.deepEqual(Object.keys(d).sort(), ['appIDs', 'components']);
   assert.deepEqual(Object.keys(res.body.applinks), ['details']);

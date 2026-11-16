@@ -25,6 +25,10 @@
     {
       "source": "/api/time/:linkId",
       "destination": "/api/turma/:linkId?tipo=time"
+    },
+    {
+      "source": "/api/campeonato/:id",
+      "destination": "/api/turma/:id?tipo=campeonato"
     }
   ]
 }

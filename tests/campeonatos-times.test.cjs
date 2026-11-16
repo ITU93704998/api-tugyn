@@ -23,20 +23,25 @@ const S=carregar('campeonatosTimesServico');
 const clone=x=>structuredClone(x);
 class Ref {
  constructor(db,p){this.db=db;this.path=p;this.id=p.split('/').at(-1);}
+ get parent(){return new Query(this.db,this.path.split('/').slice(0,-1).join('/'));}
  collection(n){return new Query(this.db,this.path+'/'+n);}
  async get(){return this.db.snap(this.path);}
  async delete(){this.db.data.delete(this.path);}
+ async set(v){this.db.data.set(this.path,clone(v));}
  async update(v){const a=this.db.data.get(this.path);if(!a)throw Error("not-found");this.db.data.set(this.path,{...a,...v});}
 }
 class Query {
  constructor(db,p,filters=[],orders=[],lim=Infinity,cursor=null){Object.assign(this,{db,path:p,filters,orders,lim,cursor});}
  doc(n){return new Ref(this.db,this.path+'/'+n);}
+ get id(){return this.path.split('/').at(-1);}
+ get parent(){const p=this.path.split('/');return p.length>1?new Ref(this.db,p.slice(0,-1).join('/')):null;}
  where(k,op,v){return new Query(this.db,this.path,[...this.filters,[k,op,v]],this.orders,this.lim,this.cursor);}
  orderBy(k,d='asc'){return new Query(this.db,this.path,this.filters,[...this.orders,[typeof k==='string'?k:'__name__',d]],this.lim,this.cursor);}
  limit(n){return new Query(this.db,this.path,this.filters,this.orders,n,this.cursor);}
- startAfter(...v){return new Query(this.db,this.path,this.filters,this.orders,this.lim,v);}
+ startAfter(...v){if(v.length===1&&typeof v[0]?.get==='function'){const s=v[0];v=[s.get(this.orders[0][0]),s.id];}return new Query(this.db,this.path,this.filters,this.orders,this.lim,v);}
  async get(){
-  let all=[...this.db.data.keys()].filter(p=>p.startsWith(this.path+'/')&&p.split('/').length===this.path.split('/').length+1).map(p=>this.db.snap(p));
+  const grupo=this.path.startsWith('**/')?this.path.slice(3):null;
+  let all=[...this.db.data.keys()].filter(p=>grupo?p.split('/').at(-2)===grupo&&p.split('/').length%2===0:p.startsWith(this.path+'/')&&p.split('/').length===this.path.split('/').length+1).map(p=>this.db.snap(p));
   all=all.filter(s=>this.filters.every(([k,op,v])=>op==='=='?s.get(k)===v:op==='array-contains'?s.get(k)?.includes(v):op==='<='?s.get(k)<=v:op==='>'?s.get(k)>v:false));
   const cmp=(s,t)=>{for(const [k,d]of this.orders){const a=k==='__name__'?s.id:s.get(k), b=k==='__name__'?t.id:t.get(k);if(a!==b)return(a<b?-1:1)*(d==='desc'?-1:1);}return 0;};
   all.sort(cmp);
@@ -48,6 +53,7 @@ class DB {
  constructor(seed={}){this.data=new Map(Object.entries(clone(seed)));this.tail=Promise.resolve();}
  doc(p){return new Ref(this,p);}
  collection(p){return new Query(this,p);}
+ collectionGroup(n){return new Query(this,'**/'+n);}
  snap(p){const v=this.data.get(p);return{id:p.split('/').at(-1),ref:this.doc(p),exists:v!==undefined,data:()=>v===undefined?undefined:clone(v),get:k=>v?.[k]};}
  async runTransaction(fn){
   // Serializa commits e aplica somente depois do callback: detecta leitura após escrita e testa rollback.
@@ -83,8 +89,10 @@ test('inscrição exige dono, modalidade, membros reais e atletas sem repetiçã
  db.data.get('times/a_1').modalidade='campo';await assert.rejects(S.inscreverCT(db,'a',pedido(id,'a'),NOW),/modalidade/);
 });
 test('aprovação exige organizador e revalida contas/elenco no servidor',async()=>{const{db,id}=await cenario();await S.inscreverCT(db,'a',pedido(id,'a'),NOW);await assert.rejects(S.responderCT(db,'b',{...pedido(id,'a'),aceitar:true},NOW),/organizador/);db.data.get('users/a').excluindoEm=NOW;await assert.rejects(S.responderCT(db,'org',{...pedido(id,'a'),aceitar:true},NOW),/indisponível/);assert.equal(db.data.get('campeonatosTimes/'+id).aprovados,0);});
-test('mesmo atleta não é aprovado por dois times em pedidos concorrentes',async()=>{
- const{db,id}=await cenario();db.data.set('times/b_1',time('b',['a','b']));await S.inscreverCT(db,'a',pedido(id,'a'),NOW);await S.inscreverCT(db,'b',{...pedido(id,'b'),jogadorIds:['a']},NOW);
+test('pedido anterior à reserva no pendente (sem trava): só uma aprovação concorrente conclui',async()=>{
+ const{db,id,base}=await cenario();db.data.set('times/b_1',time('b',['a','b']));await S.inscreverCT(db,'a',pedido(id,'a'),NOW);
+ // Simula um pedido legado do time B com o atleta "a" e sem trava própria (gravado antes desta versão).
+ db.data.delete(base+'/atletas/a');db.data.set(base+'/inscricoes/b_1',{...db.data.get(base+'/inscricoes/a_1'),timeId:'b_1',donoId:'b',timeNome:'Time b'});db.data.get(base).pendentes=2;
  const r=await Promise.allSettled(['a','b'].map(w=>S.responderCT(db,'org',{...pedido(id,w),aceitar:true},NOW)));assert.equal(r.filter(x=>x.status==='fulfilled').length,1);assert.equal(db.data.get('campeonatosTimes/'+id).aprovados,1);
 });
 test('cancelamento libera vaga e trava do atleta; início incompleto falha sem gravar jogos',async()=>{
@@ -416,4 +424,319 @@ test('saídas regionais: lista só envolvimentos e inscrições da conta, sem da
 test('saídas regionais: cursor pagina sem repetir nem revelar campeonatos de terceiros',async()=>{
  const R=carregar('saidasRegionaisCT'),seed={};for(let i=1;i<=22;i++)seed['campeonatosTimes/ct_'+i.toString(16).padStart(24,'0')]={nome:'Copa '+i,envolvidos:['a'],organizadorId:'b',status:'cancelado',criadoEm:100};
  const db=new DB(seed),p1=await R.listarSaidasRegionaisCT(db,'a',{}),p2=await R.listarSaidasRegionaisCT(db,'a',{cursor:p1.proximoCursor});assert.equal(p1.itens.length,20);assert.equal(p2.itens.length,2);assert.equal(new Set([...p1.itens,...p2.itens].map(c=>c.id)).size,22);
+});
+
+test('catálogo: campeonato de teste (testeTugyn) só aparece para conta testadora; "Meus" continua igual',async()=>{
+ const db=new DB(),id=n=>'ct_'+n.toString(16).padStart(24,'0');
+ db.data.set('users/a',{name:'A',status:'active',location:{city:'Palmas',state:'TO',cityId:'palmas_to'}});
+ db.data.set('users/t',{name:'T',status:'active',testadorTugyn:true,location:{city:'Palmas',state:'TO',cityId:'palmas_to'}});
+ db.data.set('campeonatosTimes/'+id(1),{status:'inscricoes',envolvidos:['t'],criadoEm:NOW,inscricoesAte:Date.now()+100000,cityId:'palmas_to',estado:'TO',modalidade:'campo'});
+ db.data.set('campeonatosTimes/'+id(2),{status:'inscricoes',envolvidos:['t'],criadoEm:NOW,inscricoesAte:Date.now()+200000,cityId:'palmas_to',estado:'TO',modalidade:'campo',testeTugyn:true});
+ for(const escopo of ['cidade','estado',undefined]){
+  const b={filtro:'abertos',...(escopo?{escopo}:{})};
+  assert.deepEqual((await S.listarCT(db,'a',b)).campeonatos.map(c=>c.id),[id(1)],'usuário real não vê teste ('+escopo+')');
+  assert.deepEqual((await S.listarCT(db,'t',b)).campeonatos.map(c=>c.id),[id(1),id(2)],'testador vê ('+escopo+')');
+ }
+ assert.equal((await S.listarCT(db,'t',{filtro:'meus'})).campeonatos.length,2);
+});
+
+test('excluir: só o organizador, só cancelado; apaga tudo, enfileira banners e é repetível',async()=>{
+ const x=await completo(),{db,id,base}=x;
+ // Banco simulado: subcoleções por prefixo do caminho, como o Admin SDK.
+ db.recursiveDelete=async col=>{for(const k of [...db.data.keys()])if(k.startsWith(col.path+'/'))db.data.delete(k);};
+ const Ref0=Object.getPrototypeOf(db.doc(base));Ref0.listCollections=async function(){const p=this.path+'/',n=new Set();for(const k of db.data.keys())if(k.startsWith(p))n.add(k.slice(p.length).split('/')[0]);return[...n].map(c=>({path:p+c}));};
+ if(!Ref0.delete)Ref0.delete=async function(){db.data.delete(this.path);};
+ const M=carregar('campeonatosTimesMidia',{'cloudinary':{v2:{uploader:{}}},'./config':{getAccount:()=>null}},true);
+ await assert.rejects(M.excluirCT(db,'org',{campeonatoId:id}),/cancelado/);
+ await S.administrarCT(db,'org',{acao:'cancelar',campeonatoId:id,motivo:'Chuva forte'},NOW);
+ await assert.rejects(M.excluirCT(db,'a',{campeonatoId:id}),e=>e.status===403);
+ db.data.get(base).patrocinadores=[{id:'p_0000000000000001',publicId:`turmas/org/campeonatos/${id}/abc`}];
+ assert.ok([...db.data.keys()].some(k=>k.startsWith(base+'/inscricoes/')));
+ await M.excluirCT(db,'org',{campeonatoId:id});
+ assert.equal([...db.data.keys()].some(k=>k===base||k.startsWith(base+'/')),false,'campeonato e subcoleções apagados');
+ const fila=[...db.data].filter(([k])=>k.startsWith('midiaCampeonatosTimes/'));assert.equal(fila.length,1);assert.equal(fila[0][1].publicId,`turmas/org/campeonatos/${id}/abc`);
+ await M.excluirCT(db,'org',{campeonatoId:id});
+});
+
+test('requisitos por posição: criação valida e a inscrição exige linha e goleiros (exemplos A, B e C)',async()=>{
+ assert.equal(D.novoCT(corpo(),NOW,true).requisitos,undefined,'campeonato sem requisitos (app antigo) continua igual');
+ assert.deepEqual(D.novoCT(corpo({minJogadores:5,requisitos:{linha:4,goleiros:1}}),NOW,true).requisitos,{linha:4,goleiros:1});
+ for(const q of [{linha:4,goleiros:2},{linha:0,goleiros:1},{linha:4,goleiros:4},{linha:4.5,goleiros:0},{linha:'4',goleiros:1}])assert.throws(()=>D.novoCT(corpo({minJogadores:5,requisitos:q}),NOW,true),undefined,JSON.stringify(q));
+ const camp={modalidade:'futsal',genero:'livre',faixaEtaria:'livre',minJogadores:5,maxJogadores:12,requisitos:{linha:4,goleiros:1}};
+ const timeCom=(pos)=>{const ids=pos.map((_,i)=>'p'+i);return{t:{donoId:'d',modalidade:'futsal',genero:'masculino',faixaEtaria:'livre',membros:ids,jogadores:Object.fromEntries(ids.map(id=>[id,{nome:'Atleta '+id}])),camisas:Object.fromEntries(ids.map((id,i)=>[id,pos[i]?{posicao:pos[i]}:{}]))},ids};};
+ const A=timeCom(['goleiro','fixo','ala','ala','pivo','ala','fixo']);assert.equal(D.elencoCT(A.t,camp,'d',A.ids).length,7,'A: 6 linha + 1 goleiro');
+ const B=timeCom(['fixo','ala','ala','pivo','ala']);assert.throws(()=>D.elencoCT(B.t,camp,'d',B.ids),/goleiro/,'B: sem goleiro');
+ const C=timeCom(['goleiro','goleiro','fixo','ala','pivo']);assert.throws(()=>D.elencoCT(C.t,camp,'d',C.ids),/linha.*Faltam 1/,'C: 3 linha + 2 goleiros');
+ const semPosicao=timeCom(['goleiro',null,null,null,null]);assert.equal(D.elencoCT(semPosicao.t,camp,'d',semPosicao.ids).length,5,'sem posição conta como linha');
+ const antigo={...camp};delete antigo.requisitos;assert.equal(D.elencoCT(B.t,antigo,'d',B.ids).length,5,'campeonato antigo: só mínimo e máximo');
+});
+test('requisitos: aprovação revalida as posições atuais do elenco',async()=>{
+ const db=new DB({'users/org':perfil('Organizador'),'users/a':perfil('A'),'users/g':perfil('G'),'times/a_1':{...time('a',['a','g']),camisas:{g:{posicao:'goleiro'},a:{posicao:'ala'}}}});
+ const {campeonatoId:id}=await S.criarCT(db,'org',corpo({minJogadores:2,requisitos:{linha:1,goleiros:1}}),true,NOW);
+ assert.deepEqual(db.data.get('campeonatosTimes/'+id).requisitos,{linha:1,goleiros:1});
+ await S.inscreverCT(db,'a',{campeonatoId:id,timeId:'a_1',jogadorIds:['a','g'],tentativaId:'tentativa01'},NOW);
+ db.data.get('times/a_1').camisas.g={posicao:'fixo'};
+ await assert.rejects(S.responderCT(db,'org',{campeonatoId:id,timeId:'a_1',aceitar:true},NOW),/goleiro/);
+});
+
+// ── Vínculo exclusivo do atleta por campeonato (reserva no pedido pendente) ──
+const comAtleta=(db)=>{db.data.set('times/b_1',time('b',['a','b']));};
+test('vínculo 1: mesmo atleta em dois times do mesmo campeonato é bloqueado já no pedido, com o nome e os ids',async()=>{
+ const{db,id,base}=await cenario();comAtleta(db);
+ await S.inscreverCT(db,'a',pedido(id,'a'),NOW);assert.deepEqual({...db.data.get(base+'/atletas/a'),desde:0,atualizadoEm:0},{timeId:'a_1',status:'pendente',desde:0,atualizadoEm:0});
+ await assert.rejects(S.inscreverCT(db,'b',{...pedido(id,'b'),jogadorIds:['a','b'],tentativaId:'tentativa0b'},NOW),e=>e.status===409&&e.code==='atleta_em_outro_time'&&/O jogador a já está inscrito neste campeonato por outro time/.test(e.message)&&e.detalhes.conflitos[0]==='a');
+ assert.equal(db.data.has(base+'/inscricoes/b_1'),false,'nada gravado do pedido recusado');assert.equal(db.data.has(base+'/atletas/b'),false);
+ await S.inscreverCT(db,'b',{...pedido(id,'b'),jogadorIds:['b'],tentativaId:'tentativa1b'},NOW);assert.equal(db.data.get(base+'/atletas/b').timeId,'b_1','time B participa sem o atleta');
+});
+test('vínculo 2: o mesmo atleta pode jogar outro campeonato pelo outro time',async()=>{
+ const{db,id}=await cenario();comAtleta(db);await S.inscreverCT(db,'a',pedido(id,'a'),NOW);
+ const outro=await S.criarCT(db,'org',corpo({chavePedido:'pedido-00000002'}),true,NOW);
+ await S.inscreverCT(db,'b',{campeonatoId:outro.campeonatoId,timeId:'b_1',jogadorIds:['a'],tentativaId:'tentativa2b'},NOW);
+ assert.equal(db.data.get('campeonatosTimes/'+outro.campeonatoId+'/atletas/a').timeId,'b_1');
+});
+test('vínculo 3: dois times inscrevendo o mesmo atleta ao mesmo tempo, só um conclui',async()=>{
+ const{db,id,base}=await cenario();comAtleta(db);
+ const r=await Promise.allSettled([S.inscreverCT(db,'a',pedido(id,'a'),NOW),S.inscreverCT(db,'b',{...pedido(id,'b'),jogadorIds:['a']},NOW)]);
+ assert.equal(r.filter(x=>x.status==='fulfilled').length,1);assert.equal(r.find(x=>x.status==='rejected').reason.code,'atleta_em_outro_time');
+ assert.equal([...db.data.keys()].filter(k=>k.startsWith(base+'/inscricoes/')&&!k.includes('/tentativas/')).length,1);
+});
+test('vínculo 4 e 5: sair do elenco geral não libera; reenvio com atleta de outro time é bloqueado',async()=>{
+ const x=await completo(),{db,id,base}=x;db.data.set('users/d',perfil('D'));db.data.set('times/d_1',time('d',['d','a']));
+ db.data.get('times/a_1').membros=[];delete db.data.get('times/a_1').jogadores.a;
+ assert.equal(db.data.get(base+'/atletas/a').timeId,'a_1','vínculo continua com o time A');
+ await assert.rejects(S.inscreverCT(db,'d',{campeonatoId:id,timeId:'d_1',jogadorIds:['d','a'],tentativaId:'tentativa0d'},NOW),/O jogador a já está inscrito/);
+ await S.inscreverCT(db,'d',{campeonatoId:id,timeId:'d_1',jogadorIds:['d'],tentativaId:'tentativa1d'},NOW);
+ await assert.rejects(S.inscreverCT(db,'d',{campeonatoId:id,timeId:'d_1',jogadorIds:['d','a'],tentativaId:'tentativa2d'},NOW),e=>e.code==='atleta_em_outro_time','acrescentar depois também é bloqueado');
+});
+test('vínculo 6: reenvio solta quem saiu; recusa e cancelamento antes do início liberam; depois do início não há cancelamento',async()=>{
+ const{db,id,base}=await cenario();db.data.set('times/a_1',time('a',['a','b']));
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),jogadorIds:['a','b'],tentativaId:'tentativa0a'},NOW);assert.ok(db.data.has(base+'/atletas/b'));
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),jogadorIds:['a'],tentativaId:'tentativa1a'},NOW);assert.equal(db.data.has(base+'/atletas/b'),false,'saiu do pedido, vínculo liberado');
+ await S.responderCT(db,'org',{...pedido(id,'a'),aceitar:false,motivo:'Elenco incompleto'},NOW);assert.equal(db.data.has(base+'/atletas/a'),false,'recusa libera');
+ const hist=[...db.data].filter(([k])=>k.startsWith(base+'/historicoAtletas/')).map(([,v])=>v.acao);assert.deepEqual(hist.sort(),['liberou','reservou','reservou']);
+ const y=await completo();assert.equal(y.db.data.get(y.base+'/atletas/b').status,'aprovado');
+ await S.cancelarInscricaoCT(y.db,'b',pedido(y.id,'b'),NOW);assert.equal(y.db.data.has(y.base+'/atletas/b'),false,'cancelamento antes do início libera');
+ const z=await completo();await S.iniciarCT(z.db,'org',{campeonatoId:z.id},NOW);
+ await assert.rejects(S.cancelarInscricaoCT(z.db,'a',pedido(z.id,'a'),NOW),/fechado/);assert.ok(z.db.data.has(z.base+'/atletas/a'),'em andamento: vínculo mantido');
+});
+test('vínculo 7: gravação direta pelo app é negada pelas regras do Firestore',()=>{
+ const regras=fs.readFileSync(path.resolve(__dirname,'../../../teste-regras/firestore-rules/firestore.rules'),'utf8');
+ assert.ok(regras.includes('match /campeonatosTimes/{documento=**} { allow read, write: if false; }'),'campeonatos (inclusive atletas e histórico) só pela API');
+});
+test('transferência: só o organizador, só antes do início, com vínculo, elenco do destino, limites e histórico',async()=>{
+ const x=await completo(),{db,id,base}=x;db.data.set('times/b_1',time('b',['b','a']));
+ const pedidoT={campeonatoId:id,jogadorId:'a',deTimeId:'a_1',paraTimeId:'b_1',motivo:'Acordo entre os times'};
+ await assert.rejects(S.transferirAtletaCT(db,'b',pedidoT,NOW),e=>e.status===403);
+ await assert.rejects(S.transferirAtletaCT(db,'org',{...pedidoT,paraTimeId:'c_1'},NOW),/elenco de Time c/);
+ await assert.rejects(S.transferirAtletaCT(db,'org',pedidoT,NOW),/menos de 1 atletas/,'origem ficaria abaixo do mínimo');
+ db.data.set('users/z',perfil('Z'));db.data.set('times/a_1',time('a',['a','z']));db.data.get(base+'/inscricoes/a_1').jogadores.push({id:'z',nome:'Z',numero:null,posicao:null});
+ await S.transferirAtletaCT(db,'org',pedidoT,NOW);
+ assert.equal(db.data.get(base+'/atletas/a').timeId,'b_1');assert.deepEqual(db.data.get(base+'/inscricoes/a_1').jogadores.map(j=>j.id),['z']);assert.ok(db.data.get(base+'/inscricoes/b_1').jogadores.some(j=>j.id==='a'));
+ assert.ok([...db.data.values()].some(v=>v&&v.acao==='transferiu'&&v.deTimeId==='a_1'&&v.motivo==='Acordo entre os times'));
+ await S.iniciarCT(db,'org',{campeonatoId:id},NOW);
+ await assert.rejects(S.transferirAtletaCT(db,'org',{...pedidoT,deTimeId:'b_1',paraTimeId:'a_1'},NOW),/antes do início/);
+});
+
+// ── Sorteio manual dos times ──
+test('sorteio: criação guarda "manual" só quando escolhido e recusa valor inválido',async()=>{
+ assert.equal(D.novoCT(corpo({sorteio:'manual'}),NOW,true).sorteio,'manual');
+ assert.equal('sorteio' in D.novoCT(corpo({sorteio:'automatico'}),NOW,true),false,'automático continua sem o campo (assinatura antiga igual)');
+ assert.equal('sorteio' in D.novoCT(corpo(),NOW,true),false);
+ assert.throws(()=>D.novoCT(corpo({sorteio:'roleta'}),NOW,true),/sorteio/);
+});
+test('sorteio manual: exige a ordem completa, sem repetição e só com aprovados; gera a tabela nessa ordem',async()=>{
+ const x=await cenario({sorteio:'manual'}),{db,id,base}=x;
+ for(const who of ['a','b','c']){await S.inscreverCT(db,who,pedido(id,who),NOW);await S.responderCT(db,'org',{...pedido(id,who),aceitar:true},NOW);}
+ assert.equal(S.detalheCT(id,db.data.get(base)).sorteio,'manual');
+ await assert.rejects(S.iniciarCT(db,'org',{campeonatoId:id},NOW),/todos os times/);
+ await assert.rejects(S.iniciarCT(db,'org',{campeonatoId:id,ordem:['a_1','b_1']},NOW),/todos os times/);
+ await assert.rejects(S.iniciarCT(db,'org',{campeonatoId:id,ordem:['a_1','a_1','b_1']},NOW),/repetido/);
+ await assert.rejects(S.iniciarCT(db,'org',{campeonatoId:id,ordem:['a_1','b_1','x_1']},NOW),/não está aprovado/);
+ assert.equal(db.data.get(base).status,'inscricoes','nada gerado nas tentativas inválidas');
+ await S.iniciarCT(db,'org',{campeonatoId:id,ordem:['c_1','a_1','b_1']},NOW);
+ assert.deepEqual(db.data.get(base).ordem,['c_1','a_1','b_1']);assert.equal(db.data.get(base).status,'em_andamento');
+});
+test('sorteio manual nos grupos: os quatro primeiros formam o Grupo A, os seguintes o Grupo B',()=>{
+ const ordem=['t1_1','t2_1','t3_1','t4_1','t5_1','t6_1','t7_1','t8_1'];
+ const g=D.gerarJogosCT('grupos_mata',D.ordemManualCT(ordem,[...ordem].reverse()));
+ assert.deepEqual(g.grupos,{A:ordem.slice(0,4),B:ordem.slice(4)});
+});
+test('sorteio automático ignora ordem enviada pelo cliente',async()=>{
+ const x=await completo();await S.iniciarCT(x.db,'org',{campeonatoId:x.id,ordem:['a_1','a_1','a_1']},NOW);
+ assert.equal(new Set(x.db.data.get(x.base).ordem).size,3);
+});
+
+// ── W.O., cartões, suspensão, mesário, avisos, busca, próximos jogos e estatísticas ──
+const iniciado=async()=>{const x=await completo();await S.iniciarCT(x.db,'org',{campeonatoId:x.id},NOW);const d=await S.lerDetalheCT(x.db,'org',{campeonatoId:x.id});return{...x,jogos:d.jogos.sort((p,q)=>p.ordem-q.ordem)};};
+const filaCT=db=>[...db.data.entries()].filter(([k])=>k.startsWith('pushDedupe/ct_')).map(([k,v])=>({chave:k.slice(11),para:v.aviso.recipientUids,titulo:v.aviso.draft.title,data:v.aviso.draft.data}));
+test('W.O.: placar fixo 3 x 0 para quem compareceu, sem estatísticas, cartões nem pênaltis',async()=>{
+ const{db,id,base,jogos}=await iniciado();const j=jogos[0];
+ await assert.rejects(S.resultadoCT(db,'org',V(j,{campeonatoId:id,jogoId:j.id,wo:'x_1'}),NOW),/W\.O\. inválido/);
+ const atleta=j.casa.split('_')[0];
+ await S.resultadoCT(db,'org',V(j,{campeonatoId:id,jogoId:j.id,wo:j.fora,golsCasa:5,golsFora:5,gols:{[atleta]:2},amarelos:{[atleta]:1}}),NOW);
+ const g=db.data.get(base+'/jogos/'+j.id);
+ assert.equal(g.golsCasa,0);assert.equal(g.golsFora,3);assert.equal(g.wo,j.fora);assert.deepEqual(g.gols,{});assert.deepEqual(g.amarelos,{});
+ assert.ok(filaCT(db).some(a=>a.titulo==='W.O. registrado'));
+});
+test('cartões: vermelho suspende no próximo jogo do time; suspenso não pode ter gol; aviso ao atleta',async()=>{
+ const{db,id,jogos}=await iniciado();
+ const j1=jogos.find(j=>j.casa==='a_1'||j.fora==='a_1'),j2=jogos.find(j=>j!==j1&&(j.casa==='a_1'||j.fora==='a_1'));
+ await assert.rejects(S.resultadoCT(db,'org',V(j1,{campeonatoId:id,jogoId:j1.id,golsCasa:1,golsFora:0,amarelos:{a:3}}),NOW),/Estatística/);
+ await S.resultadoCT(db,'org',V(j1,{campeonatoId:id,jogoId:j1.id,golsCasa:1,golsFora:0,vermelhos:{a:1}}),NOW);
+ const d=await S.lerDetalheCT(db,'b',{campeonatoId:id});
+ assert.deepEqual(d.suspensoes.map(s=>[s.atletaId,s.jogoId,s.motivo]),[['a',j2.id,'vermelho']]);
+ const atual=d.jogos.find(j=>j.id===j2.id);
+ await assert.rejects(S.resultadoCT(db,'org',V(atual,{campeonatoId:id,jogoId:j2.id,golsCasa:1,golsFora:0,gols:{a:1}}),NOW),e=>e.code==='atleta_suspenso'&&/a está suspenso/.test(e.message));
+ assert.ok(filaCT(db).some(a=>a.chave.startsWith('ct_suspenso_')&&a.para.join()==='a'));
+});
+test('cartões: três amarelos em jogos diferentes suspendem; dois no mesmo jogo valem expulsão',()=>{
+ const ins=[{timeId:'t',jogadores:[{id:'p'},{id:'q'}]}];
+ const jg=(n,st,am={})=>({id:'j'+n,ordem:n,casa:'t',fora:'u',status:st,amarelos:am});
+ const m=l=>JSON.parse(JSON.stringify(l));
+ assert.deepEqual(m(D.suspensoesCT(ins,{j1:jg(1,'finalizado',{p:1}),j2:jg(2,'finalizado',{p:1}),j3:jg(3,'finalizado',{p:1}),j4:jg(4,'pendente')}).map(s=>[s.atletaId,s.jogoId,s.motivo])),[['p','j4','amarelos']]);
+ assert.deepEqual(m(D.suspensoesCT(ins,{j1:jg(1,'finalizado',{q:2}),j2:jg(2,'pendente')}).map(s=>[s.atletaId,s.motivo])),[['q','vermelho']]);
+ assert.equal(D.suspensoesCT(ins,{j1:jg(1,'finalizado',{q:2}),j2:jg(2,'finalizado'),j3:jg(3,'pendente')}).length,0,'suspensão já cumprida');
+});
+test('mesário: organizador convida pelo @usuário (até 3); mesário lança placar e marca jogo, mas não finaliza',async()=>{
+ const{db,id,base,jogos}=await iniciado();db.data.set('users/m',perfil('Mesa'));db.data.set('usernames/mesa',{uid:'m'});
+ await assert.rejects(S.mesarioCT(db,'a',{campeonatoId:id,userName:'@mesa'},NOW),e=>e.status===403);
+ await assert.rejects(S.mesarioCT(db,'org',{campeonatoId:id,userName:'ninguem'},NOW),/Não encontramos/);
+ await S.mesarioCT(db,'org',{campeonatoId:id,userName:'@Mesa'},NOW);
+ assert.deepEqual(db.data.get(base).mesarios,[{uid:'m',nome:'Mesa',userName:'mesa'}]);assert.ok(db.data.get(base).envolvidos.includes('m'));
+ assert.ok(filaCT(db).some(a=>a.chave.startsWith('ct_mesario_')&&a.para.join()==='m'));
+ const d=await S.lerDetalheCT(db,'m',{campeonatoId:id});assert.ok(d.jogos.some(j=>j.podeEditarResultado));
+ await S.administrarCT(db,'m',{campeonatoId:id,acao:'agendarJogo',jogoId:jogos[0].id,quando:NOW+3600000,local:'Arena'},NOW);
+ assert.ok(filaCT(db).some(a=>a.chave.startsWith('ct_jogo_marcado_')));
+ for(const j of (await S.lerDetalheCT(db,'m',{campeonatoId:id})).jogos.sort((p,q)=>p.ordem-q.ordem))await S.resultadoCT(db,'m',V(j,{campeonatoId:id,jogoId:j.id,golsCasa:1,golsFora:0}),NOW);
+ await assert.rejects(S.finalizarCT(db,'m',{campeonatoId:id,revisaoEsperada:db.data.get(base).premiacaoVersao},NOW),/organizador/);
+ for(const n of ['x','y','w']){db.data.set('users/'+n,perfil(n));db.data.set('usernames/user'+n,{uid:n});}
+ await S.mesarioCT(db,'org',{campeonatoId:id,userName:'userx'},NOW);await S.mesarioCT(db,'org',{campeonatoId:id,userName:'usery'},NOW);
+ await assert.rejects(S.mesarioCT(db,'org',{campeonatoId:id,userName:'userw'},NOW),/até 3/);
+ await S.mesarioCT(db,'org',{campeonatoId:id,remover:'m'},NOW);assert.equal(db.data.get(base).mesarios.length,2);
+});
+test('avisos: pedido ao organizador, aprovação ao dono, início a todos; nunca para quem agiu; toque abre o campeonato',async()=>{
+ const{db,id}=await completo();
+ const fila=filaCT(db);
+ assert.ok(fila.some(a=>a.chave.startsWith('ct_pedido_')&&a.para.join()==='org'));
+ assert.ok(fila.some(a=>a.chave.startsWith('ct_aprovada_')));
+ assert.ok(fila.filter(a=>a.chave.startsWith('ct_aprovada_')).every(a=>!a.para.includes('org')));
+ assert.ok(fila.every(a=>a.data.tipo==='campeonato_times'&&a.data.campeonatoId===id));
+ await S.iniciarCT(db,'org',{campeonatoId:id},NOW);
+ const ini=filaCT(db).find(a=>a.chave.startsWith('ct_iniciado_'));assert.deepEqual([...ini.para].sort(),['a','b','c']);
+});
+test('avisos: time que desiste avisa o organizador; removido pelo organizador avisa o time',async()=>{
+ const{db,id}=await cenario();
+ await S.inscreverCT(db,'a',pedido(id,'a'),NOW);await S.cancelarInscricaoCT(db,'a',pedido(id,'a'),NOW);
+ assert.ok(filaCT(db).some(a=>a.chave.startsWith('ct_desistiu_')&&a.para.join()==='org'));
+ await S.inscreverCT(db,'b',pedido(id,'b'),NOW);await S.responderCT(db,'org',{...pedido(id,'b'),aceitar:true},NOW);await S.cancelarInscricaoCT(db,'org',pedido(id,'b'),NOW);
+ assert.ok(filaCT(db).some(a=>a.chave.startsWith('ct_removida_')&&a.para.join()==='b'));
+});
+test('busca por nome no catálogo: sem acento, sem maiúscula, mínimo de 2 letras',async()=>{
+ const{db}=await cenario({nome:'Copa São João'});
+ const ach=async b=>(await S.listarCT(db,'a',{filtro:'abertos',busca:b})).campeonatos.map(c=>c.nome);
+ assert.deepEqual(await ach('sao joao'),['Copa São João']);assert.deepEqual(await ach('JOÃO'),['Copa São João']);assert.deepEqual(await ach('zz'),[]);
+ await assert.rejects(ach('c'),/2 a 40/);
+});
+test('meus próximos jogos e estatísticas do atleta (com cache de 1 h)',async()=>{
+ const{db,id,jogos}=await iniciado();
+ const p=await S.proximosJogosCT(db,'a');assert.equal(p.jogos.length,2);assert.ok(p.jogos.every(j=>j.campeonatoId===id&&(j.casa.timeId==='a_1'||j.fora.timeId==='a_1')));
+ const j1=jogos.find(j=>j.casa==='a_1'||j.fora==='a_1');
+ await S.resultadoCT(db,'org',V(j1,{campeonatoId:id,jogoId:j1.id,golsCasa:j1.casa==='a_1'?2:1,golsFora:j1.casa==='a_1'?1:2,gols:{a:2},amarelos:{a:1}}),NOW);
+ assert.equal((await S.proximosJogosCT(db,'a')).jogos.length,1);
+ const e=await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW);
+ assert.deepEqual(JSON.parse(JSON.stringify(e.estatisticas)),{campeonatos:1,jogos:1,gols:2,assistencias:0,amarelos:1,vermelhos:0,titulos:0});
+ db.data.delete('campeonatosTimes/'+id);
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+1000)).estatisticas.gols,2,'cache');
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+2*3600000)).estatisticas.gols,0,'recalcula depois de 1 h');
+ db.data.get('users/a').isPublic=false;
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW)).estatisticas,null,'perfil privado: visitante não vê');
+ assert.ok((await S.estatisticasAtletaCT(db,'a',{},NOW)).estatisticas,'o dono vê as próprias');
+});
+test('rotina agendada: prazo encerrado avisa o organizador; véspera do jogo avisa os dois times',async()=>{
+ const enviados=[];const A=carregar('campeonatosTimesAvisos');
+ const S2=carregar('campeonatosTimesServico',{'./campeonatosTimesAvisos':{...A,dispararAvisosCT:async(_db,l)=>{enviados.push(...l);}}},true);
+ const{db,base,jogos}=await iniciado();
+ db.data.get(base+'/jogos/'+jogos[0].id).quando=NOW+18*3600000;
+ const c2=await S.criarCT(db,'org',corpo({chavePedido:'pedido-00000009',nome:'Outra'}),true,NOW);
+ db.data.get('campeonatosTimes/'+c2.campeonatoId).inscricoesAte=NOW-1000;
+ const r=await S2.avisosAgendadosCT(db,NOW);
+ assert.deepEqual(JSON.parse(JSON.stringify(r)),{prazos:1,lembretes:1,truncado:false});
+ assert.deepEqual([...enviados.find(a=>a.dedupeKey.startsWith('ct_prazo_')).recipientUids],['org']);
+ const lem=enviados.find(a=>a.dedupeKey.startsWith('ct_lembrete_'));
+ assert.equal(lem.recipientUids.length,2);assert.equal(lem.draft.title,'Seu jogo é amanhã');
+});
+test('exclusão de conta: cartões anonimizados, sai dos mesários e o cache de estatísticas é apagado',async()=>{
+ const E=carregar('campeonatosTimesExclusao');
+ const{db,id,base,jogos}=await iniciado();db.data.set('users/m',perfil('Mesa'));db.data.set('usernames/mesa',{uid:'m'});
+ await S.mesarioCT(db,'org',{campeonatoId:id,userName:'mesa'},NOW);
+ const j1=jogos.find(j=>j.casa==='a_1'||j.fora==='a_1');
+ await S.resultadoCT(db,'org',V(j1,{campeonatoId:id,jogoId:j1.id,golsCasa:1,golsFora:1,amarelos:{a:1}}),NOW);
+ db.data.set('estatisticasAtletasCT/a',{estatisticas:{},calculadoEm:NOW});
+ await E.excluirIdentidadeCT(db,'a');await E.excluirIdentidadeCT(db,'m');
+ const am=db.data.get(base+'/jogos/'+j1.id).amarelos;assert.equal('a' in am,false);assert.equal(Object.values(am)[0],1);
+ assert.deepEqual(db.data.get(base).mesarios,[]);assert.equal(db.data.has('estatisticasAtletasCT/a'),false);
+});
+test('auditoria: estatísticas de conta em exclusão não aparecem ao visitante, nem do cache',async()=>{
+ const{db}=await iniciado();
+ db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:1,gols:7},calculadoEm:NOW});
+ db.data.get('users/a').excluindoEm=NOW;
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW)).estatisticas,null);
+});
+test('auditoria: estatísticas vencidas, recálculo já reservado: devolve o último resultado sem recalcular',async()=>{
+ const{db}=await iniciado();
+ db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:9},calculadoEm:NOW-2*3600000,calculandoAte:NOW+30000});
+ const r=await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW);
+ assert.equal(r.estatisticas.campeonatos,9);assert.equal(r.calculadoEm,NOW-2*3600000);
+ const r2=await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+60000);
+ assert.equal(r2.estatisticas.campeonatos,1,'reserva vencida: recalcula');assert.equal(db.data.get('estatisticasAtletasCT/a').calculandoAte,undefined);
+});
+test('auditoria: próximos jogos lê os jogos uma vez e nada de quem não tem time inscrito',async()=>{
+ const{db,base}=await iniciado();db.data.get(base).envolvidos.push('z');
+ const old=Query.prototype.get;const paths=[];
+ Query.prototype.get=async function(){paths.push(this.path);return old.call(this);};
+ try{await S.proximosJogosCT(db,'a');await S.proximosJogosCT(db,'z');}finally{Query.prototype.get=old;}
+ assert.equal(paths.filter(p=>p===base+'/jogos').length,1);
+});
+test('auditoria: busca avisa quando só olhou a janela de 100 campeonatos',async()=>{
+ const{db}=await cenario({nome:'Copa São João'});
+ assert.equal((await S.listarCT(db,'a',{filtro:'abertos',busca:'joao'})).buscaLimitada,false);
+});
+test('auditoria: rotina de avisos ignora jogos de turma no grupo "jogos" e campeonato que não está em andamento',async()=>{
+ const enviados=[];const A=carregar('campeonatosTimesAvisos');
+ const S2=carregar('campeonatosTimesServico',{'./campeonatosTimesAvisos':{...A,dispararAvisosCT:async(_db,l)=>{enviados.push(...l);}}},true);
+ const{db,base,jogos}=await iniciado();
+ db.data.set('turmas/t1/jogos/2026-01-01',{quando:NOW+18*3600000,status:'pendente',casa:'x',fora:'y'});
+ db.data.get(base+'/jogos/'+jogos[0].id).quando=NOW+18*3600000;
+ db.data.get(base).status='encerrado';
+ assert.equal((await S2.avisosAgendadosCT(db,NOW)).lembretes,0);
+});
+test('revalidação: sem resultado anterior e outro pedido calculando, espera em vez de calcular junto',async()=>{
+ const{db}=await iniciado();
+ db.data.set('estatisticasAtletasCT/a',{calculandoAte:NOW+30000});
+ const old=Query.prototype.get;const paths=[];Query.prototype.get=async function(){paths.push(this.path);return old.call(this);};
+ let r;try{r=await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW);}finally{Query.prototype.get=old;}
+ assert.equal(r.calculando,true);assert.equal(paths.length,0,'não consultou campeonatos');
+});
+test('revalidação: outro pedido terminou entre a leitura e a reserva: usa o resultado dele',async()=>{
+ const{db}=await iniciado();
+ db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:1},calculadoEm:NOW-2*3600000});
+ const real=db.runTransaction.bind(db);db.runTransaction=fn=>{db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:5},calculadoEm:NOW});return real(fn);};
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW)).estatisticas.campeonatos,5);
+});
+test('revalidação: busca continua pelo cursor além da janela de 100',async()=>{
+ const{db}=await cenario({nome:'Copa Alfa'});
+ const ids=[...db.data.keys()].filter(p=>/^campeonatosTimes\/[^/]+$/.test(p));const modelo=db.data.get(ids[0]);
+ for(let i=0;i<120;i++){const id='ct_'+String(i).padStart(24,'0');db.data.set('campeonatosTimes/'+id,{...modelo,nome:i===110?'Taça Rara':'Copa '+i,inscricoesAte:modelo.inscricoesAte-1000+i});}
+ const p1=await S.listarCT(db,'a',{filtro:'abertos',busca:'rara'});
+ assert.equal(p1.campeonatos.length,0);assert.ok(p1.proximoCursor);assert.equal(p1.buscaLimitada,true);
+ const p2=await S.listarCT(db,'a',{filtro:'abertos',busca:'rara',cursor:p1.proximoCursor});
+ assert.deepEqual(p2.campeonatos.map(c=>c.nome),['Taça Rara']);assert.equal(p2.proximoCursor,null);
+});
+test('revalidação: lembretes paginados não perdem jogo atrás de muitos jogos de turma na janela',async()=>{
+ const enviados=[];const A=carregar('campeonatosTimesAvisos');
+ const S2=carregar('campeonatosTimesServico',{'./campeonatosTimesAvisos':{...A,dispararAvisosCT:async(_db,l)=>{enviados.push(...l);}}},true);
+ const{db,base,jogos}=await iniciado();
+ for(let i=0;i<700;i++)db.data.set('turmas/t'+i+'/jogos/d',{quando:NOW+13*3600000+i});
+ db.data.get(base+'/jogos/'+jogos[0].id).quando=NOW+20*3600000;
+ const r=await S2.avisosAgendadosCT(db,NOW);assert.equal(r.lembretes,1);assert.equal(r.truncado,false);
 });

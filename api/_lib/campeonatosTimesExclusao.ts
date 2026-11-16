@@ -31,13 +31,15 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
       }
       for (const s of jogos.docs) {
         const mudanca: Dados = {};
-        for (const campo of ["gols", "assistencias"]) {
+        for (const campo of ["gols", "assistencias", "amarelos", "vermelhos"]) {
           const mapa = s.get(campo) as Record<string, number> | undefined;
           if (mapa && Object.prototype.hasOwnProperty.call(mapa, uid)) { const copia = { ...mapa, [anon]: mapa[uid] }; delete copia[uid]; mudanca[campo] = copia; }
         }
         if (Object.keys(mudanca).length) tx.update(s.ref, mudanca);
       }
       const mudanca: Dados = { envolvidos: (c.envolvidos as string[]).filter((u) => u !== uid), aprovados, pendentes, atualizadoEm: Date.now() };
+      // Mesário que excluiu a conta sai da lista (nome e @usuário não ficam no campeonato).
+      if (Array.isArray(c.mesarios) && c.mesarios.some((m: { uid?: unknown }) => m?.uid === uid)) mudanca.mesarios = c.mesarios.filter((m: { uid?: unknown }) => m?.uid !== uid);
       if (c.organizadorId === uid) {
         Object.assign(mudanca, { organizadorId: "", organizadorNome: "Usuário removido", patrocinadores: [] });
         if (c.status === "inscricoes" || c.status === "em_andamento") {
@@ -50,4 +52,5 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
   }
   await db.doc(`controleCampeonatosTimes/${uid}`).delete();
   await db.doc(`liberacoesCampeonatosTimes/${uid}`).delete();
+  await db.doc(`estatisticasAtletasCT/${uid}`).delete();
 }

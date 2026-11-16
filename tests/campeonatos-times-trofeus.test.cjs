@@ -112,3 +112,74 @@ test('API: resultado tem revisão monotônica independente do relógio para disp
  const fonte=fs.readFileSync(path.join(root,'api/_lib/campeonatosTimesServico.ts'),'utf8');
  assert.match(fonte,/premiacaoVersao: Number\(camp\.premiacaoVersao \?\? 0\) \+ 1/);
 });
+
+function fixtureComTimes(){const x=JSON.parse(JSON.stringify(fixture()).replace(/"t(\d+)"/g,(_,n)=>'"d'+n+'_1"'));x.camp.finalizadoEm=5000;x.camp.modalidade='campo';x.ins.forEach((i,n)=>{i.criadoEm=2000;i.timeLinkId='LinkDoTime00000'+n;});return x;}
+function bancoComTimes(x){const db=fake(x);for(const i of x.ins)db.docs.set('times/'+i.timeId,{linkId:i.timeLinkId,criadoEm:1000,membros:['u0'],chave:'ABC123'});return db;}
+test('galeria do time: finalização premia campeão e atletas; repetir não grava e nome corrigido mantém data',async()=>{
+ const x=fixtureComTimes(),db=bancoComTimes(x),tid=x.camp.campeaoTimeId,g='times/'+tid+'/titulosCampeonatos/'+id;
+ await sync(db,id);assert.ok(db.docs.has(g));assert.equal(db.docs.get(g).campeonato,'Copa');assert.equal(db.docs.get(g).conquistadoEm,5000);assert.equal(db.docs.get(g).timeLinkId,x.ins.find(i=>i.timeId===tid).timeLinkId);
+ assert.ok(db.docs.get('users/u0/restrito/trofeus').itens[key]);db.writes=0;await sync(db,id);assert.equal(db.writes,0);
+ db.docs.get(p).nome='Copa corrigida';db.docs.get(p).finalizadoEm=9000;db.revision++;await sync(db,id);assert.equal(db.docs.get(g).campeonato,'Copa corrigida');assert.equal(db.docs.get(g).conquistadoEm,5000);
+});
+test('galeria do time: falha não bloqueia atletas e retry recupera; cancelamento e exclusão retiram o título',async()=>{
+ const x=fixtureComTimes(),db=bancoComTimes(x),g='times/'+x.camp.campeaoTimeId+'/titulosCampeonatos/'+id;
+ db.fail=s=>s===g;await assert.rejects(sync(db,id),/galeria do time pendente/);assert.equal(db.docs.get(ledger).concluido,false);assert.ok(db.docs.get('users/u0/restrito/trofeus').itens[key]);
+ db.fail=null;await sync(db,id);assert.ok(db.docs.has(g));assert.equal(db.docs.get(ledger).concluido,true);
+ db.docs.get(p).status='cancelado';db.revision++;await sync(db,id);assert.equal(db.docs.has(g),false);
+ const outra=bancoComTimes(fixtureComTimes());await sync(outra,id);outra.docs.delete(p);outra.revision++;await sync(outra,id);assert.equal(outra.docs.has(g),false);assert.equal(outra.docs.has(ledger),false);
+});
+test('galeria do time: não recria time excluído nem atribui título a outro time na mesma vaga',async()=>{
+ const x=fixtureComTimes(),tid=x.camp.campeaoTimeId,g='times/'+tid+'/titulosCampeonatos/'+id;
+ for(const modo of ['apagado','substituido','legado-novo','legado-valido']){
+  const db=bancoComTimes(x);if(modo==='apagado')db.docs.delete('times/'+tid);
+  if(modo==='substituido')db.docs.get('times/'+tid).linkId='OutroTime0000000X';
+  if(modo.startsWith('legado')){delete db.docs.get(p+'/inscricoes/'+tid).timeLinkId;db.docs.get('times/'+tid).criadoEm=modo==='legado-novo'?3000:1000;}
+  await sync(db,id);assert.equal(db.docs.has(g),modo==='legado-valido',modo);if(modo==='apagado')assert.equal(db.docs.has('times/'+tid),false);
+ }
+});
+test('galeria do time: novo campeão retira título do anterior; sessão antiga não premia após correção',async()=>{
+ const x=fixtureComTimes(),db=bancoComTimes(x),anterior=x.camp.campeaoTimeId;await sync(db,id);
+ for(const [jid,j]of Object.entries(x.jogos)){j.golsCasa=j.casa==='d2_1'?2:0;j.golsFora=j.fora==='d2_1'?2:0;j.gols={};j.assistencias={};db.docs.set(p+'/jogos/'+jid,clone(j));}
+ const{campeaoDe}=loadPure();const campeao=campeaoDe({times:Object.fromEntries(x.ins.map(i=>[i.timeId,{nome:i.timeNome,elenco:i.jogadores}])),jogos:x.jogos,sorteio:x.camp.ordem,regras:{pontosVitoria:3,pontosEmpate:1}});
+ assert.notEqual(campeao,anterior);db.docs.get(p).campeaoTimeId=campeao;db.revision++;await sync(db,id);assert.equal(db.docs.has('times/'+anterior+'/titulosCampeonatos/'+id),false);assert.equal(db.docs.has('times/'+campeao+'/titulosCampeonatos/'+id),true);
+ const outra=bancoComTimes(fixtureComTimes());outra.beforeUser=()=>{outra.docs.get(p).status='cancelado';outra.revision++;};await assert.rejects(sync(outra,id),/Premiação mudou/);assert.equal([...outra.docs.keys()].some(k=>k.includes('/titulosCampeonatos/')),false);
+});
+test('galeria do time: ledger antigo concluído é migrado sem regravar troféus pessoais iguais',async()=>{
+ const x=fixtureComTimes(),db=bancoComTimes(x);await sync(db,id);const g='times/'+x.camp.campeaoTimeId+'/titulosCampeonatos/'+id;db.docs.delete(g);
+ db.docs.get(ledger).assinatura='assinatura-da-versao-anterior';delete db.docs.get(ledger).timeIds;delete db.docs.get(ledger).versao;const em=db.docs.get('users/u0/restrito/trofeus').itens[key].em;await sync(db,id);assert.ok(db.docs.has(g));assert.equal(db.docs.get('users/u0/restrito/trofeus').itens[key].em,em);
+});
+
+test('TIT-01: time recriado na mesma vaga com o link antigo não recebe título anterior; reenvio legítimo recebe',async()=>{
+ const x=fixtureComTimes(),tid=x.camp.campeaoTimeId,g='times/'+tid+'/titulosCampeonatos/'+id;
+ for(const i of x.ins)i.timeCriadoEm=1000;
+ const recriado=bancoComTimes(x);recriado.docs.get('times/'+tid).criadoEm=3000;await sync(recriado,id);
+ assert.equal(recriado.docs.has(g),false,'link copiado, criação diferente');
+ const legado=bancoComTimes(fixtureComTimes());legado.docs.get('times/'+tid).criadoEm=3000;await sync(legado,id);
+ assert.equal(legado.docs.has(g),false,'inscrição antiga com link igual também exige prova temporal');
+ const ok=bancoComTimes(x);await sync(ok,id);assert.ok(ok.docs.has(g));assert.equal(ok.docs.get(g).timeCriadoEm,1000);
+ ok.docs.get(p+'/inscricoes/'+tid).criadoEm=2000;ok.revision++;await sync(ok,id);assert.ok(ok.docs.has(g),'reenvio da mesma inscrição mantém o título');
+});
+test('TIT-02: premiação concluída na mesma revisão não relê inscrições nem jogos; mudança e ledger antigo validam tudo',async()=>{
+ const x=fixtureComTimes(),db=bancoComTimes(x);await sync(db,id);
+ assert.equal(db.docs.get(ledger).versao,4);db.consultas=[];db.writes=0;await sync(db,id);
+ assert.deepEqual(db.consultas,[]);assert.equal(db.writes,0);
+ db.revision++;await sync(db,id);assert.ok(db.consultas.some(c=>c.endsWith('/inscricoes?status=aprovada')),'revisão nova valida');
+ db.consultas=[];delete db.docs.get(ledger).versao;await sync(db,id);assert.ok(db.consultas.some(c=>c.endsWith('/jogos')),'ledger antigo valida');
+ assert.equal(db.docs.get(ledger).versao,4,'migra para o formato atual');
+});
+
+test('TIT-01: título antigo sem a criação registrada é revalidado e regravado pelo reconciliador',async()=>{
+ const x=fixtureComTimes(),db=bancoComTimes(x),g='times/'+x.camp.campeaoTimeId+'/titulosCampeonatos/'+id;await sync(db,id);
+ delete db.docs.get(g).timeCriadoEm;db.docs.get(ledger).assinatura='assinatura-v2';delete db.docs.get(ledger).versao;
+ const em=db.docs.get('users/u0/restrito/trofeus').itens[key].em;await sync(db,id);
+ assert.equal(db.docs.get(g).timeCriadoEm,1000);assert.equal(db.docs.get(g).conquistadoEm,5000);assert.equal(db.docs.get('users/u0/restrito/trofeus').itens[key].em,em);
+});
+
+test('TIT-01: controle da implementação anterior (versão 3, mesma revisão) não pula a migração do título',async()=>{
+ const x=fixtureComTimes(),db=bancoComTimes(x),g='times/'+x.camp.campeaoTimeId+'/titulosCampeonatos/'+id;await sync(db,id);
+ const l=db.docs.get(ledger);delete db.docs.get(g).timeCriadoEm;l.versao=3;l.assinatura='assinatura-gravada-pela-versao-3';
+ assert.equal(l.concluido,true);const em=db.docs.get('users/u0/restrito/trofeus').itens[key].em;
+ await sync(db,id);assert.equal(db.docs.get(g).timeCriadoEm,1000,'título migrado');assert.equal(db.docs.get(g).conquistadoEm,5000);
+ assert.equal(db.docs.get(ledger).versao,4);assert.equal(db.docs.get('users/u0/restrito/trofeus').itens[key].em,em);
+ db.consultas=[];db.writes=0;await sync(db,id);assert.deepEqual(db.consultas,[]);assert.equal(db.writes,0);
+});
