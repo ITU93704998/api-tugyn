@@ -183,3 +183,21 @@ test('TIT-01: controle da implementação anterior (versão 3, mesma revisão) n
  assert.equal(db.docs.get(ledger).versao,4);assert.equal(db.docs.get('users/u0/restrito/trofeus').itens[key].em,em);
  db.consultas=[];db.writes=0;await sync(db,id);assert.deepEqual(db.consultas,[]);assert.equal(db.writes,0);
 });
+
+test('times: técnico do campeão ganha "tecnico" (só treinou = troféu próprio; jogou e treinou = selo no mesmo troféu)',()=>{
+ const x=fixture(),camp=x.ins.find(i=>i.timeId===x.camp.campeaoTimeId),outro=x.ins.find(i=>i.timeId!==x.camp.campeaoTimeId);
+ camp.treinador={id:'tecnico1',nome:'Técnico',foto:null};outro.treinador={id:'tecnico2',nome:'Outro técnico',foto:null};
+ let r=calcular(id,x.camp,x.ins,x.jogos);
+ assert.deepEqual(r.get('tecnico1').titulos,['tecnico']);assert.equal(r.get('tecnico1').gols,0);assert.equal(r.get('tecnico1').time,camp.timeNome);
+ assert.equal(r.has('tecnico2'),false,'técnico do time que não foi campeão não ganha nada');
+ const atleta=camp.jogadores[0].id;camp.treinador={id:atleta,nome:'Jogador-técnico',foto:null};
+ r=calcular(id,x.camp,x.ins,x.jogos);assert.ok(r.get(atleta).titulos.includes('campeao')&&r.get(atleta).titulos.includes('tecnico'));
+ assert.equal([...r.keys()].filter(k=>k===atleta).length,1,'um troféu só por campeonato');
+});
+
+test('times: técnico do campeão que jogou por outro time não acumula (taça não sai com o time errado)',()=>{
+ const x=fixture(),camp=x.ins.find(i=>i.timeId===x.camp.campeaoTimeId),outro=x.ins.find(i=>i.timeId!==x.camp.campeaoTimeId);
+ const atletaOutro=outro.jogadores[0].id;camp.treinador={id:atletaOutro,nome:'Duplo',foto:null};
+ const t=calcular(id,x.camp,x.ins,x.jogos).get(atletaOutro);
+ assert.ok(!t||(!t.titulos.includes('tecnico')&&t.time===outro.timeNome));
+});

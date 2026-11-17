@@ -545,8 +545,9 @@ const tratarAmistoso = async (req: VercelRequest, res: VercelResponse, uid: stri
     return res.status(500).json({ error: "Servidor não configurado." });
   }
   try {
-    const limpeza = parsed.value.action === "time_encerrar" || parsed.value.action === "amistoso_cancelar" || parsed.value.action === "amistoso_responder" && !parsed.value.aceitar;
-    if (!limpeza) await exigirRegiaoTimes(db, uid, "times");
+    // Liberação regional: só o que é NOVO (propor ou aceitar um amistoso) confere a região do cadastro. Placar, cancelar,
+    // recusar e encerrar o time continuam valendo para quem já tem time numa região desligada.
+    if (novo) await exigirRegiaoTimes(db, uid, "times");
     const resultado = await executarAmistoso(db, uid, parsed.value);
     if (!resultado.ok) return res.status(resultado.status).json({ code: resultado.code, error: resultado.error });
     console.log(JSON.stringify({ evt: parsed.value.action }));

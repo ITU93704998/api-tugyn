@@ -54,5 +54,20 @@ export function calcularTrofeusTimes(id: string, camp: Dados | null, inscricoes:
     resultado.set(uid, { origem: "times", turmaId: "", campeonatoId: id, modelo: "classica", campeonato: String(camp.nome || "Campeonato").slice(0, 60),
       turma: "Campeonato de times", time: a.time.timeNome.slice(0, 80), cor: /^#[0-9a-f]{6}$/i.test(a.time.cor ?? "") ? a.time.cor! : "#FE7552", titulos, gols: a.gols, assistencias: a.assistencias, ...(desenho ? { desenho } : {}) });
   }
+  // Técnico do time campeão: título "tecnico". Quem também jogou ganha o selo no MESMO troféu (um troféu por campeonato);
+  // quem só treinou ganha um troféu de técnico campeão, sem gols nem assistências.
+  const tecnico = aprovadas.find((i) => i.timeId === campeao)?.treinador?.id;
+  if (tecnico && ID_PESSOA_CT.test(tecnico)) {
+    const existente = resultado.get(tecnico), jogouPor = atletas.get(tecnico)?.time.timeId;
+    // Jogou pelo próprio campeão: selo no mesmo troféu. Jogou por OUTRO time (a inscrição hoje impede; dados antigos):
+    // não acumula, para a taça não sair com o nome do time errado; fica só o troféu de atleta.
+    if (jogouPor && jogouPor !== campeao) { /* sem título de técnico */ }
+    else if (existente) { if (!existente.titulos.includes("tecnico")) existente.titulos.push("tecnico"); }
+    else {
+      const time = aprovadas.find((i) => i.timeId === campeao)!;
+      resultado.set(tecnico, { origem: "times", turmaId: "", campeonatoId: id, modelo: "classica", campeonato: String(camp.nome || "Campeonato").slice(0, 60),
+        turma: "Campeonato de times", time: time.timeNome.slice(0, 80), cor: /^#[0-9a-f]{6}$/i.test(time.cor ?? "") ? time.cor! : "#FE7552", titulos: ["tecnico"], gols: 0, assistencias: 0, ...(desenho ? { desenho } : {}) });
+    }
+  }
   return resultado;
 }

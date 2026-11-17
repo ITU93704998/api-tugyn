@@ -136,16 +136,46 @@ export interface InscricaoCT {
   timeCriadoEm?: number | null;
   timeId: string; donoId: string; timeNome: string; escudoUrl: string | null; cor: string | null;
   jogadores: AtletaCT[]; status: "pendente" | "aprovada" | "recusada" | "cancelada";
+  /** Técnico escolhido pelo dono entre as pessoas do elenco do time (opcional; pode também jogar). */
+  treinador?: TreinadorCT | null;
   pago: boolean; motivo: string | null; criadoEm: number; atualizadoEm: number;
+  /** WhatsApp do dono (só dígitos, com 55), informado por ele. Só o organizador (e o próprio dono) vê; sai da inscrição
+   *  quando o campeonato termina, é cancelado, o pedido é recusado/cancelado ou a conta é excluída. */
+  whatsappDono?: string | null;
+  /** Quando o dono avisou "Já paguei" (ms). Some quando o organizador marca como pago ou responde "Ainda não". */
+  pagamentoAvisadoEm?: number | null;
   /** Tentativa do formulário que gravou este pedido (interna; não vai para a tela). */
   tentativaId?: string | null;
   tentativasTotal?: number;
+}
+/**
+ * WhatsApp do Brasil: só dígitos, sempre com o 55 (aceita com ou sem ele, com máscara). Vazio = sem número (null).
+ * DDD de 2 dígitos (sem zero) e número de 8 ou 9 dígitos.
+ */
+export function whatsappCT(v: unknown, rotulo: string): string | null {
+  if (v === undefined || v === null || v === "") return null;
+  exigirCT(typeof v === "string" && v.length <= 30, `${rotulo}: número inválido.`);
+  let d = (v as string).replace(/\D/g, "");
+  if (!d) return null;
+  if (d.length === 10 || d.length === 11) d = `55${d}`;
+  exigirCT(/^55[1-9]{2}\d{8,9}$/.test(d), `${rotulo}: informe o DDD e o número.`);
+  return d;
 }
 /** ID da tentativa de inscrição: gerado ao abrir o formulário e repetido nos retries. */
 export function tentativaCT(v: unknown): string | null {
   if (v === undefined || v === null) return null;
   exigirCT(typeof v === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(v), "Tentativa de inscrição inválida.");
   return v;
+}
+export interface TreinadorCT { id: string; nome: string; foto: string | null }
+/** Técnico da inscrição: opcional, uma pessoa que já está no elenco do time (pode ser o dono ou um dos atletas). */
+export function treinadorCT(time: Dados, id: unknown): TreinadorCT | null {
+  if (id === undefined || id === null || id === "") return null;
+  exigirCT(typeof id === "string" && ID_PESSOA_CT.test(id), "Técnico inválido.");
+  const membros = Array.isArray(time.membros) ? time.membros : [], jogadores = objetoCT(time.jogadores);
+  exigirCT(membros.includes(id) && Object.prototype.hasOwnProperty.call(jogadores, id), "Escolha como técnico alguém que faz parte do elenco do time.");
+  const jogador = objetoCT(jogadores[id]);
+  return { id, nome: textoCT(jogador.nome, 80, "Nome do técnico", true), foto: fotoAtletaCT(jogador.foto) };
 }
 export function elencoCT(time: Dados, camp: Dados, quem: string, ids: unknown): AtletaCT[] {
   exigirCT(time.donoId === quem, "Somente o dono pode inscrever este time.", 403);
@@ -177,6 +207,41 @@ export interface JogoCT extends JogoCampeonato {
   /** Cartões do jogo por atleta: amarelos (1 ou 2; 2 no mesmo jogo = expulsão) e vermelhos (1). */
   amarelos?: Record<string, number>;
   vermelhos?: Record<string, number>;
+  /** Quando o resultado foi lançado pela primeira vez (conta o prazo de correção do mesário). */
+  lancadoEm?: number | null;
+  /** Histórico das correções do resultado, da mais antiga à mais recente (no máximo MAX_CORRECOES_CT). */
+  correcoes?: CorrecaoCT[];
+}
+export interface PlacarCorrecaoCT { golsCasa: number; golsFora: number; penaltis: [number, number] | null; wo: string | null }
+/** Uma correção de resultado: quem, quando, por quê e o placar antes e depois. `detalhes`: o placar ficou igual, mudaram gols, assistências ou cartões dos atletas. */
+export interface CorrecaoCT { em: number; por: string; porNome: string; motivo: string; antes: PlacarCorrecaoCT; depois: PlacarCorrecaoCT; detalhes: boolean }
+export const MAX_CORRECOES_CT = 10;
+/** Mesário corrige só logo depois do jogo; depois disso, a correção fica com o organizador. */
+export const PRAZO_CORRECAO_MESARIO_CT = 24 * 60 * 60 * 1000;
+export const MOTIVO_CORRECAO_MIN_CT = 5;
+export const MOTIVO_CORRECAO_MAX_CT = 140;
+/** Fim do prazo do mesário para corrigir este jogo (null: ainda sem resultado ou lançado antes do registro do horário). */
+export const prazoCorrecaoMesarioCT = (j: Pick<JogoCT, "lancadoEm">): number | null =>
+  typeof j.lancadoEm === "number" && Number.isFinite(j.lancadoEm) ? j.lancadoEm + PRAZO_CORRECAO_MESARIO_CT : null;
+/** O mesário ainda pode mexer neste resultado? Sem resultado, sempre (é o lançamento); com resultado, só dentro do prazo. */
+export function mesarioPodeCorrigirCT(j: JogoCT, agora: number): boolean {
+  if (!temResultado(j)) return true;
+  const ate = prazoCorrecaoMesarioCT(j);
+  return ate !== null && agora <= ate;
+}
+/** Motivo obrigatório da correção: uma linha curta, sem espaços repetidos. */
+export function motivoCorrecaoCT(v: unknown): string {
+  const t = typeof v === "string" ? v.replace(/\s+/g, " ").trim() : "";
+  exigirCT(t.length >= MOTIVO_CORRECAO_MIN_CT, "Conte em uma frase por que o resultado está sendo corrigido.", 400);
+  exigirCT(t.length <= MOTIVO_CORRECAO_MAX_CT, `Motivo da correção: use até ${MOTIVO_CORRECAO_MAX_CT} caracteres.`, 400);
+  return t;
+}
+const placarCorrecao = (j: JogoCT): PlacarCorrecaoCT => ({ golsCasa: Number(j.golsCasa ?? 0), golsFora: Number(j.golsFora ?? 0), penaltis: Array.isArray(j.penaltis) ? [Number(j.penaltis[0]), Number(j.penaltis[1])] : null, wo: j.wo ?? null });
+/** Registra a correção no jogo novo (mantém só as últimas MAX_CORRECOES_CT). */
+export function comCorrecaoCT(antes: JogoCT, depois: JogoCT, autor: { uid: string; nome: string }, motivo: string, agora: number): JogoCT {
+  const a = placarCorrecao(antes), d = placarCorrecao(depois);
+  const correcao: CorrecaoCT = { em: agora, por: autor.uid, porNome: autor.nome, motivo, antes: a, depois: d, detalhes: JSON.stringify(a) === JSON.stringify(d) };
+  return { ...depois, correcoes: [...(Array.isArray(antes.correcoes) ? antes.correcoes : []), correcao].slice(-MAX_CORRECOES_CT) };
 }
 /** Placar do W.O. (padrão da várzea): o time presente vence por 3 x 0. */
 export const PLACAR_WO_CT = 3;

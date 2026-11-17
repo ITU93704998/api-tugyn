@@ -9,10 +9,12 @@ import { localizacaoDoPerfil } from "./mapaUsuarios";
 import { milissegundosTime } from "./galeriaTimes";
 import {
   COLECAO_CT, ID_CT, ID_TIME_CT, ID_JOGO_CT, MAX_ATIVOS_CT, RecusaCT, exigirCT, objetoCT, textoCT, numeroCT,
-  novoCT, ordemManualCT, elencoCT, fotoAtletaCT, requisitosDoCT, mensagemRequisitosCT, ID_PESSOA_CT, gerarJogosCT, tabelaCT, registrarResultadoCT, resultadoEditavelCT, tentativaCT, type Dados, type InscricaoCT, type JogoCT,
-  podeLancarCT, mesariosDoCT, suspensoesCT, MAX_MESARIOS_CT,
+  novoCT, ordemManualCT, elencoCT, treinadorCT, fotoAtletaCT, requisitosDoCT, mensagemRequisitosCT, ID_PESSOA_CT, gerarJogosCT, tabelaCT, registrarResultadoCT, resultadoEditavelCT, tentativaCT, type Dados, type InscricaoCT, type JogoCT,
+  whatsappCT, podeLancarCT, mesariosDoCT, suspensoesCT, MAX_MESARIOS_CT, mesarioPodeCorrigirCT, prazoCorrecaoMesarioCT, motivoCorrecaoCT, comCorrecaoCT,
 } from "./campeonatosTimesDominio";
-import { agendarAvisosCT, avisoCT, dispararAvisosCT, textosCT, timeTodo } from "./campeonatosTimesAvisos";
+import { temResultado } from "./campeonato/classificacao";
+import { PREMIUM_CT, lerDevolucaoPremiumCT, reservarPremiumCT } from "./campeonatosTimesPremium";
+import { agendarAvisosCT, avisoCT, dispararAvisosCT, reaisCT, textosCT, timeTodo } from "./campeonatosTimesAvisos";
 import type { Aviso } from "./pushEnvio";
 
 /** Nome comparável na busca: sem acento, minúsculo, espaços simples. */
@@ -52,16 +54,26 @@ const podeInscrever = (camp: Dados, agora: number) => exigirCT(camp.status === "
 export function resumoCT(id: string, d: Dados): Dados {
   return Object.fromEntries(["nome", "descricao", "modalidade", "formato", "status", "organizadorId", "organizadorNome", "cityId", "cidade", "estado", "inscricoesAte", "dataInicio", "inscricaoCentavos", "maxTimes", "aprovados", "criadoEm", "atualizadoEm"].map((k) => [k, d[k] ?? null]).concat([["id", id]]));
 }
+/** Papel de quem pede em "Meus campeonatos": organiza, é mesário ou joga (dono ou atleta de um time). Pedidos em análise só para quem organiza. */
+export function papelCT(d: Dados, uid: string): Dados {
+  if (d.organizadorId === uid) return { papel: "organizador", pendentes: Math.max(0, Number(d.pendentes ?? 0) || 0) };
+  const mesario = Array.isArray(d.mesarios) && (d.mesarios as { uid?: unknown }[]).some((m) => m?.uid === uid);
+  return { papel: mesario ? "mesario" : "jogador" };
+}
 export function detalheCT(id: string, d: Dados): Dados {
   const dto = resumoCT(id, d);
   dto.revisaoResultados = Number(d.premiacaoVersao ?? 0);
+  // Versão dos dados editáveis (sobre, regulamento, inscrição, premiação, datas): o formulário de edição a devolve.
+  dto.infoVersao = Number(d.infoVersao ?? 0) || 0;
   for (const k of ["locais", "premiacao", "regrasTexto", "genero", "faixaEtaria", "minJogadores", "maxJogadores", "requisitos", "patrocinadores", "campeaoTimeId", "motivoCancelamento", "grupos", "trofeuDesenho"]) dto[k] = d[k] ?? null;
   dto.sorteio = d.sorteio === "manual" ? "manual" : "automatico";
   dto.mesarios = mesariosDoCT(d);
   return dto;
 }
 
+/** Grupos + mata-mata sem gastar crédito: liberado para todos (fase de testes, `PREMIUM_CT`) ou liberação da conta. */
 export async function gruposLiberadosCT(db: Firestore, uid: string): Promise<boolean> {
+  if (PREMIUM_CT.gruposParaTodos) return true;
   // Liberação administrativa para homologação. O checkout por campeonato será integrado depois; o cliente nunca concede.
   const s = await db.doc(`liberacoesCampeonatosTimes/${uid}`).get();
   const d = dados(s);
@@ -111,6 +123,7 @@ export async function listarCT(db: Firestore, uid: string, body: Dados): Promise
     exigirCT(Array.isArray(c) && c.length === 2 && typeof c[0] === "number" && Number.isSafeInteger(c[0]) && c[0] > 0 && typeof c[1] === "string" && ID_CT.test(c[1]), "Página inválida.");
     q = q.startAfter(c[0], c[1]);
   }
+  const resumo = (s: QueryDocumentSnapshot) => body.filtro === "meus" ? { ...resumoCT(s.id, s.data()), ...papelCT(s.data(), uid) } : resumoCT(s.id, s.data());
   const cursorDe = (d: QueryDocumentSnapshot) => Buffer.from(JSON.stringify([d.get(campoOrdem), d.id])).toString("base64url");
   // Busca por nome: sem índice de texto no Firestore, cada página olha até 100 campeonatos da mesma consulta (na ordem do
   // prazo) e devolve até 30 com o nome. O cursor continua de onde parou: nada fica de fora, só exige "ver mais".
@@ -119,12 +132,12 @@ export async function listarCT(db: Firestore, uid: string, body: Dados): Promise
     const s = await q.limit(100).get();
     const achados = s.docs.filter((d) => (testador || d.get("testeTugyn") !== true) && normalizarBuscaCT(d.get("nome")).includes(busca));
     const corte = achados.length > 30 ? achados[29] : s.size >= 100 ? s.docs[s.docs.length - 1] : null;
-    return { campeonatos: achados.slice(0, 30).map((d) => resumoCT(d.id, d.data())), proximoCursor: corte ? cursorDe(corte) : null, buscaLimitada: Boolean(corte) && achados.length <= 30, ...(local ? { local } : {}) };
+    return { campeonatos: achados.slice(0, 30).map(resumo), proximoCursor: corte ? cursorDe(corte) : null, buscaLimitada: Boolean(corte) && achados.length <= 30, ...(local ? { local } : {}) };
   }
   const s = await q.limit(21).get();
   const pagina = s.docs.slice(0, 20), ultimo = pagina.at(-1);
   const visiveis = body.filtro === "abertos" && !testador ? pagina.filter((s) => s.get("testeTugyn") !== true) : pagina;
-  return { campeonatos: visiveis.map((s) => resumoCT(s.id, s.data())), proximoCursor: s.docs.length > 20 && ultimo ? Buffer.from(JSON.stringify([ultimo.get(campoOrdem), ultimo.id])).toString("base64url") : null, ...(local ? { local } : {}) };
+  return { campeonatos: visiveis.map(resumo), proximoCursor: s.docs.length > 20 && ultimo ? Buffer.from(JSON.stringify([ultimo.get(campoOrdem), ultimo.id])).toString("base64url") : null, ...(local ? { local } : {}) };
 }
 
 export async function lerDetalheCT(db: Firestore, uid: string, body: Dados): Promise<Dados> {
@@ -132,7 +145,7 @@ export async function lerDetalheCT(db: Firestore, uid: string, body: Dados): Pro
   // Mesmo instante de leitura para metadados, elencos e tabela; não mistura fases durante início/resultado concorrente.
   const ler = () => db.runTransaction(async (tx) => {
   const camp = snapCT(await tx.get(ref));
-  const organizador = camp.organizadorId === uid, lanca = podeLancarCT(camp, uid);
+  const organizador = camp.organizadorId === uid, lanca = podeLancarCT(camp, uid), agoraDetalhe = Date.now();
   const [insc, minhas, js] = await Promise.all([
     tx.get((organizador ? ref.collection("inscricoes") : ref.collection("inscricoes").where("status", "==", "aprovada")).limit(129)),
     organizador ? Promise.resolve(null) : tx.get(ref.collection("inscricoes").where("donoId", "==", uid).limit(128)),
@@ -143,8 +156,15 @@ export async function lerDetalheCT(db: Firestore, uid: string, body: Dados): Pro
   const aprovadas = inscricoes.filter((i) => i.status === "aprovada");
   const antigas = inscricoes.filter(i => i.jogadores.some(j => !Object.prototype.hasOwnProperty.call(j, "foto"))).map(i => i.timeId);
   const comFotos = inscricoes.map(i => ({ ...i, jogadores: i.jogadores.map(j => ({ ...j, foto: fotoAtletaCT(j.foto) })) }));
-  const visiveis = comFotos.map(({ tentativaId: _interno, tentativasTotal: _total, timeLinkId: _identidadeTime, timeCriadoEm: _criacaoTime, ...i }) => ({ ...i, pago: organizador || i.donoId === uid ? i.pago : false, motivo: organizador || i.donoId === uid ? i.motivo : null }));
-  return { antigas, detalhe: { campeonato: detalheCT(id, camp), inscricoes: visiveis, jogos: Object.values(jogos).map((j) => ({ ...j, versao: Number(j.versao ?? 0), podeEditarResultado: (camp.status === "em_andamento" ? lanca : organizador && camp.status === "encerrado") && Boolean(j.casa && j.fora) && resultadoEditavelCT(j, jogos) })),
+  // Pagamento e contato: o WhatsApp do dono só para o organizador (e o próprio dono), e só com o campeonato ativo; o aviso
+  // "Já paguei" para o organizador e o dono. "Como pagar" e o WhatsApp da organização: organizador e dono/técnico de time APROVADO.
+  const ativo = ativa(camp);
+  const visiveis = comFotos.map(({ tentativaId: _interno, tentativasTotal: _total, timeLinkId: _identidadeTime, timeCriadoEm: _criacaoTime, whatsappDono, pagamentoAvisadoEm, ...i }) => ({ ...i, pago: organizador || i.donoId === uid ? i.pago : false, motivo: organizador || i.donoId === uid ? i.motivo : null,
+    whatsappDono: ativo && (organizador || i.donoId === uid) && (i.status === "aprovada" || i.status === "pendente") ? whatsappDono ?? null : null,
+    pagamentoAvisadoEm: organizador || i.donoId === uid ? pagamentoAvisadoEm ?? null : null }));
+  const vePagamento = ativo && (organizador || aprovadas.some((i) => i.donoId === uid || i.treinador?.id === uid));
+  const campeonatoDto = { ...detalheCT(id, camp), pagamentoTexto: vePagamento ? (camp.pagamentoTexto as string | undefined) ?? null : null, whatsappOrganizacao: vePagamento ? (camp.whatsappOrganizacao as string | undefined) ?? null : null };
+  return { antigas, detalhe: { campeonato: campeonatoDto, inscricoes: visiveis, jogos: Object.values(jogos).map((j) => ({ ...j, correcoes: Array.isArray(j.correcoes) ? j.correcoes.map(({ por: _quem, ...k }) => k) : undefined, versao: Number(j.versao ?? 0), podeEditarResultado: (camp.status === "em_andamento" ? lanca && (organizador || mesarioPodeCorrigirCT(j, agoraDetalhe)) : organizador && camp.status === "encerrado") && Boolean(j.casa && j.fora) && resultadoEditavelCT(j, jogos), prazoCorrecaoAte: !organizador && lanca && camp.status === "em_andamento" && temResultado(j) ? prazoCorrecaoMesarioCT(j) : null })),
     classificacao: Object.keys(jogos).length ? tabelaCT(aprovadas, jogos, (camp.ordem ?? []) as string[], objetoCT(camp.grupos) as Record<string, string[]>) : [],
     // Suspensões automáticas (cartões), por jogo pendente: a tela mostra no cartão do jogo e no formulário do resultado.
     suspensoes: camp.status === "em_andamento" ? suspensoesCT(aprovadas, jogos) : [] } };
@@ -157,7 +177,8 @@ export async function lerDetalheCT(db: Firestore, uid: string, body: Dados): Pro
   return (await ler()).detalhe;
 }
 
-export async function criarCT(db: Firestore, uid: string, body: Dados, gruposLiberado: boolean, agora = Date.now()): Promise<Dados> {
+/** `_gruposLiberado`: mantido por compatibilidade; quem decide é `reservarPremiumCT`, dentro da transação. */
+export async function criarCT(db: Firestore, uid: string, body: Dados, _gruposLiberado: boolean, agora = Date.now()): Promise<Dados> {
   exigirCT(typeof body.chavePedido === "string" && /^[A-Za-z0-9_-]{12,100}$/.test(body.chavePedido), "Identificador do pedido inválido.");
   const id = `ct_${createHash("sha256").update(`${uid}:${body.chavePedido}`).digest("hex").slice(0, 24)}`;
   const ref = raiz(db, id), limite = controle(db, uid);
@@ -165,24 +186,25 @@ export async function criarCT(db: Firestore, uid: string, body: Dados, gruposLib
     const perfil = await autorUsuario(tx, db, uid);
     const [existente, cota] = await tx.getAll(ref, limite);
     // Um retry de criação já confirmada deve funcionar mesmo depois do prazo ou da liberação expirar.
-    const novo = novoCT(body, existente.exists ? Number(existente.get("criadoEm")) : agora, existente.exists || gruposLiberado);
+    // O formato premium é conferido abaixo (liberado para todos, liberação da conta ou 1 crédito), na mesma transação.
+    const novo = novoCT(body, existente.exists ? Number(existente.get("criadoEm")) : agora, true);
     const assinatura = createHash("sha256").update(JSON.stringify(novo)).digest("hex");
     if (existente.exists) {
       exigirCT(existente.get("pedidoHash") === assinatura, "Este pedido já foi usado com outros dados.", 409);
       return { campeonatoId: id, campeonato: detalheCT(id, dados(existente)) };
     }
-    if (novo.formato === "grupos_mata") {
-      const liberacao = await tx.get(db.doc(`liberacoesCampeonatosTimes/${uid}`));
-      exigirCT(liberacao.get("gruposMata") === true && (liberacao.get("expiraEm") == null || Number(liberacao.get("expiraEm")) > agora), "A liberação deste formato expirou.", 403);
-    }
+    // Grupos + mata-mata: lê agora (antes das gravações) e grava o gasto do crédito junto com a criação.
+    const premium = novo.formato === "grupos_mata" ? await reservarPremiumCT(tx, db, uid, id, agora) : null;
     const cidade = localizacaoDoPerfil(perfil);
     exigirCT(cidade?.id && cidade.cidade, "Complete a cidade no seu perfil antes de criar o campeonato.", 409);
     const ativos = Number(cota.get("ativos") ?? 0);
     exigirCT(ativos < MAX_ATIVOS_CT, `Você pode organizar até ${MAX_ATIVOS_CT} campeonatos em andamento.`, 409);
     const camp = { ...novo, organizadorId: uid, organizadorNome: textoCT(perfil.name ?? perfil.displayName, 100, "Organizador") || "Organizador",
       cityId: cidade.id, cidade: cidade.cidade, estado: cidade.uf, status: "inscricoes", aprovados: 0, pendentes: 0, pedidosTotal: 0,
-      envolvidos: [uid], ordem: [], grupos: {}, patrocinadores: [], campeaoTimeId: null, criadoEm: agora, atualizadoEm: agora, pedidoHash: assinatura };
+      envolvidos: [uid], ordem: [], grupos: {}, patrocinadores: [], campeaoTimeId: null, criadoEm: agora, atualizadoEm: agora, pedidoHash: assinatura,
+      ...(premium?.creditoId ? { creditoPremium: premium.creditoId } : {}) };
     tx.create(ref, camp);
+    premium?.gravar();
     tx.set(limite, { ativos: ativos + 1 });
     return { campeonatoId: id, campeonato: detalheCT(id, camp) };
   });
@@ -192,8 +214,12 @@ export async function inscreverCT(db: Firestore, uid: string, body: Dados, agora
   let avisos: Aviso[] = [];
   const id = campoId(body), tid = timeId(body), ref = raiz(db, id), ir = ref.collection("inscricoes").doc(tid);
   const tentativaId = tentativaCT(body.tentativaId);
+  // undefined (app antigo): mantém o número que já estava no pedido.
+  const whatsappNovo = body.whatsapp === undefined ? undefined : whatsappCT(body.whatsapp, "Seu WhatsApp");
   exigirCT(Array.isArray(body.jogadorIds) && body.jogadorIds.length >= 1 && body.jogadorIds.length <= 30 && body.jogadorIds.every((id) => typeof id === "string"), "Seleção de jogadores inválida.");
-  const assinatura = createHash("sha256").update(JSON.stringify([uid, tid, Array.isArray(body.jogadorIds) ? [...body.jogadorIds].sort() : body.jogadorIds])).digest("hex");
+  // O técnico entra na assinatura só quando existe: pedidos antigos (sem técnico) continuam com a mesma assinatura.
+  const tecnicoPedido = typeof body.treinadorId === "string" && body.treinadorId ? body.treinadorId : null;
+  const assinatura = createHash("sha256").update(JSON.stringify([uid, tid, Array.isArray(body.jogadorIds) ? [...body.jogadorIds].sort() : body.jogadorIds, ...(tecnicoPedido ? [tecnicoPedido] : [])])).digest("hex");
   const tentativaRef = tentativaId ? ir.collection("tentativas").doc(tentativaId) : null;
   await db.runTransaction(async (tx) => {
     avisos = [];
@@ -207,7 +233,8 @@ export async function inscreverCT(db: Firestore, uid: string, body: Dados, agora
       return;
     }
     const anteriores = dados(ins);
-    const assinaturaAnterior = createHash("sha256").update(JSON.stringify([uid, tid, Array.isArray(anteriores.jogadores) ? (anteriores.jogadores as { id: string }[]).map((j) => j.id).sort() : []])).digest("hex");
+    const tecnicoAnterior = typeof objetoCT(anteriores.treinador).id === "string" ? objetoCT(anteriores.treinador).id as string : null;
+    const assinaturaAnterior = createHash("sha256").update(JSON.stringify([uid, tid, Array.isArray(anteriores.jogadores) ? (anteriores.jogadores as { id: string }[]).map((j) => j.id).sort() : [], ...(tecnicoAnterior ? [tecnicoAnterior] : [])])).digest("hex");
     if (tentativaId && anteriores.tentativaId === tentativaId && anteriores.donoId === uid) {
       exigirCT(assinaturaAnterior === assinatura, "Os dados desta tentativa mudaram. Abra um novo pedido.", 409);
       tx.set(tentativaRef!, { assinatura, criadoEm: agora });
@@ -217,9 +244,12 @@ export async function inscreverCT(db: Firestore, uid: string, body: Dados, agora
     exigirCT(Number(anteriores.tentativasTotal ?? 0) < 64, "O limite de reenvios desta inscrição foi atingido.", 409);
     podeInscrever(camp, agora);
     exigirCT(ts.exists, "Este time não existe mais.", 404);
-    const time = dados(ts), jogadores = elencoCT(time, camp, uid, body.jogadorIds);
-    const perfis = await tx.getAll(...jogadores.map((j) => db.doc(`users/${j.id}`)));
+    const time = dados(ts), jogadores = elencoCT(time, camp, uid, body.jogadorIds), treinador = treinadorCT(time, body.treinadorId);
+    // O técnico que não joga também precisa ter a conta disponível (lido junto, depois dos atletas).
+    const tecnicoAParte = treinador && !jogadores.some((j) => j.id === treinador.id) ? treinador.id : null;
+    const perfis = await tx.getAll(...[...jogadores.map((j) => j.id), ...(tecnicoAParte ? [tecnicoAParte] : [])].map((p) => db.doc(`users/${p}`)));
     exigirCT(perfis.every((s) => s.exists && perfilDisponivel(dados(s))), "Há uma conta indisponível no elenco escolhido.", 409);
+    const perfilTecnico = treinador ? perfis[tecnicoAParte ? jogadores.length : jogadores.findIndex((j) => j.id === treinador.id)] : null;
     const anterior = dados(ins);
     exigirCT(anterior.status !== "aprovada", "Este time já está aprovado; o elenco inscrito está fechado.", 409);
     const pendente = anterior.status === "pendente";
@@ -232,11 +262,26 @@ export async function inscreverCT(db: Firestore, uid: string, body: Dados, agora
     const travas = new Map((await tx.getAll(...todosIds.map((j) => trava(ref, j)))).map((s, k) => [todosIds[k], s]));
     const emConflito = jogadores.filter((j) => { const s = travas.get(j.id)!; return s.exists && s.get("timeId") !== tid; });
     if (emConflito.length) throw conflitoDeAtletas(emConflito);
+    // Ninguém treina um time e joga por outro no mesmo campeonato (o título e a taça ficariam com o time errado).
+    // Técnico que não joga aqui: não pode estar reservado como atleta de outro time.
+    if (treinador && !novosIds.includes(treinador.id)) {
+      const t = await tx.get(trava(ref, treinador.id));
+      exigirCT(!(t.exists && t.get("timeId") !== tid), `${treinador.nome} já está inscrito como atleta por outro time neste campeonato e não pode ser o técnico deste.`, 409);
+    }
+    // Atletas escolhidos: não podem ser o técnico de outro time com pedido pendente ou aprovado.
+    const tecnicosFora = (await tx.get(ref.collection("inscricoes").where("treinador.id", "in", novosIds))).docs
+      .filter((s) => s.id !== tid && (s.get("status") === "pendente" || s.get("status") === "aprovada"));
+    if (tecnicosFora.length) {
+      const nomes = tecnicosFora.map((s) => (s.get("treinador") as InscricaoCT["treinador"])?.nome).filter(Boolean);
+      throw new RecusaCT(409, `${nomes.join(", ")} já é técnico de outro time neste campeonato e não pode jogar por este.`, "tecnico_em_outro_time");
+    }
     const liberados = anterioresIds.filter((j) => !novosIds.includes(j) && travas.get(j)?.get("timeId") === tid);
     const registro: InscricaoCT = { timeLinkId: typeof time.linkId === "string" ? time.linkId : null, timeCriadoEm: milissegundosTime(time.criadoEm) || null, timeId: tid, donoId: uid, timeNome: textoCT(time.nome, 60, "Time", true),
       escudoUrl: typeof time.escudoUrl === "string" && time.escudoUrl.startsWith("https://") ? time.escudoUrl.slice(0, 800) : null,
       cor: typeof time.cor === "string" && /^#[a-f0-9]{6}$/i.test(time.cor) ? time.cor : null,
-      jogadores: jogadores.map((j, k) => ({ ...j, foto: fotoAtletaCT(perfis[k].get("profileImage")) })), status: "pendente", pago: anterior.pago === true, motivo: null, criadoEm: Number(anterior.criadoEm ?? agora), atualizadoEm: agora, tentativaId, tentativasTotal: Number(anterior.tentativasTotal ?? 0) + 1 };
+      jogadores: jogadores.map((j, k) => ({ ...j, foto: fotoAtletaCT(perfis[k].get("profileImage")) })),
+      treinador: treinador ? { ...treinador, foto: fotoAtletaCT(perfilTecnico?.get("profileImage")) ?? treinador.foto } : null, status: "pendente", pago: anterior.pago === true, motivo: null,
+      whatsappDono: whatsappNovo === undefined ? (typeof anterior.whatsappDono === "string" ? anterior.whatsappDono : null) : whatsappNovo, pagamentoAvisadoEm: null, criadoEm: Number(anterior.criadoEm ?? agora), atualizadoEm: agora, tentativaId, tentativasTotal: Number(anterior.tentativasTotal ?? 0) + 1 };
     const envolvidos = Array.isArray(camp.envolvidos) ? camp.envolvidos as string[] : [];
     if (tentativaRef) tx.create(tentativaRef, { assinatura, criadoEm: agora });
     // Compatibilidade com a primeira versão que só guardava o último ID: preserva-o antes de substituir.
@@ -247,7 +292,7 @@ export async function inscreverCT(db: Firestore, uid: string, body: Dados, agora
     for (const j of novosIds) { const s = travas.get(j)!; tx.set(trava(ref, j), { timeId: tid, status: "pendente", desde: s.exists ? Number(s.get("desde") ?? agora) : agora, atualizadoEm: agora }); }
     for (const j of liberados) tx.delete(trava(ref, j));
     historicoAtletas(tx, ref, { acao: "reservou", timeId: tid, jogadorIds: novosIds, liberados, por: uid, em: agora });
-    tx.update(ref, { pendentes: Number(camp.pendentes) + (pendente ? 0 : 1), pedidosTotal: Number(camp.pedidosTotal) + (ins.exists ? 0 : 1), envolvidos: [...new Set([...envolvidos, uid, ...jogadores.map((j) => j.id)])], atualizadoEm: agora });
+    tx.update(ref, { pendentes: Number(camp.pendentes) + (pendente ? 0 : 1), pedidosTotal: Number(camp.pedidosTotal) + (ins.exists ? 0 : 1), envolvidos: [...new Set([...envolvidos, uid, ...jogadores.map((j) => j.id), ...(treinador ? [treinador.id] : [])])], atualizadoEm: agora });
     // Pedido novo (não o reenvio de um pendente): avisa o organizador.
     if (!pendente) avisos = agendarAvisosCT(tx, db, [avisoCT("pedido", id, `${tid}_${registro.tentativasTotal}`, [camp.organizadorId as string], ...textosCT.pedido(camp, registro.timeNome), uid)], agora);
   });
@@ -273,8 +318,16 @@ export async function responderCT(db: Firestore, uid: string, body: Dados, agora
       exigirCT(ts.exists, "Este time não existe mais.", 409);
       // Confere novamente o elenco: pode ter saído do time enquanto o pedido aguardava.
       const atuais = elencoCT(dados(ts), camp, i.donoId, i.jogadores.map((j) => j.id));
-      const perfis = await tx.getAll(db.doc(`users/${i.donoId}`), ...atuais.map((a) => db.doc(`users/${a.id}`)));
-      exigirCT(perfis.every((s) => s.exists && perfilDisponivel(dados(s))), "Há uma conta indisponível no elenco inscrito. Peça ao dono para revisar o pedido.", 409);
+      // O técnico também é conferido de novo: precisa continuar no elenco do time e com a conta disponível.
+      const tecnicoId = i.treinador?.id || null;
+      let tecnico: InscricaoCT["treinador"] = null;
+      if (tecnicoId) {
+        try { tecnico = treinadorCT(dados(ts), tecnicoId); } catch { throw new RecusaCT(409, "O técnico escolhido não faz mais parte do elenco do time. Peça ao dono para revisar o pedido."); }
+      }
+      const tecnicoAParte = tecnicoId && tecnicoId !== i.donoId && !atuais.some((a) => a.id === tecnicoId) ? tecnicoId : null;
+      const perfis = await tx.getAll(db.doc(`users/${i.donoId}`), ...atuais.map((a) => db.doc(`users/${a.id}`)), ...(tecnicoAParte ? [db.doc(`users/${tecnicoAParte}`)] : []));
+      exigirCT(perfis.every((s) => s.exists && perfilDisponivel(dados(s))), "Há uma conta indisponível no elenco inscrito (atletas ou técnico). Peça ao dono para revisar o pedido.", 409);
+      const perfilTecnico = !tecnicoId ? null : tecnicoAParte ? perfis[perfis.length - 1] : tecnicoId === i.donoId ? perfis[0] : perfis[1 + atuais.findIndex((a) => a.id === tecnicoId)];
       const refs = atuais.map((a) => trava(ref, a.id));
       const travas = await tx.getAll(...refs);
       // Pedidos anteriores à reserva no pendente não têm trava: a aprovação reserva (o primeiro aprovado vence).
@@ -282,17 +335,19 @@ export async function responderCT(db: Firestore, uid: string, body: Dados, agora
       if (emConflito.length) throw conflitoDeAtletas(emConflito);
       refs.forEach((r, k) => tx.set(r, { timeId: tid, status: "aprovado", desde: travas[k].exists ? Number(travas[k].get("desde") ?? agora) : agora, atualizadoEm: agora }));
       historicoAtletas(tx, ref, { acao: "aprovou", timeId: tid, jogadorIds: atuais.map((a) => a.id), por: uid, em: agora });
-      tx.update(ir, { status: "aprovada", jogadores: atuais.map((j, k) => ({ ...j, foto: fotoAtletaCT(perfis[k + 1].get("profileImage")) })), motivo: null, atualizadoEm: agora });
+      tx.update(ir, { status: "aprovada", jogadores: atuais.map((j, k) => ({ ...j, foto: fotoAtletaCT(perfis[k + 1].get("profileImage")) })),
+        ...(tecnico ? { treinador: { ...tecnico, foto: fotoAtletaCT(perfilTecnico?.get("profileImage")) ?? tecnico.foto } } : {}), motivo: null, atualizadoEm: agora });
       const vez = `${tid}_${Number(i.tentativasTotal ?? 0)}`;
       avisos = [avisoCT("aprovada", id, `dono_${vez}`, [i.donoId], ...textosCT.aprovadaDono(camp, i.timeNome), uid),
-        avisoCT("aprovada", id, `atletas_${vez}`, atuais.map((a) => a.id).filter((a) => a !== i.donoId), ...textosCT.aprovadaAtleta(camp, i.timeNome), uid)].filter((a): a is Aviso => Boolean(a));
+        // Atletas e o técnico (sem repetir o dono nem quem joga e também treina).
+        avisoCT("aprovada", id, `atletas_${vez}`, [...new Set([...atuais.map((a) => a.id), ...(tecnicoId ? [tecnicoId] : [])])].filter((a) => a !== i.donoId), ...textosCT.aprovadaAtleta(camp, i.timeNome), uid)].filter((a): a is Aviso => Boolean(a));
     } else {
       // Recusa libera as reservas deste pedido (só as que ainda são deste time).
       const refs = (Array.isArray(i.jogadores) ? i.jogadores : []).map((a) => trava(ref, a.id));
       const travas = refs.length ? await tx.getAll(...refs) : [];
       const liberados = travas.flatMap((s, k) => s.exists && s.get("timeId") === tid ? [refs[k]] : []);
       liberados.forEach((r) => tx.delete(r));
-      tx.update(ir, { status: "recusada", motivo: motivo || null, atualizadoEm: agora });
+      tx.update(ir, { status: "recusada", motivo: motivo || null, whatsappDono: null, pagamentoAvisadoEm: null, atualizadoEm: agora });
       historicoAtletas(tx, ref, { acao: "liberou", motivo: "recusada", timeId: tid, jogadorIds: liberados.map((r) => r.id), por: uid, em: agora });
       avisos = [avisoCT("recusada", id, `${tid}_${Number(i.tentativasTotal ?? 0)}`, [i.donoId], ...textosCT.recusada(camp, i.timeNome, motivo), uid)].filter((a): a is Aviso => Boolean(a));
     }
@@ -318,7 +373,7 @@ export async function cancelarInscricaoCT(db: Firestore, uid: string, body: Dado
     const travas = refs.length ? await tx.getAll(...refs) : [];
     const liberados = travas.flatMap((s, k) => s.exists && s.get("timeId") === tid ? [refs[k]] : []);
     liberados.forEach((r) => tx.delete(r));
-    tx.update(ir, { status: "cancelada", atualizadoEm: agora });
+    tx.update(ir, { status: "cancelada", whatsappDono: null, pagamentoAvisadoEm: null, atualizadoEm: agora });
     if (liberados.length) historicoAtletas(tx, ref, { acao: "liberou", motivo: uid === i.donoId ? "cancelada" : "removida", timeId: tid, jogadorIds: liberados.map((r) => r.id), por: uid, em: agora });
     tx.update(ref, { aprovados: Number(camp.aprovados) - (i.status === "aprovada" ? 1 : 0), pendentes: Number(camp.pendentes) - (i.status === "pendente" ? 1 : 0), atualizadoEm: agora });
     // Removida pelo organizador: avisa o time. Desistência do dono: avisa o organizador (só de inscrição aprovada ou pendente).
@@ -349,12 +404,25 @@ export async function iniciarCT(db: Firestore, uid: string, body: Dados, agora =
     const perfis = await tx.getAll(...uids.map((u) => db.doc(`users/${u}`)));
     exigirCT(perfis.every((s) => s.exists && perfilDisponivel(dados(s))), "Há uma conta indisponível nos elencos. Revise as inscrições antes de iniciar.", 409);
     times.forEach((s, k) => { exigirCT(s.exists, "Um time aprovado foi excluído. Remova a inscrição antes de iniciar.", 409); elencoCT(dados(s), camp, inscricoes[k].donoId, inscricoes[k].jogadores.map((j) => j.id)); });
+    // Técnicos: quem saiu do time ou ficou com a conta indisponível deixa de ser técnico (é opcional: não impede o início).
+    const tecnicosAParte = [...new Set(inscricoes.map((i) => i.treinador?.id).filter((t): t is string => Boolean(t) && !uids.includes(t as string)))];
+    const perfisTecnicos = new Map((tecnicosAParte.length ? await tx.getAll(...tecnicosAParte.map((t) => db.doc(`users/${t}`))) : []).map((s, k) => [tecnicosAParte[k], s]));
+    const semTecnico = inscricoes.flatMap((i, k) => {
+      const t = i.treinador?.id; if (!t) return [];
+      let noTime = true; try { treinadorCT(dados(times[k]), t); } catch { noTime = false; }
+      const perfil = perfisTecnicos.get(t);
+      const disponivel = perfil ? perfil.exists && perfilDisponivel(dados(perfil)) : true; // quem também joga ou é dono já foi conferido acima
+      return noTime && disponivel ? [] : [i.timeId];
+    });
     // Automático: sorteio no servidor. Manual: a ordem do sorteio feito por fora, conferida time a time.
     const ordem = camp.sorteio === "manual" ? ordemManualCT(body.ordem, inscricoes.map((i) => i.timeId)) : sortear(inscricoes.map((i) => i.timeId));
     const gerados = gerarJogosCT(camp.formato as Parameters<typeof gerarJogosCT>[0], ordem);
     for (const [jid, jogo] of Object.entries(gerados.jogos)) tx.create(ref.collection("jogos").doc(jid), jogo);
+    for (const tid of semTecnico) tx.update(ref.collection("inscricoes").doc(tid), { treinador: null, atualizadoEm: agora });
     tx.update(ref, { status: "em_andamento", ordem, grupos: gerados.grupos, iniciadoEm: agora, atualizadoEm: agora });
-    avisos = agendarAvisosCT(tx, db, [avisoCT("iniciado", id, "1", inscricoes.flatMap(timeTodo), ...textosCT.iniciado(camp), uid)], agora);
+    // O técnico retirado acima não recebe "Campeonato iniciado".
+    const paraAvisar = inscricoes.map((i) => (semTecnico.includes(i.timeId) ? { ...i, treinador: null } : i));
+    avisos = agendarAvisosCT(tx, db, [avisoCT("iniciado", id, "1", paraAvisar.flatMap(timeTodo), ...textosCT.iniciado(camp), uid)], agora);
   });
   return avisos;
 }
@@ -366,7 +434,7 @@ export async function resultadoCT(db: Firestore, uid: string, body: Dados, agora
   let avisos: Aviso[] = [];
   await db.runTransaction(async (tx) => {
     avisos = [];
-    await autorUsuario(tx, db, uid);
+    const perfil = await autorUsuario(tx, db, uid);
     const camp = snapCT(await tx.get(ref));
     // Em andamento: organizador ou mesário. Reabrir um encerrado (corrigir placar depois do título): só o organizador.
     if (camp.status === "encerrado") dono(camp, uid); else lancador(camp, uid);
@@ -380,6 +448,17 @@ export async function resultadoCT(db: Firestore, uid: string, body: Dados, agora
     const alterados = Object.entries(novo.jogos).filter(([j, jogo]) => JSON.stringify(anteriores[j]) !== JSON.stringify(jogo));
     // Retry idêntico após a finalização não reabre nem altera a revisão.
     if (!alterados.length) return;
+    // Correção (o jogo já tinha resultado): motivo obrigatório, prazo do mesário e registro no histórico do jogo.
+    const jogoAntes = anteriores[jid], posicao = alterados.findIndex((x) => x[0] === jid), correcao = posicao >= 0 && temResultado(jogoAntes);
+    let motivo = "";
+    if (correcao) {
+      motivo = motivoCorrecaoCT(body.motivo);
+      if (camp.organizadorId !== uid) exigirCT(mesarioPodeCorrigirCT(jogoAntes, agora), "O prazo do mesário para corrigir este jogo (24 horas depois do lançamento) acabou. Peça a correção ao organizador.", 403);
+      const bruto = typeof perfil.name === "string" ? perfil.name : typeof perfil.displayName === "string" ? perfil.displayName : "";
+      const nome = bruto.replace(/\s+/g, " ").trim().slice(0, 100) || "Organização";
+      novo.jogos[jid] = comCorrecaoCT(jogoAntes, novo.jogos[jid], { uid, nome }, motivo, agora);
+    } else if (posicao >= 0) novo.jogos[jid] = { ...novo.jogos[jid], lancadoEm: agora };
+    if (posicao >= 0) alterados[posicao] = [jid, novo.jogos[jid]];
     for (const [j, jogo] of alterados) tx.set(ref.collection("jogos").doc(j), jogo);
     // Ter campeão calculado significa pronto para revisão, não autorização para premiar.
     const status = "em_andamento";
@@ -394,7 +473,7 @@ export async function resultadoCT(db: Firestore, uid: string, body: Dados, agora
     const jogo = novo.jogos[jid], porTime = (t: string | null) => inscricoes.find((i) => i.timeId === t);
     const casa = porTime(jogo.casa), fora = porTime(jogo.fora);
     const lista: (Aviso | null)[] = [avisoCT("resultado", id, `${jid}_v${Number(jogo.versao ?? 0)}`, [...timeTodo(casa), ...timeTodo(fora)],
-      ...textosCT.resultado(camp, casa?.timeNome ?? "", Number(jogo.golsCasa), Number(jogo.golsFora), fora?.timeNome ?? "", Boolean(jogo.wo)), uid)];
+      ...textosCT.resultado(camp, casa?.timeNome ?? "", Number(jogo.golsCasa), Number(jogo.golsFora), fora?.timeNome ?? "", Boolean(jogo.wo), correcao ? motivo : undefined), uid)];
     const antes = new Set(suspensoesCT(inscricoes, anteriores).map((s) => `${s.atletaId}_${s.jogoId}`));
     for (const s of suspensoesCT(inscricoes, novo.jogos)) if (!antes.has(`${s.atletaId}_${s.jogoId}`)) lista.push(avisoCT("suspenso", id, `${s.atletaId}_${s.jogoId}`, [s.atletaId], ...textosCT.suspenso(camp, s.motivo), uid));
     avisos = agendarAvisosCT(tx, db, lista, agora);
@@ -415,9 +494,11 @@ export async function finalizarCT(db: Firestore, uid: string, body: Dados, agora
     if (body.revisaoEsperada !== Number(camp.premiacaoVersao ?? 0)) throw new RecusaCT(409, "Os resultados mudaram. Confira o campeonato antes de finalizar.", "campeonato_desatualizado");
     if (camp.status === "encerrado") return; // resposta perdida: não duplica cota nem prêmios
     exigirCT(camp.status === "em_andamento", "Somente um campeonato em andamento pode ser finalizado.", 409);
-    const [ins, js, cota] = await Promise.all([
+    const [ins, js, cota, todas] = await Promise.all([
       tx.get(ref.collection("inscricoes").where("status", "==", "aprovada").limit(17)),
       tx.get(ref.collection("jogos").limit(64)), tx.get(controle(db, uid)),
+      // Todas as inscrições (pendentes também): o WhatsApp dos donos sai de todas ao encerrar.
+      tx.get(ref.collection("inscricoes").limit(129)),
     ]);
     exigirCT(js.docs.length > 0 && js.docs.every(j => j.get("status") === "finalizado"), "Conclua todos os jogos antes de finalizar o campeonato.", 409);
     const inscricoes = ins.docs.map(s => s.data() as InscricaoCT);
@@ -425,6 +506,8 @@ export async function finalizarCT(db: Firestore, uid: string, body: Dados, agora
     // Recalcula campeão e confere placares/estatísticas; nenhum vencedor vem do cliente.
     exigirCT(calcularTrofeusTimes(id, { ...camp, status: "encerrado" }, inscricoes, jogos).size > 0, "Não foi possível validar o campeão e os resultados. Confira os jogos antes de finalizar.", 409);
     tx.update(ref, { status: "encerrado", finalizadoEm: agora, atualizadoEm: agora });
+    // Campeonato encerrado: o WhatsApp dos donos sai das inscrições.
+    for (const s of todas.docs) if (s.get("whatsappDono") || s.get("pagamentoAvisadoEm")) tx.update(s.ref, { whatsappDono: null, pagamentoAvisadoEm: null });
     tx.set(controle(db, uid), { ativos: Math.max(0, Number(cota.get("ativos") ?? 0) - 1) });
     const campeao = inscricoes.find((i) => i.timeId === camp.campeaoTimeId);
     const vez = `v${Number(camp.premiacaoVersao ?? 0)}`;
@@ -448,32 +531,80 @@ export async function administrarCT(db: Firestore, uid: string, body: Dados, ago
       const motivo = textoCT(body.motivo, 500, "Motivo do cancelamento", true);
       if (camp.status === "cancelado") return;
       exigirCT(camp.status !== "encerrado", "Um campeonato encerrado não pode ser cancelado.", 409);
-      const cota = await tx.get(controle(db, uid));
+      const [cota, todas] = await Promise.all([tx.get(controle(db, uid)), tx.get(ref.collection("inscricoes").limit(129))]);
+      // Cancelado antes do início: o crédito premium gasto volta para a conta do organizador.
+      const devolver = await lerDevolucaoPremiumCT(tx, db, camp, id, agora);
       tx.update(ref, { status: "cancelado", motivoCancelamento: motivo, atualizadoEm: agora });
+      devolver();
+      // Campeonato cancelado: o WhatsApp dos donos sai das inscrições.
+      for (const s of todas.docs) if (s.get("whatsappDono") || s.get("pagamentoAvisadoEm")) tx.update(s.ref, { whatsappDono: null, pagamentoAvisadoEm: null, atualizadoEm: agora });
       tx.set(controle(db, uid), { ativos: Math.max(0, Number(cota.get("ativos") ?? 0) - 1) });
       avisos = agendarAvisosCT(tx, db, [avisoCT("cancelado", id, "1", Array.isArray(camp.envolvidos) ? camp.envolvidos as string[] : [], ...textosCT.cancelado(camp, motivo), uid)], agora);
-    } else if (acao === "alterarDatas") {
-      // Imprevisto antes do início: o organizador muda o fim das inscrições e/ou o início. Mesmas regras da criação.
-      exigirCT(camp.status === "inscricoes", "As datas só podem mudar antes do início. Depois, marque a data de cada jogo.", 409);
-      // Manter o prazo atual (mesmo já encerrado) é permitido: dá para mudar só o início. Um prazo NOVO segue a regra da criação.
-      const mantemPrazo = body.inscricoesAte === camp.inscricoesAte;
-      const inscricoesAte = mantemPrazo ? Number(camp.inscricoesAte) : numeroCT(body.inscricoesAte, agora + 60_000, agora + 180 * 86_400_000, "Prazo de inscrição");
-      // Início: no fim das inscrições ou depois, e não antes de ontem (o meio-dia de Brasília de hoje ainda vale).
-      const dataInicio = body.dataInicio == null ? null : numeroCT(body.dataInicio, Math.max(inscricoesAte, agora - 86_400_000), agora + 365 * 86_400_000, "Início do campeonato");
-      if (inscricoesAte === camp.inscricoesAte && dataInicio === (camp.dataInicio ?? null)) return;
+    } else if (acao === "alterarDatas" || acao === "editarInfo") {
+      // Antes do início, o organizador muda as datas (imprevisto) e/ou sobre, regulamento, inscrição e premiação, numa
+      // gravação só. Mesmos limites da criação. `infoVersaoEsperada` (versão que o formulário abriu) recusa um formulário
+      // antigo em vez de desfazer a edição feita em outro aparelho; sem ela (app antigo), não confere.
+      exigirCT(camp.status === "inscricoes", acao === "editarInfo" ? "Os dados do campeonato só podem mudar antes do início." : "As datas só podem mudar antes do início. Depois, marque a data de cada jogo.", 409);
+      const versao = Number(camp.infoVersao ?? 0) || 0;
+      if (body.infoVersaoEsperada !== undefined && body.infoVersaoEsperada !== versao) throw new RecusaCT(409, "O campeonato foi editado em outro aparelho. Confira os dados e salve de novo.", "campeonato_editado");
+      const mudanca: Dados = {};
+      // O que muda para quem já está no campeonato (o "Sobre" não gera aviso).
+      const mudouParaTimes: string[] = [];
+      if (acao === "editarInfo") {
+        const p = objetoCT(body.premiacao);
+        exigirCT((p.trofeus === undefined || typeof p.trofeus === "boolean") && (p.medalhas === undefined || typeof p.medalhas === "boolean"), "Premiação inválida.");
+        const premiacao = { valorCentavos: numeroCT(p.valorCentavos ?? 0, 0, 100_000_000, "Prêmio em dinheiro"), trofeus: p.trofeus === true, medalhas: p.medalhas === true, texto: textoCT(p.texto, 1000, "Premiação") };
+        const regrasTexto = textoCT(body.regrasTexto, 5000, "Regulamento");
+        // Valor da inscrição: opcional (versões sem o campo mantêm o atual). Só um controle do organizador; o app não cobra.
+        const inscricaoCentavos = body.inscricaoCentavos === undefined ? Number(camp.inscricaoCentavos ?? 0) : numeroCT(body.inscricaoCentavos, 0, 10_000_000, "Valor da inscrição");
+        Object.assign(mudanca, { descricao: textoCT(body.descricao, 2000, "Descrição"), regrasTexto, premiacao, inscricaoCentavos });
+        const antes = objetoCT(camp.premiacao);
+        if (inscricaoCentavos !== Number(camp.inscricaoCentavos ?? 0)) mudouParaTimes.push(inscricaoCentavos > 0 ? `o valor da inscrição (agora ${reaisCT(inscricaoCentavos)})` : "o valor da inscrição (agora grátis)");
+        if (premiacao.valorCentavos !== Number(antes.valorCentavos ?? 0) || premiacao.trofeus !== (antes.trofeus === true) || premiacao.medalhas !== (antes.medalhas === true) || premiacao.texto !== String(antes.texto ?? "")) mudouParaTimes.push("a premiação");
+        if (regrasTexto !== String(camp.regrasTexto ?? "")) mudouParaTimes.push("o regulamento");
+      }
+      // Datas: sempre em alterarDatas; em editarInfo, só quando vierem.
+      let datasNovas: { inscricoesAte: number; dataInicio: number | null } | null = null;
+      if (acao === "alterarDatas" || body.inscricoesAte !== undefined) {
+        // Manter o prazo atual (mesmo já encerrado) é permitido: dá para mudar só o início. Um prazo NOVO segue a regra da criação.
+        const mantemPrazo = body.inscricoesAte === camp.inscricoesAte;
+        const inscricoesAte = mantemPrazo ? Number(camp.inscricoesAte) : numeroCT(body.inscricoesAte, agora + 60_000, agora + 180 * 86_400_000, "Prazo de inscrição");
+        // Início mantido (mesmo já passado hoje): continua valendo. Um início NOVO: no fim das inscrições ou depois, e não antes de ontem.
+        const mantemInicio = body.dataInicio != null && body.dataInicio === (camp.dataInicio ?? null);
+        const dataInicio = body.dataInicio == null ? null : mantemInicio ? Number(camp.dataInicio) : numeroCT(body.dataInicio, Math.max(inscricoesAte, agora - 86_400_000), agora + 365 * 86_400_000, "Início do campeonato");
+        exigirCT(dataInicio === null || dataInicio >= inscricoesAte, "Início do campeonato: precisa ser no fim das inscrições ou depois.");
+        if (inscricoesAte !== camp.inscricoesAte || dataInicio !== (camp.dataInicio ?? null)) {
+          mudanca.inscricoesAte = inscricoesAte; mudanca.dataInicio = dataInicio;
+          datasNovas = { inscricoesAte, dataInicio };
+        }
+      }
+      if (!Object.keys(mudanca).length) return;
       // Avisa quem está no campeonato AGORA (times aprovados e com pedido em análise, e os mesários), não o histórico de
-      // envolvidos (que inclui quem já saiu). Em lotes de até 500 pessoas por aviso.
-      const ativos = await tx.get(ref.collection("inscricoes").where("status", "in", ["aprovada", "pendente"]).limit(129));
-      const mesarios = Array.isArray(camp.mesarios) ? (camp.mesarios as { uid?: unknown }[]).map((m) => m?.uid).filter((u): u is string => typeof u === "string") : [];
-      const para = [...new Set([...ativos.docs.flatMap((s) => timeTodo(s.data() as InscricaoCT)), ...mesarios])].filter((u) => u !== uid);
-      tx.update(ref, { inscricoesAte, dataInicio });
-      const lotes = Array.from({ length: Math.ceil(para.length / 500) }, (_, k) => para.slice(k * 500, k * 500 + 500));
-      avisos = agendarAvisosCT(tx, db, lotes.map((lote, k) => avisoCT("datas", id, `${inscricoesAte}_${dataInicio ?? 0}_${k}`, lote, ...textosCT.datas(camp, inscricoesAte, dataInicio), uid)), agora);
+      // envolvidos (que inclui quem já saiu). Em lotes de até 500 pessoas por aviso. Leitura antes de qualquer gravação.
+      if (datasNovas || mudouParaTimes.length) {
+        const ativos = await tx.get(ref.collection("inscricoes").where("status", "in", ["aprovada", "pendente"]).limit(129));
+        const mesarios = Array.isArray(camp.mesarios) ? (camp.mesarios as { uid?: unknown }[]).map((m) => m?.uid).filter((u): u is string => typeof u === "string") : [];
+        const para = [...new Set([...ativos.docs.flatMap((s) => timeTodo(s.data() as InscricaoCT)), ...mesarios])].filter((u) => u !== uid);
+        const lotes = Array.from({ length: Math.ceil(para.length / 500) }, (_, k) => para.slice(k * 500, k * 500 + 500));
+        const d = datasNovas;
+        avisos = agendarAvisosCT(tx, db, [
+          ...(d ? lotes.map((lote, k) => avisoCT("datas", id, `${d.inscricoesAte}_${d.dataInicio ?? 0}_${k}`, lote, ...textosCT.datas(camp, d.inscricoesAte, d.dataInicio), uid)) : []),
+          ...(mudouParaTimes.length ? lotes.map((lote, k) => avisoCT("dados", id, `v${versao + 1}_${k}`, lote, ...textosCT.dados(camp, mudouParaTimes), uid)) : []),
+        ], agora);
+      }
+      // Uma gravação só no documento (com o atualizadoEm), e a versão sobe para o próximo formulário conferir.
+      tx.update(ref, { ...mudanca, infoVersao: versao + 1, atualizadoEm: agora });
+      return;
     } else if (acao === "marcarPagamento") {
       const tid = timeId(body); exigirCT(typeof body.pago === "boolean", "Pagamento inválido.");
       const ir = ref.collection("inscricoes").doc(tid), i = await tx.get(ir);
       exigirCT(i.exists && i.get("status") === "aprovada", "A inscrição precisa estar aprovada.", 409);
-      tx.update(ir, { pago: body.pago, atualizadoEm: agora });
+      const avisado = Number(i.get("pagamentoAvisadoEm") ?? 0) || 0, antes = i.get("pago") === true;
+      tx.update(ir, { pago: body.pago, pagamentoAvisadoEm: null, atualizadoEm: agora });
+      // Confirmou o pagamento, ou respondeu "Ainda não" a um "Já paguei": o dono fica sabendo.
+      const timeNome = String(i.get("timeNome") ?? "Time"), donoTime = i.get("donoId") as string;
+      if (body.pago && !antes) avisos = agendarAvisosCT(tx, db, [avisoCT("pagamento", id, `${tid}_pago_${agora}`, [donoTime], ...textosCT.pagamentoConfirmado(camp, timeNome), uid)], agora);
+      else if (!body.pago && avisado) avisos = agendarAvisosCT(tx, db, [avisoCT("pagamento", id, `${tid}_pendente_${avisado}`, [donoTime], ...textosCT.pagamentoPendente(camp, timeNome), uid)], agora);
     } else if (acao === "agendarJogo") {
       exigirCT(camp.status === "em_andamento", "Só é possível agendar jogos em andamento.", 409);
       exigirCT(typeof body.jogoId === "string" && ID_JOGO_CT.test(body.jogoId), "Jogo inválido.");
@@ -492,6 +623,56 @@ export async function administrarCT(db: Firestore, uid: string, body: Dados, ago
       }
     } else throw new RecusaCT(400, "Ação administrativa inválida.");
     tx.update(ref, { atualizadoEm: agora });
+  });
+  return avisos;
+}
+
+/**
+ * Pagamento e contato depois da aprovação (o Tugyn não recebe nem repassa dinheiro; só liga as pessoas):
+ * - "pagamentoContato" (organizador): "Como pagar" (até 500 letras) e o WhatsApp da organização;
+ * - "contatoDono" (dono do time): troca ou apaga o próprio WhatsApp na inscrição;
+ * - "avisarPagamento" (dono de time aprovado): "Já paguei", com push ao organizador;
+ * - "pedirContato" (organizador): push pedindo ao dono que informe o WhatsApp (no máximo um por dia).
+ * Só com o campeonato em inscrições ou em andamento.
+ */
+export async function contatoCT(db: Firestore, uid: string, body: Dados, agora = Date.now()): Promise<Aviso[]> {
+  const id = campoId(body), ref = raiz(db, id), acao = body.acao;
+  let avisos: Aviso[] = [];
+  await db.runTransaction(async (tx) => {
+    avisos = [];
+    await autorUsuario(tx, db, uid);
+    const camp = snapCT(await tx.get(ref));
+    exigirCT(ativa(camp), "Este campeonato já terminou.", 409);
+    if (acao === "pagamentoContato") {
+      dono(camp, uid);
+      const pagamentoTexto = textoCT(body.pagamentoTexto, 500, "Como pagar");
+      const whatsappOrganizacao = whatsappCT(body.whatsappOrganizacao, "WhatsApp da organização");
+      tx.update(ref, { pagamentoTexto: pagamentoTexto || null, whatsappOrganizacao, atualizadoEm: agora });
+      return;
+    }
+    const tid = timeId(body), ir = ref.collection("inscricoes").doc(tid), s = await tx.get(ir);
+    exigirCT(s.exists, "Inscrição não encontrada.", 404);
+    const i = dados(s) as unknown as InscricaoCT;
+    exigirCT(i.status === "pendente" || i.status === "aprovada", "Esta inscrição não está mais ativa.", 409);
+    if (acao === "contatoDono") {
+      exigirCT(i.donoId === uid, "Somente o dono do time pode fazer isso.", 403);
+      tx.update(ir, { whatsappDono: whatsappCT(body.whatsapp, "Seu WhatsApp"), atualizadoEm: agora });
+    } else if (acao === "avisarPagamento") {
+      exigirCT(i.donoId === uid, "Somente o dono do time pode fazer isso.", 403);
+      exigirCT(i.status === "aprovada", "A inscrição precisa estar aprovada.", 409);
+      // Já pago ou já avisado (toque repetido / resposta perdida): nada muda e não manda outro push.
+      if (i.pago === true || i.pagamentoAvisadoEm) return;
+      tx.update(ir, { pagamentoAvisadoEm: agora, atualizadoEm: agora });
+      avisos = agendarAvisosCT(tx, db, [avisoCT("pagamento", id, `${tid}_avisou_${agora}`, [camp.organizadorId as string], ...textosCT.pagamentoAvisado(camp, i.timeNome), uid)], agora);
+    } else if (acao === "pedirContato") {
+      dono(camp, uid);
+      // Já informou, ou já foi pedido nas últimas 24 h: nada muda e não sai outro aviso. A marca fica na inscrição porque
+      // a fila de avisos regrava o registro do aviso (não serve de trava contra repetição).
+      const pedidoEm = Number((i as unknown as Dados).contatoPedidoEm ?? 0) || 0;
+      if (i.whatsappDono || (pedidoEm && agora - pedidoEm < 86_400_000)) return;
+      tx.update(ir, { contatoPedidoEm: agora });
+      avisos = agendarAvisosCT(tx, db, [avisoCT("contato", id, `${tid}_${agora}`, [i.donoId], ...textosCT.pedirContato(camp, i.timeNome), uid)], agora);
+    } else throw new RecusaCT(400, "Ação inválida.");
   });
   return avisos;
 }
@@ -523,6 +704,7 @@ export async function transferirAtletaCT(db: Firestore, uid: string, body: Dados
     exigirCT(atleta, "Este atleta não está inscrito pelo time de origem.", 409);
     exigirCT(vinculo.exists && vinculo.get("timeId") === de, "O vínculo deste atleta mudou. Atualize o campeonato.", 409);
     exigirCT(!b.jogadores.some((j) => j.id === jid), "O atleta já está no time de destino.", 409);
+    exigirCT(a.treinador?.id !== jid, `${atleta.nome} é o técnico de ${a.timeNome}: tire-o de técnico antes de transferir (não dá para treinar um time e jogar por outro).`, 409);
     exigirCT(tb.exists, "O time de destino não existe mais.", 409);
     const t = dados(tb), jogadoresTime = objetoCT(t.jogadores), camisa = objetoCT(objetoCT(t.camisas)[jid]);
     exigirCT(Array.isArray(t.membros) && t.membros.includes(jid) && Object.prototype.hasOwnProperty.call(jogadoresTime, jid), `${atleta.nome} precisa fazer parte do elenco de ${b.timeNome} no Tugyn.`, 409);

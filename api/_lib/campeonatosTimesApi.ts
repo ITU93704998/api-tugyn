@@ -10,11 +10,13 @@ import { dentroDoLimite } from "./rateLimit";
 import { RecusaCT, exigirCT, objetoCT } from "./campeonatosTimesDominio";
 import { excluirCT, patrocinadorCT, patrocinadoresPublicosCT } from "./campeonatosTimesMidia";
 import { alterarModelosTrofeuCT, lerModelosTrofeuCT } from "./campeonatosTimesServico";
+import { contatoCT } from "./campeonatosTimesServico";
+import { creditosDisponiveisCT, sincronizarCreditosCT } from "./campeonatosTimesPremium";
 import { criarCT, listarCT, lerDetalheCT, gruposLiberadosCT, inscreverCT, responderCT, cancelarInscricaoCT, iniciarCT, resultadoCT, finalizarCT, administrarCT, transferirAtletaCT, mesarioCT, proximosJogosCT, estatisticasAtletaCT } from "./campeonatosTimesServico";
 import { dispararAvisosCT } from "./campeonatosTimesAvisos";
 import type { Aviso } from "./pushEnvio";
 
-const ACOES = new Set(["titulosTime", "saidasRegionais", "recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "finalizar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar", "excluir", "transferirAtleta", "mesario", "proximosJogos", "estatisticasAtleta", "modelosTrofeu", "alterarModelosTrofeu", "alterarDatas"]);
+const ACOES = new Set(["titulosTime", "saidasRegionais", "recursos", "listar", "detalhe", "criar", "inscrever", "responderInscricao", "cancelarInscricao", "iniciar", "finalizar", "resultado", "patrocinador", "removerPatrocinador", "marcarPagamento", "agendarJogo", "cancelar", "excluir", "transferirAtleta", "mesario", "proximosJogos", "estatisticasAtleta", "modelosTrofeu", "alterarModelosTrofeu", "alterarDatas", "editarInfo", "pagamentoContato", "contatoDono", "avisarPagamento", "pedirContato", "sincronizarCreditos"]);
 export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Cache-Control", "private, no-store");
   if (handleCors(req, res)) return;
@@ -32,6 +34,8 @@ export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResp
       await exigirRegiaoTimes(db, uid, "times");
       return res.status(200).json({ ok: true, ...await listarTitulosTime(db, uid, b) });
     }
+    // Campeonato premium: depois da compra na loja, confere no RevenueCat e credita (vale em qualquer região).
+    if (acao === "sincronizarCreditos") return res.status(200).json({ ok: true, ...await sincronizarCreditosCT(db, uid) });
     if (acao !== "saidasRegionais" && acao !== "estatisticasAtleta" && acao !== "proximosJogos" && acao !== "cancelar" && acao !== "excluir" && acao !== "cancelarInscricao") await exigirRegiaoTimes(db, uid, "campeonatosTimes");
     // Perfil e hub: leituras próprias, sem a liberação regional (estatística antiga continua visível).
     if (acao === "estatisticasAtleta") return res.status(200).json({ ok: true, ...await estatisticasAtletaCT(db, uid, b) });
@@ -41,7 +45,10 @@ export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResp
     if (acao === "alterarModelosTrofeu") return res.status(200).json({ ok: true, ...await alterarModelosTrofeuCT(db, uid, b) });
     if (acao === "saidasRegionais") return res.status(200).json({ ok: true, ...await listarSaidasRegionaisCT(db, uid, b) });
     // Liberações da conta: só o formulário de criação precisa; listar e detalhe não pagam essa leitura a cada abertura.
-    if (acao === "recursos") return res.status(200).json({ ok: true, recursos: { gruposMataLiberado: await gruposLiberadosCT(db, uid) } });
+    if (acao === "recursos") {
+      const [gruposMataLiberado, creditosPremium] = await Promise.all([gruposLiberadosCT(db, uid), creditosDisponiveisCT(db, uid)]);
+      return res.status(200).json({ ok: true, recursos: { gruposMataLiberado, creditosPremium } });
+    }
     if (leitura || acao === "criar") {
       const dados = acao === "listar" ? await listarCT(db, uid, b) : acao === "detalhe" ? await lerDetalheCT(db, uid, b) : await criarCT(db, uid, b, await gruposLiberadosCT(db, uid));
       // Os public_ids são internos; a tela só recebe URLs públicas dos patrocinadores.
@@ -60,6 +67,7 @@ export async function handleCampeonatosTimes(req: VercelRequest, res: VercelResp
       case "excluir": await excluirCT(db, uid, b); break;
       case "transferirAtleta": avisos = await transferirAtletaCT(db, uid, b); break;
       case "mesario": avisos = await mesarioCT(db, uid, b); break;
+      case "pagamentoContato": case "contatoDono": case "avisarPagamento": case "pedirContato": avisos = await contatoCT(db, uid, b); break;
       default: avisos = await administrarCT(db, uid, b);
     }
     // Ação salva: os avisos saem agora (melhor esforço); o que falhar a fila recupera.

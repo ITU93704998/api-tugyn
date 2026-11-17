@@ -106,3 +106,15 @@ test('campeonato: foto atualiza/remova sem alterar nomes históricos, placares, 
  assert.equal(a.docs.get('campeonatosTimes/ct_teste/inscricoes/a_1').jogadores[0].foto,null);
  assert.equal(a.writes.some(([,p])=>p==='campeonatosTimes/ct_teste'),false,'foto não dispara nova premiação');
 });
+
+test('campeonato: a foto do técnico acompanha o perfil (só treina ou treina e joga), sem mudar o nome',async()=>{
+ const url='https://res.cloudinary.com/teste/image/upload/v1/usuarios/ana/profile.jpg';
+ const data=base();data['users/ana'].profileImage=url;
+ data['campeonatosTimes/ct_tec']={envolvidos:['ana'],status:'em_andamento'};
+ data['campeonatosTimes/ct_tec/inscricoes/a_1']={status:'aprovada',jogadores:[{id:'outro',nome:'Outro',foto:null}],treinador:{id:'ana',nome:'Técnica Ana',foto:null}};
+ data['campeonatosTimes/ct_tec/inscricoes/b_1']={status:'aprovada',jogadores:[{id:'ana',nome:'Ana',foto:null}],treinador:{id:'ana',nome:'Ana',foto:null}};
+ const a=fakeDb(data);await sync.enfileirarPerfil(a.db,'ana');await sync.processarPerfil(a.db,'ana');
+ const so=a.docs.get('campeonatosTimes/ct_tec/inscricoes/a_1'),ambos=a.docs.get('campeonatosTimes/ct_tec/inscricoes/b_1');
+ assert.deepEqual(so.treinador,{id:'ana',nome:'Técnica Ana',foto:url});assert.equal(so.jogadores[0].foto,null);
+ assert.equal(ambos.treinador.foto,url);assert.equal(ambos.jogadores[0].foto,url);
+});

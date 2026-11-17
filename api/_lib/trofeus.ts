@@ -19,7 +19,8 @@ import { type Campeonato, type JogoCampeonato, type ModeloTrofeu, type OrigemVag
 import { MAX_ELENCO, MAX_GOLS, MAX_TIMES, MIN_TIMES, gerarTabela } from "./campeonato/tabela";
 import { campeaoDe, resolverJogos, temResultado } from "./campeonato/classificacao";
 
-export type TipoTrofeu = "campeao" | "artilheiro" | "garcom";
+/** "tecnico": técnico do time campeão num campeonato entre times (sozinho = técnico campeão; com "campeao" = jogou e treinou). */
+export type TipoTrofeu = "campeao" | "artilheiro" | "garcom" | "tecnico";
 
 export interface Trofeu {
   turmaId: string;

@@ -103,8 +103,10 @@ async function atualizarAlvo(db:Firestore,uid:string,job:Data,lease:string,path:
       const foto=fotoAtletaCT(id.foto);
       for(const inscricao of inscricoes.docs){
         const lista=Array.isArray(inscricao.data().jogadores)?inscricao.data().jogadores:[];
-        if(!lista.some((a:Data)=>a.id===uid&&a.foto!==foto))continue;
-        tx.update(inscricao.ref,{jogadores:lista.map((a:Data)=>a.id===uid?{...a,foto}:a),atualizadoEm:Date.now()});
+        const tecnico=map(inscricao.data().treinador);
+        const mudaAtleta=lista.some((a:Data)=>a.id===uid&&a.foto!==foto), mudaTecnico=tecnico.id===uid&&tecnico.foto!==foto;
+        if(!mudaAtleta&&!mudaTecnico)continue;
+        tx.update(inscricao.ref,{...(mudaAtleta?{jogadores:lista.map((a:Data)=>a.id===uid?{...a,foto}:a)}:{}),...(mudaTecnico?{treinador:{...tecnico,foto}}:{}),atualizadoEm:Date.now()});
       }
     }else{
       const patch:Data={};

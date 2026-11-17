@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Firestore } from "firebase-admin/firestore";
+import { excluirCreditosCT } from "./campeonatosTimesPremium";
 import { COLECAO_CT, type Dados, type InscricaoCT } from "./campeonatosTimesDominio";
 
 /** Executada após marcar users.excluindoEm, antes de apagar times/perfil. Repetível se o job parar. */
@@ -12,9 +13,13 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
       const c = atual.data()!;
       const [inscricoes, jogos, quota] = await Promise.all([tx.get(doc.ref.collection("inscricoes").limit(129)), tx.get(doc.ref.collection("jogos").limit(64)), tx.get(db.doc(`controleCampeonatosTimes/${uid}`))]);
       const antes = c.status === "inscricoes", anon = `removido_${createHash("sha256").update(`${doc.id}:${uid}`).digest("hex").slice(0, 20)}`;
-      const afetadas = inscricoes.docs.filter((s) => s.get("donoId") === uid || (s.get("jogadores") as InscricaoCT["jogadores"] ?? []).some((a) => a.id === uid));
+      // Papel esportivo (dono ou atleta) cancela o pedido antes do início; ser só o técnico apenas tira o técnico (é
+      // opcional e não faz parte do elenco que joga).
+      const esportivo = (s: { get: (k: string) => unknown }) => s.get("donoId") === uid || ((s.get("jogadores") as InscricaoCT["jogadores"]) ?? []).some((a) => a.id === uid);
+      const tecnico = (s: { get: (k: string) => unknown }) => (s.get("treinador") as InscricaoCT["treinador"])?.id === uid;
+      const afetadas = inscricoes.docs.filter((s) => esportivo(s) || tecnico(s));
       // Todas as leituras antes das escritas (inclusive travas do elenco).
-      const refs = antes ? afetadas.filter((s) => s.get("status") === "aprovada").flatMap((s) => (s.get("jogadores") as InscricaoCT["jogadores"]).map((a) => doc.ref.collection("atletas").doc(a.id))) : [];
+      const refs = antes ? afetadas.filter((s) => s.get("status") === "aprovada" && esportivo(s)).flatMap((s) => (s.get("jogadores") as InscricaoCT["jogadores"]).map((a) => doc.ref.collection("atletas").doc(a.id))) : [];
       const travas = refs.length ? await tx.getAll(...refs) : [];
       travas.forEach((s) => { if (s.exists) tx.delete(s.ref); });
       let aprovados = Number(c.aprovados), pendentes = Number(c.pendentes);
@@ -22,8 +27,10 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
         const i = s.data() as InscricaoCT;
         const jogadores = i.jogadores.map((a) => a.id === uid ? { id: anon, nome: "Usuário removido", numero: null, posicao: null, foto: null } : a);
         const mudanca: Dados = { jogadores, atualizadoEm: Date.now() };
-        if (i.donoId === uid) Object.assign(mudanca, { donoId: "", escudoUrl: null });
-        if (antes && (i.status === "pendente" || i.status === "aprovada")) {
+        if (i.donoId === uid) Object.assign(mudanca, { donoId: "", escudoUrl: null, whatsappDono: null, pagamentoAvisadoEm: null });
+        // Técnico que excluiu a conta: nome e foto saem da inscrição (o time segue sem técnico).
+        if (i.treinador?.id === uid) mudanca.treinador = null;
+        if (antes && esportivo(s) && (i.status === "pendente" || i.status === "aprovada")) {
           aprovados -= i.status === "aprovada" ? 1 : 0; pendentes -= i.status === "pendente" ? 1 : 0;
           Object.assign(mudanca, { status: "cancelada", motivo: "Um participante excluiu a conta. Revise o elenco antes de pedir nova inscrição." });
         }
@@ -35,13 +42,16 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
           const mapa = s.get(campo) as Record<string, number> | undefined;
           if (mapa && Object.prototype.hasOwnProperty.call(mapa, uid)) { const copia = { ...mapa, [anon]: mapa[uid] }; delete copia[uid]; mudanca[campo] = copia; }
         }
+        // Histórico de correções: quem corrigiu deixa de ser identificável (o registro da correção continua).
+        const correcoes = s.get("correcoes") as { por?: unknown }[] | undefined;
+        if (Array.isArray(correcoes) && correcoes.some((k) => k?.por === uid)) mudanca.correcoes = correcoes.map((k) => k?.por === uid ? { ...k, por: anon, porNome: "Usuário removido" } : k);
         if (Object.keys(mudanca).length) tx.update(s.ref, mudanca);
       }
       const mudanca: Dados = { envolvidos: (c.envolvidos as string[]).filter((u) => u !== uid), aprovados, pendentes, atualizadoEm: Date.now() };
       // Mesário que excluiu a conta sai da lista (nome e @usuário não ficam no campeonato).
       if (Array.isArray(c.mesarios) && c.mesarios.some((m: { uid?: unknown }) => m?.uid === uid)) mudanca.mesarios = c.mesarios.filter((m: { uid?: unknown }) => m?.uid !== uid);
       if (c.organizadorId === uid) {
-        Object.assign(mudanca, { organizadorId: "", organizadorNome: "Usuário removido", patrocinadores: [] });
+        Object.assign(mudanca, { organizadorId: "", organizadorNome: "Usuário removido", patrocinadores: [], pagamentoTexto: null, whatsappOrganizacao: null });
         if (c.status === "inscricoes" || c.status === "em_andamento") {
           Object.assign(mudanca, { status: "cancelado", motivoCancelamento: "O organizador excluiu a conta." });
           tx.set(db.doc(`controleCampeonatosTimes/${uid}`), { ativos: Math.max(0, Number(quota.get("ativos") ?? 0) - 1) });
@@ -53,4 +63,6 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
   await db.doc(`controleCampeonatosTimes/${uid}`).delete();
   await db.doc(`liberacoesCampeonatosTimes/${uid}`).delete();
   await db.doc(`estatisticasAtletasCT/${uid}`).delete();
+  // Créditos do Campeonato premium e o histórico de compras saem com a conta.
+  await excluirCreditosCT(db, uid);
 }

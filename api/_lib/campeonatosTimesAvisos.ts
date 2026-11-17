@@ -11,14 +11,17 @@ import type { Dados, InscricaoCT } from "./campeonatosTimesDominio";
  */
 export type EventoCT =
   | "pedido" | "aprovada" | "recusada" | "removida" | "desistiu" | "transferido" | "iniciado" | "cancelado"
-  | "jogo_marcado" | "resultado" | "suspenso" | "encerrado" | "mesario" | "prazo" | "lembrete" | "datas";
+  | "jogo_marcado" | "resultado" | "suspenso" | "encerrado" | "mesario" | "prazo" | "lembrete" | "datas" | "dados"
+  | "pagamento" | "contato";
 
 const DIA = 24 * 3600_000;
 /** Janela da fila: um aviso igual (mesma chave) não sai de novo dentro dela. */
 const DEDUPE_CT: Record<EventoCT, number> = {
   pedido: 10 * 60_000, aprovada: 7 * DIA, recusada: 7 * DIA, removida: 7 * DIA, desistiu: 7 * DIA, transferido: 7 * DIA,
   iniciado: 30 * DIA, cancelado: 30 * DIA, jogo_marcado: 2 * DIA, resultado: 7 * DIA, suspenso: 7 * DIA, encerrado: 30 * DIA,
-  mesario: 7 * DIA, prazo: 30 * DIA, lembrete: 3 * DIA, datas: 2 * DIA,
+  mesario: 7 * DIA, prazo: 30 * DIA, lembrete: 3 * DIA, datas: 2 * DIA, dados: 2 * DIA,
+  // Pagamento: cada aviso tem a sua ocorrência. Pedido de contato: no máximo um por dia para o mesmo time.
+  pagamento: 7 * DIA, contato: DIA,
 };
 const SEGURO = /[^A-Za-z0-9_-]/g;
 const curto = (v: unknown, max = 40): string => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "");
@@ -52,7 +55,9 @@ export async function dispararAvisosCT(db: Firestore, avisos: readonly Aviso[] |
 // ── Destinatários ──
 export const atletasDe = (i: Pick<InscricaoCT, "jogadores"> | undefined | null): string[] => (Array.isArray(i?.jogadores) ? i!.jogadores.map((j) => j.id) : []);
 /** Dono e atletas de uma inscrição. */
-export const timeTodo = (i: Pick<InscricaoCT, "jogadores" | "donoId"> | undefined | null): string[] => (i ? [i.donoId, ...atletasDe(i)] : []);
+/** Quem recebe os avisos do time: o dono, os atletas inscritos e o técnico (sem repetir quem acumula papéis). */
+export const timeTodo = (i: Pick<InscricaoCT, "jogadores" | "donoId" | "treinador"> | undefined | null): string[] =>
+  (i ? [...new Set([i.donoId, ...atletasDe(i), ...(i.treinador?.id ? [i.treinador.id] : [])])] : []);
 
 // ── Textos ──
 const nomeCT = (camp: Dados): string => curto(camp.nome, 50) || "Campeonato";
@@ -62,7 +67,14 @@ const quandoTexto = (ms: number): string =>
 const diaTexto = (ms: number): string =>
   new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" }).format(ms);
 
+/** "R$ 120,00" (centavos). */
+export const reaisCT = (centavos: number): string => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(centavos / 100);
+/** "a, b e c". */
+const lista = (itens: readonly string[]): string => itens.length <= 1 ? (itens[0] ?? "") : `${itens.slice(0, -1).join(", ")} e ${itens[itens.length - 1]}`;
+
 export const textosCT = {
+  dados: (camp: Dados, mudou: readonly string[]) =>
+    ["Campeonato atualizado", `${nomeCT(camp)}: o organizador mudou ${lista(mudou)}. Toque para conferir.`] as const,
   datas: (camp: Dados, inscricoesAte: number, dataInicio: number | null) =>
     ["Datas do campeonato mudaram", `${nomeCT(camp)}: inscrições até ${diaTexto(inscricoesAte)}${dataInicio ? ` · início em ${diaTexto(dataInicio)}` : ""}.`] as const,
   pedido: (camp: Dados, time: string) => ["Novo pedido de inscrição", `${curto(time)} quer participar de ${nomeCT(camp)}. Analise o elenco.`] as const,
@@ -77,8 +89,9 @@ export const textosCT = {
   cancelado: (camp: Dados, motivo: string) => ["Campeonato cancelado", `${nomeCT(camp)} foi cancelado pelo organizador${motivo ? `: ${curto(motivo, 120)}` : "."}`] as const,
   jogoMarcado: (camp: Dados, casa: string, fora: string, quando: number | null, local: string) =>
     ["Jogo marcado", `${curto(casa, 30)} x ${curto(fora, 30)}${quando ? ` · ${quandoTexto(quando)}` : ""}${local ? ` · ${curto(local, 40)}` : ""} (${nomeCT(camp)})`] as const,
-  resultado: (camp: Dados, casa: string, gc: number, gf: number, fora: string, wo: boolean) =>
-    [wo ? "W.O. registrado" : "Resultado lançado", `${curto(casa, 30)} ${gc} x ${gf} ${curto(fora, 30)}${wo ? " (W.O.)" : ""} · ${nomeCT(camp)}`] as const,
+  resultado: (camp: Dados, casa: string, gc: number, gf: number, fora: string, wo: boolean, motivoCorrecao?: string) =>
+    [motivoCorrecao ? "Resultado corrigido" : wo ? "W.O. registrado" : "Resultado lançado",
+      `${curto(casa, 30)} ${gc} x ${gf} ${curto(fora, 30)}${wo ? " (W.O.)" : ""} · ${nomeCT(camp)}${motivoCorrecao ? `. Motivo: ${curto(motivoCorrecao, 80)}` : ""}`] as const,
   suspenso: (camp: Dados, motivo: "vermelho" | "amarelos") =>
     ["Você está suspenso", `${motivo === "vermelho" ? "Pelo cartão vermelho" : "Pelo 3º cartão amarelo"}, você cumpre suspensão no próximo jogo de ${nomeCT(camp)}.`] as const,
   campeao: (camp: Dados, time: string) => ["É campeão! 🏆", `${curto(time)} venceu ${nomeCT(camp)}. O troféu já está no time.`] as const,
@@ -86,6 +99,10 @@ export const textosCT = {
   mesario: (camp: Dados) => ["Você é mesário", `O organizador de ${nomeCT(camp)} te convidou para lançar os placares e marcar os jogos.`] as const,
   prazo: (camp: Dados, aprovados: number, max: number) =>
     ["Inscrições encerradas", aprovados >= max ? `${nomeCT(camp)} tem os ${max} times. Já dá para iniciar.` : `${nomeCT(camp)} tem ${aprovados} de ${max} times aprovados. Analise os pedidos para iniciar.`] as const,
+  pagamentoAvisado: (camp: Dados, time: string) => ["Pagamento avisado", `${curto(time)} avisou que pagou a inscrição em ${nomeCT(camp)}. Confira e marque como pago.`] as const,
+  pagamentoConfirmado: (camp: Dados, time: string) => ["Pagamento confirmado", `O organizador de ${nomeCT(camp)} confirmou o pagamento de ${curto(time)}.`] as const,
+  pagamentoPendente: (camp: Dados, time: string) => ["Pagamento ainda não confirmado", `O organizador de ${nomeCT(camp)} ainda não encontrou o pagamento de ${curto(time)}. Fale com a organização.`] as const,
+  pedirContato: (camp: Dados, time: string) => ["Informe seu WhatsApp", `O organizador de ${nomeCT(camp)} quer falar com você sobre ${curto(time)}. Toque para informar seu número.`] as const,
   lembrete: (camp: Dados, casa: string, fora: string, quando: number, local: string) =>
     ["Seu jogo é amanhã", `${curto(casa, 30)} x ${curto(fora, 30)} · ${quandoTexto(quando)}${local ? ` · ${curto(local, 40)}` : ""} (${nomeCT(camp)})`] as const,
 };

@@ -42,7 +42,7 @@ class Query {
  async get(){
   const grupo=this.path.startsWith('**/')?this.path.slice(3):null;
   let all=[...this.db.data.keys()].filter(p=>grupo?p.split('/').at(-2)===grupo&&p.split('/').length%2===0:p.startsWith(this.path+'/')&&p.split('/').length===this.path.split('/').length+1).map(p=>this.db.snap(p));
-  all=all.filter(s=>this.filters.every(([k,op,v])=>op==='=='?s.get(k)===v:op==='array-contains'?s.get(k)?.includes(v):op==='<='?s.get(k)<=v:op==='>'?s.get(k)>v:false));
+  const campo=(s,k)=>k.split('.').reduce((o,p)=>o?.[p],s.data());all=all.filter(s=>this.filters.every(([k,op,v])=>op==='in'?v.includes(campo(s,k)):op==='=='?s.get(k)===v:op==='array-contains'?s.get(k)?.includes(v):op==='<='?s.get(k)<=v:op==='>'?s.get(k)>v:false));
   const cmp=(s,t)=>{for(const [k,d]of this.orders){const a=k==='__name__'?s.id:s.get(k), b=k==='__name__'?t.id:t.get(k);if(a!==b)return(a<b?-1:1)*(d==='desc'?-1:1);}return 0;};
   all.sort(cmp);
   if(this.cursor){const fake={id:this.cursor[1],get:()=>this.cursor[0]};all=all.filter(s=>cmp(s,fake)>0);}
@@ -144,8 +144,10 @@ test('banner recusa URL remota e usuário que não organiza antes de chamar Clou
  await assert.rejects(M.patrocinadorCT(db,'a',{acao:'patrocinador',campeonatoId:id,nome:'Loja'}),/organizador/);assert.equal(uploads,0);
 });
 test('liberação de grupos é conferida em transação e retry já criado não depende de nova liberação',async()=>{
- const db=new DB({'users/org':perfil('Org')});const b=corpo({formato:'grupos_mata',maxTimes:8});await assert.rejects(S.criarCT(db,'org',b,true,NOW),/liberação/);
+ const P=carregar('campeonatosTimesPremium');P.PREMIUM_CT.gruposParaTodos=false;
+ const db=new DB({'users/org':perfil('Org')});const b=corpo({formato:'grupos_mata',maxTimes:8});await assert.rejects(S.criarCT(db,'org',b,true,NOW),/premium/);
  db.data.set('liberacoesCampeonatosTimes/org',{gruposMata:true,expiraEm:NOW+1000});const r=await S.criarCT(db,'org',b,true,NOW);db.data.delete('liberacoesCampeonatosTimes/org');const repetido=await S.criarCT(db,'org',b,false,NOW+172800000);assert.equal(r.campeonatoId,repetido.campeonatoId);
+ P.PREMIUM_CT.gruposParaTodos=true;
 });
 test('contagem zero do formulário é normalizada e resultado salvo aceita retry idêntico após fechar fase',()=>{
  const ins=inscritos(4),ordem=ins.map(i=>i.timeId);let{jogos}=D.gerarJogosCT('mata',ordem);const camp={formato:'mata',ordem,grupos:{}},j=Object.values(jogos)[0],uid=ins.find(i=>i.timeId===j.casa).jogadores[0].id;
@@ -195,7 +197,7 @@ test('CT-A01/A07: chave corrigida recusa formulário antigo da final; outra semi
   for (const j of semis) assert.equal(D.resultadoEditavelCT(todos[j.id], todos), true);
   const aberto = todos.final; // formulário da final aberto no celular 1
   const ultima = semis.at(-1);
-  await S.resultadoCT(x.db, 'org', V(todos[ultima.id], { campeonatoId: x.id, jogoId: ultima.id, golsCasa: 0, golsFora: 1 }), NOW + 1);
+  await S.resultadoCT(x.db, 'org', V(todos[ultima.id], { campeonatoId: x.id, jogoId: ultima.id, golsCasa: 0, golsFora: 1, motivo: 'Placar invertido na súmula' }), NOW + 1);
   todos = jogosDe(x);
   assert.notDeepEqual([aberto.casa, aberto.fora], [todos.final.casa, todos.final.fora]);
   assert.equal(todos.final.versao, aberto.versao + 1);
@@ -219,7 +221,7 @@ test('CT-A01: segunda edição sobre tela antiga é recusada; retry idêntico co
   assert.equal(y.db.data.get(y.base + '/jogos/' + jogo.id).golsCasa, 2);
   await assert.rejects(S.resultadoCT(y.db, 'org', { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 0, casaEsperada: jogo.casa, foraEsperada: jogo.fora }, NOW + 3), /Versão/);
   const atual = jogosDe(y)[jogo.id];
-  await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 0 }), NOW + 4);
+  await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 0, motivo: 'Gol anulado depois do jogo' }), NOW + 4);
   assert.equal(y.db.data.get(y.base + '/jogos/' + jogo.id).golsCasa, 1);
 });
 
@@ -321,7 +323,7 @@ test('finalização: corrigir resultado reabre para revisão e exige nova confir
  // Retry idêntico do placar original não reabre o campeonato.
  await S.resultadoCT(x.db,'org',V(j,{campeonatoId:x.id,jogoId:j.id,golsCasa:2,golsFora:0}),NOW+2);
  assert.equal(x.db.data.get(x.base).status,'encerrado');
- await S.resultadoCT(x.db,'org',V(j,{campeonatoId:x.id,jogoId:j.id,golsCasa:0,golsFora:2}),NOW+3);
+ await S.resultadoCT(x.db,'org',V(j,{campeonatoId:x.id,jogoId:j.id,golsCasa:0,golsFora:2,motivo:'Placar invertido'}),NOW+3);
  assert.equal(x.db.data.get(x.base).status,'em_andamento');assert.equal(x.db.data.get('controleCampeonatosTimes/org').ativos,1);
  assert.equal(x.db.data.get(x.base).finalizadoEm,null);
  await assert.rejects(S.finalizarCT(x.db,'org',b,NOW+4),e=>e.code==='campeonato_desatualizado');
@@ -739,4 +741,314 @@ test('revalidação: lembretes paginados não perdem jogo atrás de muitos jogos
  for(let i=0;i<700;i++)db.data.set('turmas/t'+i+'/jogos/d',{quando:NOW+13*3600000+i});
  db.data.get(base+'/jogos/'+jogos[0].id).quando=NOW+20*3600000;
  const r=await S2.avisosAgendadosCT(db,NOW);assert.equal(r.lembretes,1);assert.equal(r.truncado,false);
+});
+
+test('técnico: opcional, precisa ser do elenco do time, pode também jogar e entra nos envolvidos',async()=>{
+ const {db,id,base}=await cenario();db.data.set('users/x',perfil('X'));db.data.set('times/a_1',time('a',['a','x']));
+ await assert.rejects(S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'b',tentativaId:'tecnico-0001'},NOW),/elenco do time/);
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'x',tentativaId:'tecnico-0002'},NOW);
+ const ins=db.data.get(base+'/inscricoes/a_1');assert.deepEqual({id:ins.treinador.id,nome:ins.treinador.nome},{id:'x',nome:'x'});
+ assert.ok(db.data.get(base).envolvidos.includes('x'),'o técnico vê o campeonato e recebe os avisos');
+ // Dono como técnico e atleta ao mesmo tempo (reenvio do pedido pendente, nova tentativa).
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'a',tentativaId:'tecnico-0003'},NOW);
+ assert.equal(db.data.get(base+'/inscricoes/a_1').treinador.id,'a');
+ // Sem técnico: campo nulo (apps antigos não mandam treinadorId).
+ await S.inscreverCT(db,'b',pedido(id,'b'),NOW);assert.equal(db.data.get(base+'/inscricoes/b_1').treinador,null);
+ const {timeTodo}=carregar('campeonatosTimesAvisos');assert.deepEqual(timeTodo({donoId:'a',jogadores:[{id:'a'}],treinador:{id:'x'}}).sort(),['a','x']);
+});
+
+test('técnico: excluir a conta tira nome e foto do técnico sem cancelar o pedido do time (e repetir não quebra)',async()=>{
+ const {db,id,base}=await cenario();db.data.set('users/x',perfil('X'));db.data.set('times/a_1',time('a',['a','x']));
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'x',tentativaId:'tecnico-ex01'},NOW);
+ const {excluirIdentidadeCT}=carregar('campeonatosTimesExclusao');
+ await excluirIdentidadeCT(db,'x');await excluirIdentidadeCT(db,'x');
+ const ins=db.data.get(base+'/inscricoes/a_1');assert.equal(ins.treinador,null);assert.equal(ins.status,'pendente','ser só o técnico não cancela o time');
+ assert.ok(!JSON.stringify(ins).includes('"X"'),'o nome do técnico não fica na inscrição');assert.ok(!db.data.get(base).envolvidos.includes('x'));
+});
+test('técnico: a aprovação confere de novo o técnico (fora do time ou suspenso recusa) e avisa quem só treina',async()=>{
+ const {db,id,base}=await cenario();db.data.set('users/x',perfil('X'));db.data.set('times/a_1',time('a',['a','x']));
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'x',tentativaId:'tecnico-ap01'},NOW);
+ db.data.set('times/a_1',time('a',['a']));
+ await assert.rejects(S.responderCT(db,'org',{...pedido(id,'a'),aceitar:true},NOW),/técnico escolhido não faz mais parte/);
+ db.data.set('times/a_1',time('a',['a','x']));db.data.set('users/x',{...perfil('X'),status:'suspended'});
+ await assert.rejects(S.responderCT(db,'org',{...pedido(id,'a'),aceitar:true},NOW),/indisponível/);
+ db.data.set('users/x',perfil('X'));
+ const avisos=await S.responderCT(db,'org',{...pedido(id,'a'),aceitar:true},NOW);
+ assert.equal(db.data.get(base+'/inscricoes/a_1').status,'aprovada');
+ assert.ok(avisos.some(a=>a.recipientUids.includes('x')),'o técnico que não joga recebe "Inscrição aprovada"');
+ assert.equal(avisos.flatMap(a=>a.recipientUids).filter(u=>u==='a').length,1,'o dono recebe um aviso só');
+});
+test('técnico: ao iniciar, técnico que saiu do time deixa de ser técnico (não impede o início)',async()=>{
+ const {db,id,base}=await cenario();db.data.set('users/x',perfil('X'));db.data.set('times/a_1',time('a',['a','x']));
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'x',tentativaId:'tecnico-in01'},NOW);
+ for(const who of ['a','b','c']){if(who!=='a')await S.inscreverCT(db,who,pedido(id,who),NOW);await S.responderCT(db,'org',{...pedido(id,who),aceitar:true},NOW);}
+ db.data.set('times/a_1',time('a',['a']));
+ await S.iniciarCT(db,'org',{campeonatoId:id},NOW+2*86400000);
+ assert.equal(db.data.get(base).status,'em_andamento');assert.equal(db.data.get(base+'/inscricoes/a_1').treinador,null);
+});
+
+test('técnico: ninguém treina um time e joga por outro no mesmo campeonato (inscrição e transferência)',async()=>{
+ const {db,id}=await cenario();db.data.set('users/x',perfil('X'));
+ db.data.set('times/a_1',time('a',['a','x']));db.data.set('times/b_1',time('b',['b','x']));
+ // x é técnico de A (sem jogar): não pode ser atleta de B.
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'x',tentativaId:'tecnico-trt-a1'},NOW);
+ await assert.rejects(S.inscreverCT(db,'b',{...pedido(id,'b'),jogadorIds:['b','x'],tentativaId:'tecnico-trt-b1'},NOW),/técnico de outro time/);
+ // Ao contrário: x atleta de B impede ser técnico de A.
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),tentativaId:'tecnico-trt-a2'},NOW);
+ await S.inscreverCT(db,'b',{...pedido(id,'b'),jogadorIds:['b','x'],tentativaId:'tecnico-trt-b2'},NOW);
+ await assert.rejects(S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'x',tentativaId:'tecnico-trt-a3'},NOW),/atleta por outro time/);
+});
+test('técnico: removido ao iniciar não recebe "Campeonato iniciado"',async()=>{
+ const {db,id}=await cenario();db.data.set('users/x',perfil('X'));db.data.set('times/a_1',time('a',['a','x']));
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),treinadorId:'x',tentativaId:'tecnico-trt-in01'},NOW);
+ for(const who of ['a','b','c']){if(who!=='a')await S.inscreverCT(db,who,pedido(id,who),NOW);await S.responderCT(db,'org',{...pedido(id,who),aceitar:true},NOW);}
+ db.data.set('times/a_1',time('a',['a']));
+ const avisos=await S.iniciarCT(db,'org',{campeonatoId:id},NOW+2*86400000);
+ assert.equal(avisos.flatMap(a=>a.recipientUids).includes('x'),false);assert.ok(avisos.flatMap(a=>a.recipientUids).includes('a'));
+});
+test('técnico: quem joga e treina um time não pode ser transferido para outro',async()=>{
+ const {db,id}=await cenario();db.data.set('users/x',perfil('X'));
+ db.data.set('times/a_1',time('a',['a','x']));db.data.set('times/b_1',time('b',['b','x']));
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),jogadorIds:['a','x'],treinadorId:'x',tentativaId:'tecnico-trt-tr1'},NOW);
+ await S.inscreverCT(db,'b',pedido(id,'b'),NOW);
+ for(const who of ['a','b'])await S.responderCT(db,'org',{...pedido(id,who),aceitar:true},NOW);
+ await assert.rejects(S.transferirAtletaCT(db,'org',{campeonatoId:id,jogadorId:'x',deTimeId:'a_1',paraTimeId:'b_1',motivo:'Acordo entre os times'},NOW),/é o técnico de/);
+});
+
+test('correção de resultado: motivo obrigatório, histórico no jogo e aviso com o motivo', async () => {
+  const y = await completo(); await S.iniciarCT(y.db, 'org', { campeonatoId: y.id }, NOW);
+  const jogo = Object.values(jogosDe(y))[0];
+  await S.resultadoCT(y.db, 'org', V(jogo, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 1 }), NOW);
+  let atual = jogosDe(y)[jogo.id];
+  assert.equal(atual.lancadoEm, NOW); assert.equal(atual.correcoes, undefined);
+  // Sem motivo (ou curto demais), a correção é recusada e nada muda.
+  await assert.rejects(S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 2 }), NOW + 1), /por que o resultado/);
+  await assert.rejects(S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 2, motivo: ' ok ' }), NOW + 1), /por que o resultado/);
+  await assert.rejects(S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 2, motivo: 'x'.repeat(141) }), NOW + 1), /até 140/);
+  assert.equal(jogosDe(y)[jogo.id].golsFora, 1);
+  await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 2, motivo: '  Gol do  visitante não anotado ' }), NOW + 5);
+  atual = jogosDe(y)[jogo.id];
+  assert.equal(atual.lancadoEm, NOW, 'o lançamento original não muda com a correção');
+  assert.equal(atual.correcoes.length, 1);
+  const c = atual.correcoes[0];
+  assert.deepEqual(JSON.parse(JSON.stringify({ em: c.em, por: c.por, motivo: c.motivo, antes: c.antes, depois: c.depois, detalhes: c.detalhes })),
+    { em: NOW + 5, por: 'org', motivo: 'Gol do visitante não anotado', antes: { golsCasa: 2, golsFora: 1, penaltis: null, wo: null }, depois: { golsCasa: 2, golsFora: 2, penaltis: null, wo: null }, detalhes: false });
+  assert.ok(c.porNome.length > 0);
+  // O aviso aos times diz que foi uma correção e traz o motivo.
+  const aviso = [...y.db.data.entries()].filter(([k]) => k.startsWith('pushDedupe/ct_resultado_')).map(([, v]) => v.aviso.draft).find((d) => d.title === 'Resultado corrigido');
+  assert.ok(aviso, 'aviso de correção enviado'); assert.match(aviso.body, /Motivo: Gol do visitante não anotado/);
+  // Retry idêntico da correção não duplica o histórico.
+  await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 2, motivo: 'Gol do visitante não anotado' }), NOW + 6);
+  assert.equal(jogosDe(y)[jogo.id].correcoes.length, 1);
+  // Retry do primeiro lançamento (resposta perdida) não exige motivo.
+  const outro = Object.values(jogosDe(y)).find((j) => j.id !== jogo.id && j.casa && j.fora);
+  const corpo = V(outro, { campeonatoId: y.id, jogoId: outro.id, golsCasa: 1, golsFora: 0 });
+  await S.resultadoCT(y.db, 'org', corpo, NOW + 7); await S.resultadoCT(y.db, 'org', corpo, NOW + 8);
+  assert.equal(jogosDe(y)[outro.id].correcoes, undefined);
+});
+
+test('correção de resultado: só o placar dos atletas mudou fica marcado como detalhes; histórico guarda as 10 últimas', async () => {
+  const y = await completo(); await S.iniciarCT(y.db, 'org', { campeonatoId: y.id }, NOW);
+  const jogo = Object.values(jogosDe(y))[0];
+  await S.resultadoCT(y.db, 'org', V(jogo, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 0, golsFora: 0 }), NOW);
+  for (let i = 1; i <= 12; i++) {
+    const atual = jogosDe(y)[jogo.id];
+    await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: i, golsFora: 0, motivo: 'Correção número ' + i }), NOW + i);
+  }
+  const h = jogosDe(y)[jogo.id].correcoes;
+  assert.equal(h.length, 10); assert.equal(h[0].motivo, 'Correção número 3'); assert.equal(h.at(-1).motivo, 'Correção número 12');
+  const ins = y.db.data.get(y.base + '/inscricoes/' + jogo.casa);
+  const atleta = ins.jogadores[0].id, atual = jogosDe(y)[jogo.id];
+  await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 12, golsFora: 0, gols: { [atleta]: 1 }, motivo: 'Faltou o autor do gol' }), NOW + 20);
+  assert.equal(jogosDe(y)[jogo.id].correcoes.at(-1).detalhes, true);
+});
+
+test('correção de resultado: mesário corrige só nas 24 horas depois do lançamento; organizador sempre', async () => {
+  const y = await completo(); y.db.data.set('users/m', perfil('Mesa')); y.db.data.set('usernames/mesa', { uid: 'm' });
+  await S.mesarioCT(y.db, 'org', { campeonatoId: y.id, userName: 'mesa' }, NOW);
+  await S.iniciarCT(y.db, 'org', { campeonatoId: y.id }, NOW);
+  const jogo = Object.values(jogosDe(y))[0], H = 60 * 60 * 1000;
+  await S.resultadoCT(y.db, 'm', V(jogo, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 0 }), NOW);
+  let atual = jogosDe(y)[jogo.id];
+  // Dentro do prazo, o mesário corrige.
+  await S.resultadoCT(y.db, 'm', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 1, golsFora: 1, motivo: 'Gol do empate esquecido' }), NOW + 23 * H);
+  atual = jogosDe(y)[jogo.id];
+  assert.equal(atual.correcoes[0].por, 'm');
+  // Depois do prazo (contado do lançamento, não da última correção), não.
+  await assert.rejects(S.resultadoCT(y.db, 'm', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 1, motivo: 'Outro gol esquecido' }), NOW + 25 * H),
+    (e) => e.status === 403 && /prazo do mesário/.test(e.message));
+  // O detalhe do mesário já não oferece a correção; o do organizador sim.
+  const realNow = Date.now; Date.now = () => NOW + 25 * H;
+  try {
+    const doMesario = await S.lerDetalheCT(y.db, 'm', { campeonatoId: y.id }), doOrg = await S.lerDetalheCT(y.db, 'org', { campeonatoId: y.id });
+    const jm = doMesario.jogos.find((j) => j.id === jogo.id), jo = doOrg.jogos.find((j) => j.id === jogo.id);
+    assert.equal(jm.podeEditarResultado, false); assert.equal(jm.prazoCorrecaoAte, NOW + 24 * H);
+    assert.equal(jo.podeEditarResultado, true); assert.equal(jo.prazoCorrecaoAte, null);
+    // Jogo ainda sem resultado: o mesário lança normalmente.
+    const pendente = doMesario.jogos.find((j) => j.status === 'pendente' && j.casa && j.fora);
+    assert.equal(pendente.podeEditarResultado, true);
+  } finally { Date.now = realNow; }
+  await S.resultadoCT(y.db, 'org', V(atual, { campeonatoId: y.id, jogoId: jogo.id, golsCasa: 2, golsFora: 1, motivo: 'Súmula conferida pelo organizador' }), NOW + 30 * H);
+  assert.equal(jogosDe(y)[jogo.id].correcoes.length, 2);
+});
+
+test('exclusão de conta: quem corrigiu um resultado deixa de ser identificável; o detalhe não expõe o UID', async () => {
+  const E = carregar('campeonatosTimesExclusao');
+  const { db, id, base, jogos } = await iniciado(); db.data.set('users/m', perfil('Mesa')); db.data.set('usernames/mesa', { uid: 'm' });
+  await S.mesarioCT(db, 'org', { campeonatoId: id, userName: 'mesa' }, NOW);
+  const j = jogos[0];
+  await S.resultadoCT(db, 'm', V(j, { campeonatoId: id, jogoId: j.id, golsCasa: 1, golsFora: 0 }), NOW);
+  const salvo = await S.lerDetalheCT(db, 'org', { campeonatoId: id });
+  await S.resultadoCT(db, 'm', V(salvo.jogos.find((x) => x.id === j.id), { campeonatoId: id, jogoId: j.id, golsCasa: 2, golsFora: 0, motivo: 'Gol esquecido na súmula' }), NOW + 1000);
+  const doDetalhe = (await S.lerDetalheCT(db, 'org', { campeonatoId: id })).jogos.find((x) => x.id === j.id).correcoes[0];
+  assert.equal('por' in doDetalhe, false); assert.equal(doDetalhe.porNome, 'Mesa');
+  await E.excluirIdentidadeCT(db, 'm');
+  const k = db.data.get(base + '/jogos/' + j.id).correcoes[0];
+  assert.notEqual(k.por, 'm'); assert.match(k.por, /^removido_/); assert.equal(k.porNome, 'Usuário removido');
+  assert.equal(k.motivo, 'Gol esquecido na súmula');
+  assert.equal(JSON.stringify(db.data.get(base + '/jogos/' + j.id)).includes('Mesa'), false);
+});
+test('pagamento e contato: quem vê, "Já paguei", confirmação e limpeza no fim',async()=>{
+ const{db,id,base}=await cenario();
+ assert.equal(D.whatsappCT('(11) 91234-5678','x'),'5511912345678');assert.equal(D.whatsappCT('','x'),null);assert.throws(()=>D.whatsappCT('123','x'),/DDD/);
+ await S.inscreverCT(db,'a',{...pedido(id,'a'),whatsapp:'11 91234-5678'},NOW);await S.inscreverCT(db,'b',pedido(id,'b'),NOW);
+ await assert.rejects(S.contatoCT(db,'a',{acao:'pagamentoContato',campeonatoId:id,pagamentoTexto:'Pix'},NOW),/organizador/);
+ await S.contatoCT(db,'org',{acao:'pagamentoContato',campeonatoId:id,pagamentoTexto:'Pix: x@y.com\nR$ 150',whatsappOrganizacao:'(63) 98765-4321'},NOW);
+ // Pendente: ainda não vê "Como pagar"; o organizador vê o WhatsApp do dono.
+ let d=await S.lerDetalheCT(db,'a',{campeonatoId:id});assert.equal(d.campeonato.pagamentoTexto,null);assert.equal(d.inscricoes.find(i=>i.timeId==='a_1').whatsappDono,'5511912345678');
+ d=await S.lerDetalheCT(db,'org',{campeonatoId:id});assert.equal(d.inscricoes.find(i=>i.timeId==='a_1').whatsappDono,'5511912345678');assert.equal(d.campeonato.whatsappOrganizacao,'5563987654321');
+ await S.responderCT(db,'org',{...pedido(id,'a'),aceitar:true},NOW);await S.responderCT(db,'org',{...pedido(id,'b'),aceitar:true},NOW);
+ d=await S.lerDetalheCT(db,'a',{campeonatoId:id});assert.equal(d.campeonato.pagamentoTexto,'Pix: x@y.com\nR$ 150');
+ // Outro dono aprovado vê as instruções, mas nunca o telefone de quem não é ele.
+ d=await S.lerDetalheCT(db,'b',{campeonatoId:id});assert.equal(d.inscricoes.find(i=>i.timeId==='a_1').whatsappDono,null);assert.equal(d.inscricoes.find(i=>i.timeId==='a_1').pagamentoAvisadoEm,null);
+ d=await S.lerDetalheCT(db,'c',{campeonatoId:id});assert.equal(d.campeonato.pagamentoTexto,null);assert.equal(d.campeonato.whatsappOrganizacao,null);
+ // "Já paguei": só o dono, um push ao organizador, repetir não duplica.
+ await assert.rejects(S.contatoCT(db,'b',{acao:'avisarPagamento',campeonatoId:id,timeId:'a_1'},NOW),/dono/);
+ let av=await S.contatoCT(db,'a',{acao:'avisarPagamento',campeonatoId:id,timeId:'a_1'},NOW);assert.deepEqual(av.map(a=>a.recipientUids),[['org']]);
+ assert.equal((await S.contatoCT(db,'a',{acao:'avisarPagamento',campeonatoId:id,timeId:'a_1'},NOW+5)).length,0);assert.equal(db.data.get(base+'/inscricoes/a_1').pagamentoAvisadoEm,NOW);
+ // "Ainda não": limpa o aviso e avisa o dono; depois confirma.
+ av=await S.administrarCT(db,'org',{acao:'marcarPagamento',campeonatoId:id,timeId:'a_1',pago:false},NOW+10);assert.deepEqual(av.map(a=>a.recipientUids),[['a']]);assert.equal(db.data.get(base+'/inscricoes/a_1').pagamentoAvisadoEm,null);
+ av=await S.administrarCT(db,'org',{acao:'marcarPagamento',campeonatoId:id,timeId:'a_1',pago:true},NOW+20);assert.match(av[0].draft.title,/confirmado/);
+ // Pedir contato: só para quem não informou; o dono preenche depois.
+ assert.equal((await S.contatoCT(db,'org',{acao:'pedirContato',campeonatoId:id,timeId:'a_1'},NOW)).length,0);
+ av=await S.contatoCT(db,'org',{acao:'pedirContato',campeonatoId:id,timeId:'b_1'},NOW);assert.deepEqual(av.map(a=>a.recipientUids),[['b']]);
+ // Repetir no mesmo dia não manda outro aviso; depois de 24 h, pode pedir de novo.
+ assert.equal((await S.contatoCT(db,'org',{acao:'pedirContato',campeonatoId:id,timeId:'b_1'},NOW+60_000)).length,0);
+ assert.equal((await S.contatoCT(db,'org',{acao:'pedirContato',campeonatoId:id,timeId:'b_1'},NOW+86_400_001)).length,1);
+ await S.contatoCT(db,'b',{acao:'contatoDono',campeonatoId:id,timeId:'b_1',whatsapp:'63912345678'},NOW);assert.equal(db.data.get(base+'/inscricoes/b_1').whatsappDono,'5563912345678');
+ // Cancelado: telefones saem e nada mais aparece.
+ await S.administrarCT(db,'org',{acao:'cancelar',campeonatoId:id,motivo:'Chuva'},NOW+30);
+ assert.equal(db.data.get(base+'/inscricoes/a_1').whatsappDono,null);assert.equal(db.data.get(base+'/inscricoes/b_1').whatsappDono,null);
+ d=await S.lerDetalheCT(db,'org',{campeonatoId:id});assert.equal(d.campeonato.pagamentoTexto,null);
+ await assert.rejects(S.contatoCT(db,'a',{acao:'contatoDono',campeonatoId:id,timeId:'a_1',whatsapp:''},NOW),/terminou/);
+});
+test('finalizar apaga o WhatsApp de todas as inscrições, inclusive pendentes',async()=>{
+ const{db,id,base}=await completo();
+ db.data.set('times/d_1',time('d'));db.data.set('users/d',perfil('D'));
+ for(const t of ['a_1','b_1','c_1'])db.data.get(base+'/inscricoes/'+t).whatsappDono='5511912345678';
+ // Pedido pendente gravado com número (ex.: chegou depois das vagas fechadas).
+ db.data.set(base+'/inscricoes/d_1',{...db.data.get(base+'/inscricoes/a_1'),timeId:'d_1',donoId:'d',status:'pendente',whatsappDono:'5511987654321',pagamentoAvisadoEm:null});
+ await S.iniciarCT(db,'org',{campeonatoId:id},NOW);
+ for(const jogo of (await S.lerDetalheCT(db,'org',{campeonatoId:id})).jogos)await S.resultadoCT(db,'org',V(jogo,{campeonatoId:id,jogoId:jogo.id,golsCasa:2,golsFora:0}),NOW);
+ await S.finalizarCT(db,'org',{campeonatoId:id,revisaoEsperada:db.data.get(base).premiacaoVersao},NOW+1);
+ for(const t of ['a_1','b_1','c_1','d_1'])assert.equal(db.data.get(base+'/inscricoes/'+t).whatsappDono,null,t);
+});
+// Banco em memória com getAll e batch (usados pelo módulo de compras).
+const dbCompras=seed=>{const db=new DB(seed);db.getAll=(...refs)=>Promise.all(refs.map(r=>r.get()));db.batch=()=>{const ops=[];return{set:(r,v)=>ops.push(()=>db.data.set(r.path,clone(v))),delete:r=>ops.push(()=>db.data.delete(r.path)),commit:async()=>ops.forEach(f=>f())};};return db;};
+const compraWebhook=(tipo,uid,transacao)=>({type:tipo,product_id:'campeonato_premium',app_user_id:uid,transaction_id:transacao,environment:'PRODUCTION'});
+test('campeonato premium: compra vira crédito uma vez, criação gasta, cancelar antes do início devolve, reembolso retira',async()=>{
+ const P=carregar('campeonatosTimesPremium');P.PREMIUM_CT.gruposParaTodos=false;
+ try{
+  const db=dbCompras({'users/org':perfil('Org')});const compra={transacao:'GPA.1234-5678',loja:'PLAY_STORE',sandbox:false,compradoEm:NOW};
+  // A mesma compra pelo app e pelo webhook conta uma vez só.
+  assert.equal(await P.creditarCompraCT(db,'org',compra,'app',NOW),'creditado');
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('NON_RENEWING_PURCHASE','org','GPA.1234-5678'),NOW),'repetido');
+  assert.equal(await P.creditosDisponiveisCT(db,'org'),1);
+  // Compra de teste não vale sem a permissão de sandbox.
+  assert.equal(await P.creditarCompraCT(db,'org',{...compra,transacao:'sandbox-0001',sandbox:true},'app',NOW),'sandbox');
+  // Criar grupos + mata-mata gasta o crédito; o segundo não tem crédito.
+  const c=await S.criarCT(db,'org',corpo({formato:'grupos_mata',maxTimes:8}),false,NOW);
+  assert.equal(await P.creditosDisponiveisCT(db,'org'),0);assert.ok(db.data.get('campeonatosTimes/'+c.campeonatoId).creditoPremium);
+  await assert.rejects(S.criarCT(db,'org',corpo({chavePedido:'pedido-00000009',formato:'grupos_mata',maxTimes:8}),false,NOW),/premium/);
+  // Retry do mesmo pedido não gasta de novo; formatos comuns continuam grátis.
+  await S.criarCT(db,'org',corpo({formato:'grupos_mata',maxTimes:8}),false,NOW);assert.equal(await P.creditosDisponiveisCT(db,'org'),0);
+  await S.criarCT(db,'org',corpo({chavePedido:'pedido-00000010'}),false,NOW);
+  // Cancelado antes do início: o crédito volta.
+  await S.administrarCT(db,'org',{acao:'cancelar',campeonatoId:c.campeonatoId,motivo:'Sem times'},NOW+5);
+  assert.equal(await P.creditosDisponiveisCT(db,'org'),1);
+  // Reembolso pela loja (aviso com conta anônima): o crédito disponível sai.
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('CANCELLATION','$RCAnonymousID:abc','GPA.1234-5678'),NOW+9),'reembolsado');
+  assert.equal(await P.creditosDisponiveisCT(db,'org'),0);
+  // Outros produtos e compras de conta anônima são ignorados.
+  assert.equal(await P.processarAvisoLojaCT(db,{...compraWebhook('NON_RENEWING_PURCHASE','org','x-000001'),product_id:'outro'},NOW),'ignorado');
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('NON_RENEWING_PURCHASE','$RCAnonymousID:abc','x-000002'),NOW),'ignorado');
+ }finally{P.PREMIUM_CT.gruposParaTodos=true;}
+});
+test('campeonato premium (PREM-01): a mesma compra nunca vira crédito em duas contas',async()=>{
+ const P=carregar('campeonatosTimesPremium');P.PREMIUM_CT.gruposParaTodos=false;
+ try{
+  const db=dbCompras({'users/a':perfil('A'),'users/b':perfil('B')});const compra={transacao:'1000000555',loja:'app_store',sandbox:false,compradoEm:NOW};
+  assert.equal(await P.creditarCompraCT(db,'a',compra,'app',NOW),'creditado');
+  assert.equal(await P.creditarCompraCT(db,'b',compra,'app',NOW),'outra_conta');
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('NON_RENEWING_PURCHASE','b','1000000555'),NOW),'outra_conta');
+  assert.equal(await P.creditosDisponiveisCT(db,'a'),1);assert.equal(await P.creditosDisponiveisCT(db,'b'),0);
+  // Concorrência: duas contas ao mesmo tempo, um crédito só.
+  const r=await Promise.all(['a','b'].map(u=>P.creditarCompraCT(db,u,{...compra,transacao:'1000000556'},'webhook',NOW)));
+  assert.equal(r.filter(x=>x==='creditado').length,1);
+ }finally{P.PREMIUM_CT.gruposParaTodos=true;}
+});
+test('campeonato premium (PREM-02): sincronização sem o id da loja não credita; com o id, coincide com o aviso',async()=>{
+ const P=carregar('campeonatosTimesPremium');P.PREMIUM_CT.gruposParaTodos=false;const antes=process.env.REVENUECAT_SECRET_KEY;process.env.REVENUECAT_SECRET_KEY='sk_teste';
+ try{
+  const db=dbCompras({'users/u1':perfil('U')});
+  const resposta=itens=>async()=>({ok:true,status:200,json:async()=>({subscriber:{non_subscriptions:{campeonato_premium:itens}}})});
+  // Só o id interno do RevenueCat: nada é creditado pela consulta.
+  let r=await P.sincronizarCreditosCT(db,'u1',resposta([{id:'rc-interno-002',store:'app_store',is_sandbox:false}]),NOW);assert.equal(r.creditos,0);
+  // O aviso com o id da loja credita uma vez; a consulta com o mesmo id da loja não duplica.
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('NON_RENEWING_PURCHASE','u1','10000000002'),NOW),'creditado');
+  r=await P.sincronizarCreditosCT(db,'u1',resposta([{id:'rc-interno-002',store_transaction_id:'10000000002',store:'app_store',is_sandbox:false}]),NOW);
+  assert.equal(r.novos,0);assert.equal(r.creditos,1);
+ }finally{P.PREMIUM_CT.gruposParaTodos=true;if(antes===undefined)delete process.env.REVENUECAT_SECRET_KEY;else process.env.REVENUECAT_SECRET_KEY=antes;}
+});
+test('campeonato premium (PREM-03): reembolso antes da compra fica registrado e a compra atrasada não credita',async()=>{
+ const P=carregar('campeonatosTimesPremium');P.PREMIUM_CT.gruposParaTodos=false;
+ try{
+  const db=dbCompras({'users/u1':perfil('U')});
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('CANCELLATION','u1','GPA.9999-0001'),NOW),'reembolsado');
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('NON_RENEWING_PURCHASE','u1','GPA.9999-0001'),NOW+1),'ja_reembolsado');
+  assert.equal(await P.creditarCompraCT(db,'u1',{transacao:'GPA.9999-0001',loja:'play_store',sandbox:false,compradoEm:NOW},'app',NOW+2),'ja_reembolsado');
+  assert.equal(await P.creditosDisponiveisCT(db,'u1'),0);
+  // Reentrega do reembolso não muda nada.
+  await P.processarAvisoLojaCT(db,compraWebhook('CANCELLATION','u1','GPA.9999-0001'),NOW+3);assert.equal(await P.creditosDisponiveisCT(db,'u1'),0);
+ }finally{P.PREMIUM_CT.gruposParaTodos=true;}
+});
+test('campeonato premium (PREM-04): depois da exclusão da conta, aviso atrasado não recria crédito nem histórico',async()=>{
+ const P=carregar('campeonatosTimesPremium');P.PREMIUM_CT.gruposParaTodos=false;
+ try{
+  const db=dbCompras({'users/u1':perfil('U')});
+  assert.equal(await P.creditarCompraCT(db,'u1',{transacao:'1000000777',loja:'app_store',sandbox:false,compradoEm:NOW},'app',NOW),'creditado');
+  db.data.get('users/u1').excluindoEm=NOW+1;
+  await P.excluirCreditosCT(db,'u1');db.data.delete('users/u1');
+  const registro=db.data.get(P.refCompraCT(db,'1000000777').path);
+  assert.deepEqual(Object.keys(registro).sort(),['criadoEm','estado','uid']);assert.equal(registro.uid,null);
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('NON_RENEWING_PURCHASE','u1','1000000777'),NOW+2),'sem_conta');
+  // Compra nova de conta inexistente: só um registro vazio, sem uid nem dados da compra.
+  assert.equal(await P.processarAvisoLojaCT(db,compraWebhook('NON_RENEWING_PURCHASE','u1','1000000778'),NOW+3),'sem_conta');
+  assert.equal(db.data.get(P.refCompraCT(db,'1000000778').path).uid,null);
+  assert.equal(await P.creditosDisponiveisCT(db,'u1'),0);
+ }finally{P.PREMIUM_CT.gruposParaTodos=true;}
+});
+test('campeonato premium: sincronização consulta só a conta logada e webhook exige o cabeçalho',async()=>{
+ const P=carregar('campeonatosTimesPremium');P.PREMIUM_CT.gruposParaTodos=false;const antes=process.env.REVENUECAT_SECRET_KEY;process.env.REVENUECAT_SECRET_KEY='sk_teste';
+ try{
+  const db=dbCompras({'users/user123':perfil('U')});let url='';
+  const buscar=async(u,init)=>{url=u;assert.equal(init.headers.Authorization,'Bearer sk_teste');return{ok:true,status:200,json:async()=>({subscriber:{non_subscriptions:{campeonato_premium:[{id:'rc1',store_transaction_id:'1000000123',purchase_date:'2026-11-17T12:00:00Z',store:'app_store',is_sandbox:false},{id:'rc2',store_transaction_id:'1000000124',store:'app_store',is_sandbox:false}],outro:[{id:'z',store_transaction_id:'999999'}]}}})};};
+  let r=await P.sincronizarCreditosCT(db,'user123',buscar,NOW);assert.equal(r.creditos,2);assert.equal(r.novos,2);assert.ok(url.endsWith('/subscribers/user123'));
+  r=await P.sincronizarCreditosCT(db,'user123',buscar,NOW);assert.equal(r.novos,0);assert.equal(r.creditos,2);
+  // Na fase gratuita, o saldo não é consultado.
+  P.PREMIUM_CT.gruposParaTodos=true;assert.equal(await P.creditosDisponiveisCT(db,'user123'),0);
+  assert.equal(P.webhookAutorizado('Bearer certo-e-comprido-000000000000','Bearer certo-e-comprido-000000000000'),true);
+  assert.equal(P.webhookAutorizado('errado','Bearer certo-e-comprido-000000000000'),false);
+  assert.equal(P.webhookAutorizado('curto','curto'),false);
+ }finally{P.PREMIUM_CT.gruposParaTodos=true;if(antes===undefined)delete process.env.REVENUECAT_SECRET_KEY;else process.env.REVENUECAT_SECRET_KEY=antes;}
 });
