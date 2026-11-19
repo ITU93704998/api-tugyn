@@ -758,7 +758,9 @@ const marcarArtilheiros = async (db: Firestore, uid: string, p: Extract<Amistoso
     tx.update(minhaCopia.ref, { artilheiros: novos, artilheirosEm: FieldValue.serverTimestamp() });
     if (Object.keys(dif).length > 0) {
       const porJogador = Object.fromEntries(Object.entries(dif).map(([u, d]) => [u, { nome: nomeDe(u), gols: FieldValue.increment(d) }]));
-      tx.set(resumoRef(db, p.timeId), { jogadores: porJogador, atualizadoEm: FieldValue.serverTimestamp() }, { merge: true });
+      // `artilheirosIds`: quem já marcou gol por este time (o card do perfil acha os gols mesmo depois de a pessoa sair).
+      const marcaram = Object.entries(p.gols).filter(([, g]) => g > 0).map(([u]) => u);
+      tx.set(resumoRef(db, p.timeId), { jogadores: porJogador, ...(marcaram.length ? { artilheirosIds: FieldValue.arrayUnion(...marcaram) } : {}), atualizadoEm: FieldValue.serverTimestamp() }, { merge: true });
     }
     return { ok: true, body: { artilheiros: Object.keys(novos).length } };
   });

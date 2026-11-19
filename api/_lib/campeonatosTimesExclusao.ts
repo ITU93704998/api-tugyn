@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import type { Firestore } from "firebase-admin/firestore";
 import { excluirCreditosCT } from "./campeonatosTimesPremium";
+import { apagarRegulamentosCT } from "./campeonatosTimesRegulamento";
 import { COLECAO_CT, type Dados, type InscricaoCT } from "./campeonatosTimesDominio";
 
 /** Executada após marcar users.excluindoEm, antes de apagar times/perfil. Repetível se o job parar. */
 export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<void> {
+  // Campeonatos organizados por esta conta que tinham regulamento em PDF: os arquivos saem depois das gravações.
+  const comPdf = new Set<string>();
   for (;;) {
     const pagina = await db.collection(COLECAO_CT).where("envolvidos", "array-contains", uid).limit(10).get();
     if (pagina.empty) break;
@@ -51,7 +54,8 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
       // Mesário que excluiu a conta sai da lista (nome e @usuário não ficam no campeonato).
       if (Array.isArray(c.mesarios) && c.mesarios.some((m: { uid?: unknown }) => m?.uid === uid)) mudanca.mesarios = c.mesarios.filter((m: { uid?: unknown }) => m?.uid !== uid);
       if (c.organizadorId === uid) {
-        Object.assign(mudanca, { organizadorId: "", organizadorNome: "Usuário removido", patrocinadores: [], pagamentoTexto: null, whatsappOrganizacao: null });
+        Object.assign(mudanca, { organizadorId: "", organizadorNome: "Usuário removido", patrocinadores: [], pagamentoTexto: null, whatsappOrganizacao: null, regulamentoPdf: null });
+        if (c.regulamentoPdf) comPdf.add(doc.id);
         if (c.status === "inscricoes" || c.status === "em_andamento") {
           Object.assign(mudanca, { status: "cancelado", motivoCancelamento: "O organizador excluiu a conta." });
           tx.set(db.doc(`controleCampeonatosTimes/${uid}`), { ativos: Math.max(0, Number(quota.get("ativos") ?? 0) - 1) });
@@ -60,6 +64,7 @@ export async function excluirIdentidadeCT(db: Firestore, uid: string): Promise<v
       tx.update(doc.ref, mudanca);
     });
   }
+  for (const cid of comPdf) await apagarRegulamentosCT(cid);
   await db.doc(`controleCampeonatosTimes/${uid}`).delete();
   await db.doc(`liberacoesCampeonatosTimes/${uid}`).delete();
   await db.doc(`estatisticasAtletasCT/${uid}`).delete();

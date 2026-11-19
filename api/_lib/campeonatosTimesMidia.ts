@@ -5,11 +5,13 @@ import { getAccount } from "./config";
 import { parseImage } from "./validation";
 import { perfilDisponivel } from "./suspensao";
 import { idDoCT } from "./campeonatosTimesServico";
+import { apagarRegulamentosCT } from "./campeonatosTimesRegulamento";
 import { COLECAO_CT, exigirCT, RecusaCT, textoCT, type Dados } from "./campeonatosTimesDominio";
 
 const FILA = "midiaCampeonatosTimes";
 const DIA = 86_400_000;
-type Patrocinador = { id: string; nome: string; texto: string; site: string | null; bannerUrl: string | null; publicId: string | null };
+/** formato: "banner" = imagem deitada 3:1; "logo" = logo quadrada (inteira, com margem branca) ao lado do nome e da descrição. */
+type Patrocinador = { id: string; nome: string; texto: string; site: string | null; bannerUrl: string | null; publicId: string | null; formato?: "banner" | "logo" };
 const lista = (d: Dados) => Array.isArray(d.patrocinadores) ? d.patrocinadores as Patrocinador[] : [];
 const chave = (p: string) => createHash("sha256").update(p).digest("hex");
 const pode = (d: Dados, uid: string) => { exigirCT(d.organizadorId === uid, "Somente o organizador pode editar patrocinadores.", 403); exigirCT(d.status !== "cancelado" && d.status !== "encerrado", "Este campeonato está fechado.", 409); };
@@ -25,10 +27,11 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
   const site = removendo ? "" : textoCT(body.site, 500, "Site");
   if (site) { let u: URL; try { u = new URL(site); } catch { throw new RecusaCT(400, "Use um endereço https válido."); } exigirCT(u.protocol === "https:" && !u.username && !u.password, "Use um endereço https válido."); }
   const temImagem = !removendo && body.imagem != null;
+  const formato: "banner" | "logo" = body.formato === "logo" ? "logo" : "banner";
   const conta = temImagem ? getAccount("turmas") : null;
   if (temImagem) { const i = parseImage(body.imagem); if (!i.ok) throw new RecusaCT(i.status, i.error); exigirCT(conta, "Servidor não configurado para banners de turma e campeonato.", 503); }
   // ID determinístico (patrocinador + conteúdo): o retry da mesma imagem reaproveita o mesmo arquivo em vez de criar outro.
-  const publicId = temImagem ? `turmas/${uid}/campeonatos/${cid}/${chave(id + ":" + chave(body.imagem as string)).slice(0, 24)}` : null;
+  const publicId = temImagem ? `turmas/${uid}/campeonatos/${cid}/${chave(id + ":" + (formato === "logo" ? "logo:" : "") + chave(body.imagem as string)).slice(0, 24)}` : null;
   let fila = publicId ? db.doc(`${FILA}/${chave(publicId)}`) : null;
   let bannerUrl: string | null = null;
   // Reserva durável antes da chamada externa: a rotina diária recolhe uploads interrompidos.
@@ -48,7 +51,8 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
   if (temImagem && conta && publicId && !bannerUrl) {
     const resultado = await cloudinary.uploader.upload(body.imagem as string, { ...conta, public_id: publicId,
       overwrite: false, unique_filename: false, resource_type: "image", tags: [`uid_${uid}`],
-      transformation: [{ width: 1200, height: 400, crop: "fill", gravity: "auto" }, { quality: "auto:good", fetch_format: "auto" }], timeout: 30_000 });
+      // Logo: quadrada e inteira (sem cortar), completando com branco. Banner: 3:1 recortado.
+      transformation: [formato === "logo" ? { width: 400, height: 400, crop: "pad", background: "white" } : { width: 1200, height: 400, crop: "fill", gravity: "auto" }, { quality: "auto:good", fetch_format: "auto" }], timeout: 30_000 });
     exigirCT(resultado.public_id === publicId && resultado.secure_url?.startsWith("https://"), "Não foi possível preparar o banner.", 502);
     bannerUrl = resultado.secure_url;
   }
@@ -60,7 +64,7 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
     const todos = lista(camp), anterior = todos.find((p) => p.id === id);
     exigirCT(removendo || anterior || todos.length < 6, "Use no máximo seis patrocinadores.");
     const alterados = todos.filter((p) => p.id !== id);
-    if (!removendo) alterados.push({ id, nome, texto, site: site || null, bannerUrl: bannerUrl ?? anterior?.bannerUrl ?? null, publicId: publicId ?? anterior?.publicId ?? null });
+    if (!removendo) alterados.push({ id, nome, texto, site: site || null, bannerUrl: bannerUrl ?? anterior?.bannerUrl ?? null, publicId: publicId ?? anterior?.publicId ?? null, formato: publicId ? formato : anterior?.formato ?? "banner" });
     // Assets antigos saem pela mesma fila, depois que a referência é removida atomicamente.
     if (anterior?.publicId && (removendo || publicId) && anterior.publicId !== publicId) tx.set(db.doc(`${FILA}/${chave(anterior.publicId)}`), { campeonatoId: cid, uid, publicId: anterior.publicId, status: "pendente", criadoEm: Date.now() - DIA, leaseAte: null });
     tx.update(ref, { patrocinadores: alterados, atualizadoEm: Date.now() });
@@ -138,4 +142,6 @@ export async function excluirCT(db: Firestore, uid: string, body: Dados): Promis
   if (!existe) return;
   for (const col of await ref.listCollections()) await db.recursiveDelete(col);
   await ref.delete();
+  // Regulamento em PDF (Firebase Storage): sai junto, depois do documento (melhor esforço).
+  await apagarRegulamentosCT(cid);
 }

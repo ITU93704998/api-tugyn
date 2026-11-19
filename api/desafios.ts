@@ -1,5 +1,6 @@
 import { exigirRegiaoTimes, ErroRegioesTimes } from "./_lib/regioesTimes";
 import { limparBannersCT } from "./_lib/campeonatosTimesMidia";
+import { limparRegulamentosCT } from "./_lib/campeonatosTimesRegulamento";
 import { timingSafeEqual } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getAuth } from "firebase-admin/auth";
@@ -602,6 +603,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const r = await limparReservasDeMidia(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
         const banners = await limparBannersCT(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
         if (banners.falhas || banners.invalidos) console.warn(JSON.stringify({ evt: "banners_campeonato_falharam", ...banners }));
+        const pdfs = await limparRegulamentosCT(db, inicio + PRAZOS_DA_ROTINA_MS.midia);
+        if (pdfs.falhas || pdfs.invalidos) console.warn(JSON.stringify({ evt: "regulamentos_pdf_limpeza_falharam", ...pdfs }));
         return r;
       });
       // As três últimas recebem o prazo que sobra (as anteriores podem ter usado tudo). O que não couber fica para o

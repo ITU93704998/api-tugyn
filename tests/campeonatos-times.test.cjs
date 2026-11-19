@@ -21,14 +21,16 @@ function carregar(nome, stubs = {}, fresh = false) {
 const D=carregar('campeonatosTimesDominio');
 const S=carregar('campeonatosTimesServico');
 const clone=x=>structuredClone(x);
+// arrayUnion/arrayRemove como no Firestore (o resto é valor direto).
+const aplicar=(a={},v)=>{const o={...a};for(const [k,x]of Object.entries(v)){const n=x?.constructor?.name;const atual=Array.isArray(o[k])?o[k]:[];if(n==='DeleteTransform'){delete o[k];continue;}o[k]=n==='ArrayUnionTransform'?[...atual,...x.elements.filter(e=>!atual.includes(e))]:n==='ArrayRemoveTransform'?atual.filter(e=>!x.elements.includes(e)):x;}return o;};
 class Ref {
  constructor(db,p){this.db=db;this.path=p;this.id=p.split('/').at(-1);}
  get parent(){return new Query(this.db,this.path.split('/').slice(0,-1).join('/'));}
  collection(n){return new Query(this.db,this.path+'/'+n);}
  async get(){return this.db.snap(this.path);}
  async delete(){this.db.data.delete(this.path);}
- async set(v){this.db.data.set(this.path,clone(v));}
- async update(v){const a=this.db.data.get(this.path);if(!a)throw Error("not-found");this.db.data.set(this.path,{...a,...v});}
+ async set(v,o){this.db.data.set(this.path,clone(o?.merge?{...(this.db.data.get(this.path)??{}),...v}:v));}
+ async update(v){const a=this.db.data.get(this.path);if(!a)throw Error("not-found");this.db.data.set(this.path,clone(aplicar(a,v)));}
 }
 class Query {
  constructor(db,p,filters=[],orders=[],lim=Infinity,cursor=null){Object.assign(this,{db,path:p,filters,orders,lim,cursor});}
@@ -60,8 +62,8 @@ class DB {
   const prior=this.tail;let release;this.tail=new Promise(r=>release=r);await prior;
   const writes=[];let escreveu=false;
   const read=async r=>{assert.equal(escreveu,false,'leitura depois de escrita');return r.get();};
-  const tx={get:read,getAll:async(...refs)=>Promise.all(refs.filter(r=>typeof r.get==='function').map(read)),create:(r,d)=>{escreveu=true;writes.push(['create',r,d]);},set:(r,d)=>{escreveu=true;writes.push(['set',r,d]);},update:(r,d)=>{escreveu=true;writes.push(['update',r,d]);},delete:r=>{escreveu=true;writes.push(['delete',r]);}};
-  try{const result=await fn(tx);for(const [op,r,d]of writes){if(op==='create')assert.equal(this.data.has(r.path),false);if(op==='update')assert.equal(this.data.has(r.path),true);if(op==='delete')this.data.delete(r.path);else this.data.set(r.path,clone(op==='update'?{...this.data.get(r.path),...d}:d));}return result;}finally{release();}
+  const tx={get:read,getAll:async(...refs)=>Promise.all(refs.filter(r=>typeof r.get==='function').map(read)),create:(r,d)=>{escreveu=true;writes.push(['create',r,d]);},set:(r,d,o)=>{escreveu=true;writes.push([o?.merge?'merge':'set',r,d]);},update:(r,d)=>{escreveu=true;writes.push(['update',r,d]);},delete:r=>{escreveu=true;writes.push(['delete',r]);}};
+  try{const result=await fn(tx);for(const [op,r,d]of writes){if(op==='create')assert.equal(this.data.has(r.path),false);if(op==='update')assert.equal(this.data.has(r.path),true);if(op==='delete')this.data.delete(r.path);else this.data.set(r.path,clone(op==='update'||op==='merge'?aplicar(this.data.get(r.path),d):d));}return result;}finally{release();}
  }
 }
 const NOW=1_800_000_000_000;
@@ -272,6 +274,106 @@ test('CT-A04: retry da mesma imagem reaproveita o arquivo; nada novo vai para a 
   await M.patrocinadorCT(x.db, 'org', outra);
   assert.equal(envios.length, 2); assert.notEqual(envios[0], envios[1]);
   assert.equal(fila().length, 1, 'só a imagem substituída vai para exclusão');
+});
+
+test('patrocinador com logo: imagem quadrada inteira (pad 400x400) e formato salvo; sem imagem fica banner', async () => {
+  const x = await cenario(); const conta = { cloud_name: 'teste', api_key: 'teste', api_secret: 'teste' }; const envios = [];
+  const M = carregar('campeonatosTimesMidia', { 'cloudinary': { v2: { uploader: { upload: async (_img, o) => { envios.push(o); return { public_id: o.public_id, secure_url: 'https://res.cloudinary.com/t/' + o.public_id }; } } } }, './config': { getAccount: () => conta } }, true);
+  await M.patrocinadorCT(x.db, 'org', { acao: 'patrocinador', campeonatoId: x.id, patrocinadorId: 'p_00000000000000bb', nome: 'Padaria', texto: 'Pão quente', imagem: 'data:image/jpeg;base64,/9j/AAAA', formato: 'logo' });
+  assert.deepEqual(envios[0].transformation[0], { width: 400, height: 400, crop: 'pad', background: 'white' });
+  await M.patrocinadorCT(x.db, 'org', { acao: 'patrocinador', campeonatoId: x.id, patrocinadorId: 'p_00000000000000cc', nome: 'Loja', formato: 'logo' });
+  const lista = x.db.data.get(x.base).patrocinadores;
+  assert.equal(lista.find((p) => p.id === 'p_00000000000000bb').formato, 'logo');
+  assert.equal(lista.find((p) => p.id === 'p_00000000000000cc').formato, 'banner');
+  assert.equal(M.patrocinadoresPublicosCT({ patrocinadores: lista })[0].publicId, undefined);
+});
+
+function regulamento() {
+  const arquivos = new Map(), apagados = [], assinados = [];
+  const travas = new Map();
+  const bucket = { file: (c) => ({ save: async (buf, o) => { arquivos.set(c, { buf, o }); }, delete: async () => { if (travas.has(c)) await travas.get(c); apagados.push(c); arquivos.delete(c); }, getSignedUrl: async (o) => { assinados.push({ c, o }); return ['https://storage.test/' + c + '?assinado']; } }), deleteFiles: async ({ prefix }) => { for (const k of [...arquivos.keys()]) if (k.startsWith(prefix)) { arquivos.delete(k); apagados.push(k); } } };
+  process.env.FIREBASE_STORAGE_BUCKET = 'teste.firebasestorage.app';
+  const R = carregar('campeonatosTimesRegulamento', { 'firebase-admin/storage': { getStorage: () => ({ bucket: () => bucket }) }, './auth': { getFirebaseApp: () => ({}) } }, true);
+  return { R, arquivos, apagados, assinados, travas };
+}
+const filaPdf = (db) => [...db.data.keys()].filter((k) => k.startsWith('regulamentosPdfPendentesCT/'));
+const PDF = (txt = 'um') => 'data:application/pdf;base64,' + Buffer.from('%PDF-1.7 ' + txt).toString('base64');
+
+test('regulamento PDF: só o organizador envia, antes do início; troca apaga o antigo e avisa os times', async () => {
+  const x = await cenario(); const { R, arquivos, apagados } = regulamento();
+  await S.inscreverCT(x.db, 'a', pedido(x.id, 'a'), NOW);
+  await assert.rejects(R.regulamentoPdfCT(x.db, 'a', { campeonatoId: x.id, pdf: PDF() }), /organizador/);
+  assert.equal(arquivos.size, 0, 'quem não organiza não grava nada no Storage');
+  await assert.rejects(R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: 'data:application/pdf;base64,' + Buffer.from('<html>').toString('base64') }), /PDF/);
+  const avisos = await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF(), nome: 'Regulamento Copa' });
+  assert.ok(avisos.length >= 1);
+  const r1 = x.db.data.get(x.base).regulamentoPdf;
+  assert.equal(r1.nome, 'Regulamento Copa.pdf'); assert.ok(arquivos.has(r1.caminho));
+  assert.equal(arquivos.get(r1.caminho).o.contentType, 'application/pdf');
+  assert.deepEqual(await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF(), nome: 'Regulamento Copa' }), [], 'repetição não avisa de novo');
+  await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF('dois') });
+  const r2 = x.db.data.get(x.base).regulamentoPdf;
+  assert.notEqual(r2.caminho, r1.caminho); assert.deepEqual(apagados, [r1.caminho]);
+  assert.deepEqual(R.regulamentoPublicoCT(x.db.data.get(x.base)).caminho, undefined, 'a tela não recebe o caminho');
+  await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, remover: true });
+  assert.equal(x.db.data.get(x.base).regulamentoPdf, null); assert.equal(arquivos.size, 0);
+  assert.deepEqual(filaPdf(x.db), [], 'nada fica na fila de limpeza');
+  x.db.data.get(x.base).status = 'em_andamento';
+  await assert.rejects(R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF() }), /antes do início/);
+});
+
+test('regulamento PDF: trocas simultâneas não apagam o arquivo em uso (cada envio tem nome próprio)', async () => {
+  const x = await cenario(); const { R, arquivos, travas } = regulamento();
+  await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF('A') });
+  const a1 = x.db.data.get(x.base).regulamentoPdf.caminho;
+  // Aparelho 1 troca A por B e fica parado antes de apagar A; aparelho 2 volta para A nesse meio tempo.
+  let soltar; travas.set(a1, new Promise((r) => { soltar = r; }));
+  const troca1 = R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF('B') });
+  while (x.db.data.get(x.base).regulamentoPdf.caminho === a1) await new Promise((r) => setImmediate(r));
+  await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF('A') });
+  soltar(); await troca1;
+  const final = x.db.data.get(x.base).regulamentoPdf.caminho;
+  assert.notEqual(final, a1, 'voltar para o mesmo PDF grava um arquivo novo');
+  assert.ok(arquivos.has(final), 'o campeonato aponta para um arquivo que existe');
+  assert.equal(arquivos.size, 1); assert.deepEqual(filaPdf(x.db), []);
+});
+
+test('regulamento PDF: envio recusado no meio do caminho não deixa arquivo; falha incerta fica para a rotina diária', async () => {
+  const x = await cenario(); const { R, arquivos } = regulamento();
+  const real = x.db.runTransaction.bind(x.db);
+  // O campeonato começa entre a primeira conferência e a transação.
+  x.db.runTransaction = (fn) => { x.db.runTransaction = real; x.db.data.get(x.base).status = 'em_andamento'; return real(fn); };
+  await assert.rejects(R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF() }), /antes do início/);
+  assert.equal(arquivos.size, 0); assert.deepEqual(filaPdf(x.db), []);
+  x.db.data.get(x.base).status = 'inscricoes';
+  // Falha sem saber se gravou: o arquivo fica, mas registrado na fila.
+  const antes = Date.now() - 2 * 3_600_000;
+  x.db.runTransaction = () => { x.db.runTransaction = real; return Promise.reject(Error('conexão caiu')); };
+  await assert.rejects(R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF('orfao') }, antes), /conexão caiu/);
+  assert.equal(arquivos.size, 1); assert.equal(filaPdf(x.db).length, 1);
+  // Um envio que deu certo também fica fora da fila; a rotina apaga só o órfão.
+  await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF('valendo') }, antes);
+  const valendo = x.db.data.get(x.base).regulamentoPdf.caminho;
+  x.db.data.set('regulamentosPdfPendentesCT/manual', { campeonatoId: x.id, caminho: valendo, criadoEm: antes, tentativas: 0, leaseAte: null });
+  const r = await R.limparRegulamentosCT(x.db, Date.now() + 30_000);
+  assert.equal(r.apagados, 1); assert.equal(r.mantidos, 1);
+  assert.deepEqual([...arquivos.keys()], [valendo], 'o arquivo em uso nunca é apagado');
+  assert.deepEqual(filaPdf(x.db), []);
+  // A fila nunca apaga fora da pasta do campeonato.
+  x.db.data.set('regulamentosPdfPendentesCT/mau', { campeonatoId: x.id, caminho: 'users/outro/foto.pdf', criadoEm: antes });
+  assert.equal((await R.limparRegulamentosCT(x.db, Date.now() + 30_000)).invalidos, 1); assert.ok(arquivos.has(valendo));
+});
+
+test('regulamento PDF: abre para organizador e donos de time; atleta sem time não abre', async () => {
+  const x = await cenario(); const { R, assinados } = regulamento();
+  await R.regulamentoPdfCT(x.db, 'org', { campeonatoId: x.id, pdf: PDF() });
+  x.db.data.set('users/atleta', perfil('Atleta'));
+  const link = await R.linkRegulamentoPdfCT(x.db, 'org', { campeonatoId: x.id }, NOW);
+  assert.match(link.url, /assinado/); assert.equal(link.expiraEm, NOW + 600000); assert.equal(assinados[0].o.version, 'v4');
+  await R.linkRegulamentoPdfCT(x.db, 'a', { campeonatoId: x.id }, NOW); // dono de time da mesma modalidade, ainda sem inscrição
+  await assert.rejects(R.linkRegulamentoPdfCT(x.db, 'atleta', { campeonatoId: x.id }, NOW), /donos de times/);
+  x.db.data.set('times/z_1', { ...time('atleta'), modalidade: 'campo' });
+  await assert.rejects(R.linkRegulamentoPdfCT(x.db, 'atleta', { campeonatoId: x.id }, NOW), /donos de times/, 'time de outra modalidade não vale');
 });
 
 test('revalidação: T1 atrasada depois de T2 recusada não reabre inscrição e ID não pode mudar elenco', async () => {
@@ -690,7 +792,7 @@ test('auditoria: estatísticas vencidas, recálculo já reservado: devolve o úl
  const r=await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW);
  assert.equal(r.estatisticas.campeonatos,9);assert.equal(r.calculadoEm,NOW-2*3600000);
  const r2=await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+60000);
- assert.equal(r2.estatisticas.campeonatos,1,'reserva vencida: recalcula');assert.equal(db.data.get('estatisticasAtletasCT/a').calculandoAte,undefined);
+ assert.equal(r2.estatisticas.campeonatos,1,'reserva vencida: recalcula');assert.equal(db.data.get('estatisticasAtletasCT/a').calculandoAte,0);
 });
 test('auditoria: próximos jogos lê os jogos uma vez e nada de quem não tem time inscrito',async()=>{
  const{db,base}=await iniciado();db.data.get(base).envolvidos.push('z');
@@ -722,7 +824,7 @@ test('revalidação: sem resultado anterior e outro pedido calculando, espera em
 test('revalidação: outro pedido terminou entre a leitura e a reserva: usa o resultado dele',async()=>{
  const{db}=await iniciado();
  db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:1},calculadoEm:NOW-2*3600000});
- const real=db.runTransaction.bind(db);db.runTransaction=fn=>{db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:5},calculadoEm:NOW});return real(fn);};
+ const real=db.runTransaction.bind(db);db.runTransaction=fn=>{db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:5},calculadoEm:NOW,versao:2});return real(fn);};
  assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW)).estatisticas.campeonatos,5);
 });
 test('revalidação: busca continua pelo cursor além da janela de 100',async()=>{
@@ -1051,4 +1153,143 @@ test('campeonato premium: sincronização consulta só a conta logada e webhook 
   assert.equal(P.webhookAutorizado('errado','Bearer certo-e-comprido-000000000000'),false);
   assert.equal(P.webhookAutorizado('curto','curto'),false);
  }finally{P.PREMIUM_CT.gruposParaTodos=true;if(antes===undefined)delete process.env.REVENUECAT_SECRET_KEY;else process.env.REVENUECAT_SECRET_KEY=antes;}
+});
+
+// ─── Cards do perfil: amistosos, campeonatos da turma e time do card ─────────
+const Tab = carregar('campeonato/tabela'), Cls = carregar('campeonato/classificacao');
+function campeonatoDaTurma() {
+  const regras = { returno: false, idaVolta: false, pontosVitoria: 3, pontosEmpate: 1, finalEntreDois: false, tempos: 2, minutosPorTempo: 10 };
+  const c = { nome: 'Copa da Turma', formato: 'pontos', regras, status: 'encerrado', sorteio: ['t1', 't2', 't3'],
+    times: { t1: { nome: 'Azul', cor: '#3B82F6', elenco: [{ id: 'a', nome: 'A' }] }, t2: { nome: 'Verde', cor: '#22C55E', elenco: [{ id: 'x', nome: 'X' }] }, t3: { nome: 'Branco', cor: '#FFFFFF', elenco: [] } } };
+  const jogos = clone(Tab.gerarPontosCorridos(['t1', 't2', 't3'], false, false));
+  const lancar = (a, b, ga, gb, gols, assistencias = {}) => { const [id, j] = Object.entries(jogos).find(([, x]) => (x.casa === a && x.fora === b) || (x.casa === b && x.fora === a)); const inv = j.casa !== a; jogos[id] = { ...j, golsCasa: inv ? gb : ga, golsFora: inv ? ga : gb, gols, assistencias }; };
+  lancar('t1', 't2', 2, 1, { a: 2, x: 1 }, { x: 1 });
+  lancar('t1', 't3', 1, 0, { a: 1 });
+  lancar('t2', 't3', 3, 0, { x: 3 });
+  c.jogos = jogos; c.campeao = Cls.campeaoDe(c);
+  return c;
+}
+
+test('cards do perfil: amistosos (time atual e ex-time), campeonatos da turma e time do card', async () => {
+  const x = await cenario();
+  x.db.data.set('times/a_1/resumo/geral', { jogadores: { a: { nome: 'A', gols: 3 }, b: { nome: 'B', gols: 1 } } }); // resumo antigo, sem a lista
+  x.db.data.set('times/z_9', { nome: 'Antigo FC', sigla: 'ANT', cor: '#123456', escudoUrl: 'javascript:alert(1)', membros: ['z'] });
+  x.db.data.set('times/z_9/resumo/geral', { jogadores: { a: { nome: 'A', gols: 2 } }, artilheirosIds: ['a'] });
+  x.db.data.set('turmas/T1', { nome: 'Pelada', participantes: ['a', 'x'] });
+  x.db.data.set('turmas/T1/campeonatos/C1', campeonatoDaTurma());
+  const forjado = campeonatoDaTurma(); forjado.campeao = 't3';
+  x.db.data.set('turmas/T1/campeonatos/C2', forjado); // não confere: não soma
+  const r = await S.estatisticasAtletaCT(x.db, 'a', {}, NOW);
+  assert.equal(r.amistosos.gols, 5);
+  const atual = r.porTime.find((t) => t.timeId === 'a_1'), ex = r.porTime.find((t) => t.timeId === 'z_9');
+  assert.equal(atual.atual, true); assert.equal(atual.amistososGols, 3);
+  assert.equal(ex.atual, false); assert.equal(ex.amistososGols, 2); assert.equal(ex.nome, 'Antigo FC'); assert.equal(ex.escudo, null, 'só endereço https vira escudo');
+  assert.deepEqual(JSON.parse(JSON.stringify(r.campeonatosTurma)), { campeonatos: 1, gols: 3, assistencias: 0, jogos: 2 });
+  assert.equal(r.timeDoCard, 'a_1'); assert.equal(r.timeDoCardEscolhido, null);
+  assert.ok(x.db.data.get('times/a_1/resumo/geral').artilheirosIds, 'resumo antigo ganha a lista de artilheiros');
+  // Ex-time não pode ser o time do card; voltar ao automático pode.
+  await assert.rejects(S.timeDoCardEscolherCT(x.db, 'a', { timeId: 'z_9' }), /não está mais/);
+  await S.timeDoCardEscolherCT(x.db, 'a', { timeId: 'a_1' });
+  assert.equal((await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + 1000)).timeDoCardEscolhido, 'a_1', 'a escolha não pede recálculo');
+  // Visitante de perfil privado: só a parte do card Turmas (o card aparece no perfil privado); nada do card Times.
+  x.db.data.get('users/a').isPublic = false;
+  const v = await S.estatisticasAtletaCT(x.db, 'b', { uid: 'a' }, NOW + 1000);
+  assert.equal(v.estatisticas, null); assert.equal(v.porTime, undefined); assert.equal(v.timeDoCardEscolhido, undefined);
+  assert.equal(v.campeonatosTurma.gols, 3);
+  // Perfil suspenso: nada.
+  x.db.data.get('users/a').status = 'suspended';
+  assert.equal((await S.estatisticasAtletaCT(x.db, 'b', { uid: 'a' }, NOW + 1000)).campeonatosTurma, null);
+});
+
+test('cards do perfil: o cálculo guardado no formato antigo é refeito; a escolha do time continua', async () => {
+  const x = await cenario();
+  x.db.data.set('estatisticasAtletasCT/a', { estatisticas: { campeonatos: 9 }, calculadoEm: NOW, timeDoCard: 'a_1' });
+  const r = await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + 1000);
+  assert.equal(r.estatisticas.campeonatos, 0, 'recalculado');
+  assert.equal(r.timeDoCardEscolhido, 'a_1');
+  assert.equal(x.db.data.get('estatisticasAtletasCT/a').versao, 2);
+});
+
+test('cards do perfil: amistosos além do limite ficam marcados como parciais', async () => {
+  const x = await cenario();
+  for (let i = 0; i < 41; i++) {
+    x.db.data.set(`times/ex${i}_1`, { nome: `Ex ${i}`, membros: ['z'] });
+    x.db.data.set(`times/ex${i}_1/resumo/geral`, { jogadores: { a: { nome: 'A', gols: 1 } }, artilheirosIds: ['a'], artilheirosVersao: 1 });
+  }
+  const r = await S.estatisticasAtletaCT(x.db, 'a', {}, NOW);
+  assert.equal(r.incompleto, true);
+  assert.equal(r.amistosos.gols, 40);
+});
+
+test('cards do perfil: escolher um time novo depois do cálculo vale na hora; o time deixado deixa de ser atual', async () => {
+  const x = await cenario();
+  await S.estatisticasAtletaCT(x.db, 'a', {}, NOW);
+  x.db.data.set('times/n_1', { nome: 'Novo FC', sigla: 'NOV', cor: '#00AA00', membros: ['n', 'a'] });
+  x.db.data.get('times/a_1').membros = ['outro'];
+  await S.timeDoCardEscolherCT(x.db, 'a', { timeId: 'n_1' });
+  const r = await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + 1000);
+  assert.equal(r.timeDoCard, 'n_1'); assert.equal(r.timeDoCardEscolhido, 'n_1');
+  assert.equal(r.porTime.find((t) => t.timeId === 'n_1').atual, true);
+  assert.equal(r.porTime.some((t) => t.timeId === 'a_1' && t.atual), false);
+  assert.equal(r.estatisticas.campeonatos, 0, 'sem recálculo');
+});
+
+test('cards do perfil: a migração da lista de artilheiros não devolve conta excluída', async () => {
+  const x = await cenario();
+  x.db.data.set('users/saindo', { ...perfil('S'), excluindoEm: 1 });
+  x.db.data.set('times/a_1/resumo/geral', { jogadores: { a: { nome: 'A', gols: 1 }, b: { nome: 'B', gols: 2 }, apagado: { nome: 'X', gols: 4 }, saindo: { nome: 'S', gols: 1 } } });
+  await S.estatisticasAtletaCT(x.db, 'a', {}, NOW);
+  const resumo = x.db.data.get('times/a_1/resumo/geral');
+  assert.deepEqual([...resumo.artilheirosIds].sort(), ['a', 'b']);
+  assert.equal(resumo.artilheirosVersao, 1);
+  // Já migrado: a exclusão tira a conta e ela não volta.
+  x.db.data.set('times/a_1/resumo/geral', { ...resumo, artilheirosIds: ['a'] });
+  x.db.data.get('estatisticasAtletasCT/a').calculadoEm = 0;
+  await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + 1000);
+  assert.deepEqual(x.db.data.get('times/a_1/resumo/geral').artilheirosIds, ['a']);
+});
+
+test('cards do perfil: migração de resumo grande continua em lotes e só conclui no fim', async () => {
+  const x = await cenario();
+  const jogadores = { a: { nome: 'A', gols: 1 } };
+  for (let i = 0; i < 120; i++) { const u = `u${String(i).padStart(3, '0')}`; jogadores[u] = { nome: u, gols: 1 }; x.db.data.set(`users/${u}`, perfil(u)); }
+  x.db.data.set('times/a_1/resumo/geral', { jogadores });
+  const abrir = async (n) => { x.db.data.delete('estatisticasAtletasCT/a'); await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + n); return x.db.data.get('times/a_1/resumo/geral'); };
+  let r = await abrir(0);
+  assert.equal(r.artilheirosIds.length, 50); assert.equal(r.artilheirosVersao, undefined); assert.ok(r.artilheirosAte);
+  r = await abrir(1); assert.equal(r.artilheirosIds.length, 100); assert.equal(r.artilheirosVersao, undefined);
+  r = await abrir(2); assert.equal(r.artilheirosIds.length, 121); assert.equal(r.artilheirosVersao, 1); assert.equal('artilheirosAte' in r, false);
+});
+
+test('cards do perfil: conta marcada para exclusão durante a migração não entra na lista', async () => {
+  const x = await cenario();
+  x.db.data.set('users/saindo', perfil('S'));
+  x.db.data.set('times/a_1/resumo/geral', { jogadores: { a: { nome: 'A', gols: 1 }, saindo: { nome: 'S', gols: 1 } } });
+  // A exclusão grava o marcador entre a primeira tentativa da migração e a gravação: a transação lê o perfil de novo.
+  const original = x.db.runTransaction.bind(x.db);
+  let primeira = true;
+  x.db.runTransaction = async (fn) => {
+    if (!primeira) return original(fn);
+    primeira = false;
+    return original(async (tx) => { const r = await fn(tx); throw Object.assign(new Error('aborted'), { conflito: r }); }).catch(async (e) => {
+      if (!('conflito' in e)) throw e;
+      x.db.data.get('users/saindo').excluindoEm = 1; // mudou o perfil lido: o Firestore refaz a transação
+      return original(fn);
+    });
+  };
+  await S.estatisticasAtletaCT(x.db, 'a', {}, NOW);
+  const resumo = x.db.data.get('times/a_1/resumo/geral');
+  assert.deepEqual(resumo.artilheirosIds, ['a']); assert.equal(resumo.artilheirosVersao, 1);
+});
+
+test('cards do perfil: com mais de 30 times a lista mostra 30 e o total conta todos', async () => {
+  const x = await cenario();
+  for (let i = 0; i < 31; i++) {
+    x.db.data.set(`times/ex${i}_1`, { nome: `Ex ${i}`, membros: ['z'] });
+    x.db.data.set(`times/ex${i}_1/resumo/geral`, { jogadores: { a: { nome: 'A', gols: 1 } }, artilheirosIds: ['a'], artilheirosVersao: 1 });
+  }
+  const r = await S.estatisticasAtletaCT(x.db, 'a', {}, NOW);
+  assert.equal(r.amistosos.gols, 31); assert.equal(r.porTime.length, 30); assert.ok(r.totalTimes >= 31);
+  await S.timeDoCardEscolherCT(x.db, 'a', { timeId: 'a_1' });
+  assert.equal((await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + 1)).totalTimes, r.totalTimes, 'a escolha mantém o total');
 });

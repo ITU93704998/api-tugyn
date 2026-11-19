@@ -350,6 +350,9 @@ export const sairDosTimes = async (db: Firestore, uid: string): Promise<number> 
       atualizadoEm: FieldValue.serverTimestamp(),
     });
   }
+  // A conta sai da lista de artilheiros dos resumos de amistosos (os gols continuam no resumo, com o nome, como histórico do time).
+  const resumos = await db.collectionGroup("resumo").where("artilheirosIds", "array-contains", uid).limit(200).get();
+  for (const r of resumos.docs) await r.ref.update({ artilheirosIds: FieldValue.arrayRemove(uid) });
   return docs.size;
 };
 

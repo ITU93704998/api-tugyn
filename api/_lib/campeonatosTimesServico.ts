@@ -13,6 +13,7 @@ import {
   whatsappCT, podeLancarCT, mesariosDoCT, suspensoesCT, MAX_MESARIOS_CT, mesarioPodeCorrigirCT, prazoCorrecaoMesarioCT, motivoCorrecaoCT, comCorrecaoCT,
 } from "./campeonatosTimesDominio";
 import { temResultado } from "./campeonato/classificacao";
+import { amistososDoAtleta, campeonatosTurmaDoAtleta, timeDoDocumento, type TimeDoAtleta } from "./cardsAtleta";
 import { PREMIUM_CT, lerDevolucaoPremiumCT, reservarPremiumCT } from "./campeonatosTimesPremium";
 import { agendarAvisosCT, avisoCT, dispararAvisosCT, reaisCT, textosCT, timeTodo } from "./campeonatosTimesAvisos";
 import type { Aviso } from "./pushEnvio";
@@ -65,7 +66,7 @@ export function detalheCT(id: string, d: Dados): Dados {
   dto.revisaoResultados = Number(d.premiacaoVersao ?? 0);
   // Versão dos dados editáveis (sobre, regulamento, inscrição, premiação, datas): o formulário de edição a devolve.
   dto.infoVersao = Number(d.infoVersao ?? 0) || 0;
-  for (const k of ["locais", "premiacao", "regrasTexto", "genero", "faixaEtaria", "minJogadores", "maxJogadores", "requisitos", "patrocinadores", "campeaoTimeId", "motivoCancelamento", "grupos", "trofeuDesenho"]) dto[k] = d[k] ?? null;
+  for (const k of ["locais", "premiacao", "regrasTexto", "genero", "faixaEtaria", "minJogadores", "maxJogadores", "requisitos", "patrocinadores", "campeaoTimeId", "motivoCancelamento", "grupos", "trofeuDesenho", "regulamentoPdf"]) dto[k] = d[k] ?? null;
   dto.sorteio = d.sorteio === "manual" ? "manual" : "automatico";
   dto.mesarios = mesariosDoCT(d);
   return dto;
@@ -805,44 +806,71 @@ const LIMITE_PROXIMOS = 10;
 
 const COLECAO_ESTATISTICAS = "estatisticasAtletasCT";
 const VALIDADE_ESTATISTICAS = HORA;
+/** Formato do documento guardado: mudou o que é calculado, sobe o número (o guardado antigo é recalculado). */
+const VERSAO_ESTATISTICAS = 2;
+type TimeNoCard = TimeDoAtleta & { amistososGols: number; gols: number; assistencias: number; jogos: number; titulos: number; campeonatos: number };
+const MAX_TIMES_CARD = 30;
+/** Ordem da tela: atuais primeiro, depois mais jogos e mais gols. Ex-time sem nenhum número fica de fora. */
+const ordenarTimesCard = (ts: TimeNoCard[]): TimeNoCard[] => ts
+  .filter((t) => t.atual || t.jogos || t.amistososGols || t.campeonatos)
+  .sort((a, b) => Number(b.atual) - Number(a.atual) || b.jogos - a.jogos || (b.gols + b.amistososGols) - (a.gols + a.amistososGols));
+const listaTimesCard = (v: unknown): TimeNoCard[] => Array.isArray(v) ? (v as TimeNoCard[]).filter((t) => t && typeof t.timeId === "string") : [];
+/** Time do card: o escolhido (se a pessoa ainda está nele) ou, no automático, o time atual com mais jogos (depois, mais gols). */
+export const timeDoCardCT = (porTime: TimeNoCard[], escolhido: unknown): string | null => {
+  const atuais = porTime.filter((t) => t.atual);
+  if (typeof escolhido === "string" && atuais.some((t) => t.timeId === escolhido)) return escolhido;
+  const ordem = [...atuais].sort((a, b) => b.jogos - a.jogos || (b.gols + b.amistososGols) - (a.gols + a.amistososGols) || a.timeId.localeCompare(b.timeId));
+  return ordem[0]?.timeId ?? null;
+};
 /**
- * Estatísticas da pessoa nos campeonatos entre times (perfil): campeonatos, jogos do time em que estava inscrita, gols,
- * assistências, cartões e títulos. Calculadas dos jogos finalizados e guardadas por 1 h (`estatisticasAtletasCT/{uid}`).
+ * Números dos cards do perfil que o servidor calcula (guardados por 1 h em `estatisticasAtletasCT/{uid}`):
+ *  - card Times: campeonatos entre times (campeonatos, jogos do time em que estava inscrita, gols, assistências, cartões e
+ *    títulos) mais os gols dos amistosos, com a divisão por time e o time do card;
+ *  - card Turmas: a parte dos campeonatos da turma (as partidas das turmas o app já soma).
  * Vencido o prazo, só um pedido recalcula (reserva de 1 min no próprio documento); os outros recebem o último resultado.
- * `incompleto`: a pessoa passou do limite de campeonatos lidos e os totais são parciais.
+ * `incompleto`: a pessoa passou de algum limite de leitura e os totais são parciais.
+ * Perfil privado: o visitante recebe só a parte do card Turmas (o card aparece mesmo no perfil privado); o card Times segue
+ * a regra dos troféus (só o dono vê). Perfil suspenso ou com a exclusão em andamento: nada.
  */
 export async function estatisticasAtletaCT(db: Firestore, uid: string, body: Dados, agora = Date.now()): Promise<Dados> {
   const alvo = body.uid == null ? uid : String(body.uid);
   exigirCT(ID_PESSOA_CT.test(alvo), "Pessoa inválida.");
-  // Mesma regra dos troféus: perfil privado, suspenso ou com a exclusão em andamento (`excluindoEm`), só o dono vê.
+  let privado = false;
   if (alvo !== uid) {
     const perfil = dados(await db.doc(`users/${alvo}`).get());
-    if (!perfilDisponivel(Object.keys(perfil).length ? perfil : null) || perfil.isPublic === false) return { estatisticas: null, privado: true };
+    if (!perfilDisponivel(Object.keys(perfil).length ? perfil : null)) return { estatisticas: null, privado: true, campeonatosTurma: null };
+    privado = perfil.isPublic === false;
   }
   const ref = db.doc(`${COLECAO_ESTATISTICAS}/${alvo}`);
+  const valido = (s: DocumentSnapshot) => s.exists && !!s.get("estatisticas") && s.get("versao") === VERSAO_ESTATISTICAS && Number(s.get("calculadoEm") ?? 0) > agora - VALIDADE_ESTATISTICAS;
+  const resposta = (d: Dados): Dados => {
+    const porTime = listaTimesCard(d.porTime);
+    const base = { calculadoEm: Number(d.calculadoEm ?? 0), incompleto: d.incompleto === true, campeonatosTurma: d.campeonatosTurma ?? null };
+    if (privado) return { ...base, estatisticas: null, privado: true };
+    return { ...base, estatisticas: d.estatisticas, amistosos: d.amistosos ?? { gols: 0 }, porTime, totalTimes: Math.max(porTime.length, Number(d.totalTimes ?? 0)), timeDoCard: timeDoCardCT(porTime, d.timeDoCard), ...(alvo === uid ? { timeDoCardEscolhido: typeof d.timeDoCard === "string" ? d.timeDoCard : null } : {}) };
+  };
   const cache = await ref.get();
-  const resposta = (s: typeof cache) => ({ estatisticas: s.get("estatisticas"), calculadoEm: Number(s.get("calculadoEm") ?? 0), incompleto: s.get("incompleto") === true });
-  if (cache.exists && cache.get("estatisticas") && Number(cache.get("calculadoEm") ?? 0) > agora - VALIDADE_ESTATISTICAS) return resposta(cache);
+  if (valido(cache)) return resposta(cache.data()!);
   const reserva = await db.runTransaction(async (tx) => {
     const s = await tx.get(ref);
     // Outro pedido terminou entre a leitura acima e agora: usa o resultado dele.
-    if (s.exists && s.get("estatisticas") && Number(s.get("calculadoEm") ?? 0) > agora - VALIDADE_ESTATISTICAS) return { pronto: s, ocupado: false };
-    if (Number(s.get("calculandoAte") ?? 0) > agora) return { pronto: s.get("estatisticas") ? s : null, ocupado: true };
+    if (valido(s)) return { pronto: s, ocupado: false };
+    if (Number(s.get("calculandoAte") ?? 0) > agora) return { pronto: s.get("estatisticas") ? s : null, ocupado: true }; // vencido (ou do formato antigo) vale até o cálculo terminar
     tx.set(ref, { ...(s.data() ?? {}), calculandoAte: agora + 60_000 });
     return { pronto: null, ocupado: false };
   });
-  if (reserva.pronto) return resposta(reserva.pronto);
+  if (reserva.pronto) return resposta(reserva.pronto.data()!);
   if (reserva.ocupado) {
     // Primeira vez desta pessoa e outro pedido calculando: espera ele terminar (até 1,5 s) em vez de calcular junto.
     for (let i = 0; i < 3; i++) {
       await new Promise((ok) => setTimeout(ok, ESPERA_ESTATISTICAS_MS));
       const s = await ref.get();
-      if (s.get("estatisticas")) return resposta(s);
+      if (s.get("estatisticas")) return resposta(s.data()!);
     }
     return { estatisticas: null, calculando: true };
   }
   try {
-    return await calcularEstatisticasCT(db, ref, alvo, agora);
+    return resposta(await calcularEstatisticasCT(db, ref, alvo, agora, cache.get("timeDoCard")));
   } catch (e) {
     await ref.update({ calculandoAte: 0 }).catch(() => undefined); // solta a reserva: o próximo pedido tenta de novo
     throw e;
@@ -850,27 +878,88 @@ export async function estatisticasAtletaCT(db: Firestore, uid: string, body: Dad
 }
 const ESPERA_ESTATISTICAS_MS = 500;
 
-async function calcularEstatisticasCT(db: Firestore, ref: ReturnType<Firestore["doc"]>, alvo: string, agora: number): Promise<Dados> {
-  const camps = await db.collection(COLECAO_CT).where("envolvidos", "array-contains", alvo).limit(LIMITE_CAMPEONATOS_ESTATISTICAS).get();
+/**
+ * Escolher o time do card (`timeId`) ou voltar ao automático (`null`). Só um time em que a pessoa está hoje.
+ * Acerta também, no cálculo guardado, quais times são atuais (entrou num time novo ou saiu de um depois do cálculo), sem
+ * refazer os números: o escolhido aparece na hora, mesmo que o cálculo seja de antes de entrar no time.
+ */
+export async function timeDoCardEscolherCT(db: Firestore, uid: string, body: Dados): Promise<Dados> {
+  const timeId = body.timeId == null ? null : String(body.timeId);
+  if (timeId !== null) exigirCT(/^[A-Za-z0-9_-]{1,140}$/.test(timeId), "Time inválido.");
+  const atuais = new Map<string, TimeDoAtleta>();
+  const busca = await db.collection("times").where("membros", "array-contains", uid).limit(20).get();
+  for (const t of busca.docs) atuais.set(t.id, timeDoDocumento(t.id, t.data(), true));
+  if (timeId !== null && !atuais.has(timeId)) {
+    // Fora dos 20 da busca: confere direto no time.
+    const t = await db.doc(`times/${timeId}`).get();
+    const membros = t.exists && Array.isArray(t.get("membros")) ? (t.get("membros") as unknown[]) : [];
+    if (membros.includes(uid)) atuais.set(timeId, timeDoDocumento(timeId, t.data() ?? {}, true));
+  }
+  exigirCT(timeId === null || atuais.has(timeId), "Você não está mais neste time.", 409);
+  const ref = db.doc(`${COLECAO_ESTATISTICAS}/${uid}`);
+  await db.runTransaction(async (tx) => {
+    const s = await tx.get(ref);
+    const guardada = listaTimesCard(s.get("porTime"));
+    if (!s.exists || !s.get("porTime")) { tx.set(ref, { timeDoCard: timeId }, { merge: true }); return; }
+    const conhecidos = new Set(guardada.map((t) => t.timeId));
+    const zerado = { amistososGols: 0, gols: 0, assistencias: 0, jogos: 0, titulos: 0, campeonatos: 0 };
+    const novos = [...atuais.values()].filter((t) => !conhecidos.has(t.timeId)).map((t) => ({ ...t, ...zerado }));
+    const todos = [...guardada.map((t) => ({ ...t, ...(atuais.get(t.timeId) ?? {}), atual: atuais.has(t.timeId) })), ...novos];
+    const ficam = ordenarTimesCard(todos);
+    // A lista guardada já pode estar cortada: o total segue o anterior, com os times que entraram e os que saíram.
+    const totalTimes = Math.max(ficam.length, Number(s.get("totalTimes") ?? guardada.length) + novos.length - (todos.length - ficam.length));
+    tx.set(ref, { timeDoCard: timeId, porTime: ficam.slice(0, MAX_TIMES_CARD), totalTimes }, { merge: true });
+  });
+  return { timeDoCard: timeId };
+}
+
+async function calcularEstatisticasCT(db: Firestore, ref: ReturnType<Firestore["doc"]>, alvo: string, agora: number, timeDoCard: unknown): Promise<Dados> {
+  const [camps, amistosos, turma] = await Promise.all([
+    db.collection(COLECAO_CT).where("envolvidos", "array-contains", alvo).limit(LIMITE_CAMPEONATOS_ESTATISTICAS).get(),
+    amistososDoAtleta(db, alvo),
+    campeonatosTurmaDoAtleta(db, alvo),
+  ]);
   const est = { campeonatos: 0, jogos: 0, gols: 0, assistencias: 0, amarelos: 0, vermelhos: 0, titulos: 0 };
+  const porTime = new Map<string, TimeNoCard>();
+  const doTime = (timeId: string, info: () => TimeDoAtleta): TimeNoCard => {
+    let t = porTime.get(timeId);
+    if (!t) { t = { ...(amistosos.times.get(timeId) ?? info()), amistososGols: 0, gols: 0, assistencias: 0, jogos: 0, titulos: 0, campeonatos: 0 }; porTime.set(timeId, t); }
+    return t;
+  };
+  for (const [timeId, info] of amistosos.times) doTime(timeId, () => info);
+  for (const [timeId, gols] of amistosos.gols) {
+    const info = amistosos.times.get(timeId);
+    if (info) doTime(timeId, () => info).amistososGols = gols;
+  }
   await Promise.all(camps.docs.filter((c) => c.get("status") === "em_andamento" || c.get("status") === "encerrado").map(async (c) => {
     const ins = await c.ref.collection("inscricoes").where("status", "==", "aprovada").limit(17).get();
     const meu = ins.docs.find((s) => (s.data() as InscricaoCT).jogadores?.some((j) => j.id === alvo));
     if (!meu) return;
-    est.campeonatos++;
-    if (c.get("status") === "encerrado" && c.get("campeaoTimeId") === meu.id) est.titulos++;
+    const i = meu.data() as InscricaoCT;
+    // Time apagado ou de que a pessoa saiu: nome, cor e escudo da inscrição (como o time estava naquele campeonato).
+    const t = doTime(meu.id, () => timeDoDocumento(meu.id, { nome: i.timeNome, cor: i.cor, escudoUrl: i.escudoUrl, sigla: String(i.timeNome ?? "").replace(/[^A-Za-zÀ-ÿ0-9]/g, "").slice(0, 3) }, false));
+    est.campeonatos++; t.campeonatos++;
+    if (c.get("status") === "encerrado" && c.get("campeaoTimeId") === meu.id) { est.titulos++; t.titulos++; }
     const js = await c.ref.collection("jogos").where("status", "==", "finalizado").limit(64).get();
     for (const s of js.docs) {
       const j = s.data() as JogoCT;
       if (j.casa !== meu.id && j.fora !== meu.id) continue;
-      est.jogos++;
-      est.gols += Number(objetoCT(j.gols)[alvo] ?? 0); est.assistencias += Number(objetoCT(j.assistencias)[alvo] ?? 0);
+      const g = Number(objetoCT(j.gols)[alvo] ?? 0), a = Number(objetoCT(j.assistencias)[alvo] ?? 0);
+      est.jogos++; t.jogos++;
+      est.gols += g; t.gols += g; est.assistencias += a; t.assistencias += a;
       est.amarelos += Number(objetoCT(j.amarelos)[alvo] ?? 0); est.vermelhos += Number(objetoCT(j.vermelhos)[alvo] ?? 0);
     }
   }));
-  const incompleto = camps.size >= LIMITE_CAMPEONATOS_ESTATISTICAS;
-  await ref.set({ estatisticas: est, calculadoEm: agora, incompleto });
-  return { estatisticas: est, calculadoEm: agora, incompleto };
+  const golsAmistosos = [...porTime.values()].reduce((x, t) => x + t.amistososGols, 0);
+  // A lista guardada mostra até 30 times; o total (e os números do card) contam todos.
+  const ordenados = ordenarTimesCard([...porTime.values()]);
+  const lista = ordenados.slice(0, MAX_TIMES_CARD);
+  const totalTimes = ordenados.length;
+  const { incompleto: turmaIncompleta, ...campeonatosTurma } = turma;
+  const incompleto = camps.size >= LIMITE_CAMPEONATOS_ESTATISTICAS || turmaIncompleta || amistosos.incompleto;
+  const doc = { estatisticas: est, amistosos: { gols: golsAmistosos }, porTime: lista, totalTimes, campeonatosTurma, calculadoEm: agora, incompleto, versao: VERSAO_ESTATISTICAS, calculandoAte: 0 };
+  await ref.set(doc, { merge: true }); // merge: a escolha do time do card (`timeDoCard`) continua
+  return { ...doc, timeDoCard };
 }
 const LIMITE_CAMPEONATOS_ESTATISTICAS = 60;
 
