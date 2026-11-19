@@ -66,6 +66,54 @@ export type Plataforma = "ios" | "android";
 export const FUNCOES = ["desafios", "amistosos", "anuncios", "acompanharConfirmacoes"] as const;
 export type Funcao = (typeof FUNCOES)[number];
 
+/** Onde o app convida para o Tugyn Apoiador (cada um pode ser desligado no painel). */
+export const CONVITES_APOIADOR = ["perfil", "inicio", "configuracoes", "posPartida", "espacoAnuncio"] as const;
+export type ConviteApoiador = (typeof CONVITES_APOIADOR)[number];
+
+/**
+ * Divulgação do Tugyn Apoiador, editada no painel sem atualizar o app. O valor COBRADO é sempre o da loja (Play / App Store);
+ * os preços daqui são só o texto dos convites (vazio = o app mostra o preço da loja, ou nenhum se a loja não respondeu).
+ */
+/** Acesso antecipado: cada novidade do app (pelo id usado no código) pode estar desligada, só para apoiadores ou para todos. */
+export const ESTADOS_NOVIDADE = ["desligada", "apoiadores", "todos"] as const;
+export type EstadoNovidade = (typeof ESTADOS_NOVIDADE)[number];
+export interface NovidadeAntecipada {
+  /** Mesmo id usado no app (useNovidadeLiberada). */
+  id: string;
+  /** Nome mostrado na tela do Apoiador. */
+  titulo: string;
+  estado: EstadoNovidade;
+}
+export const NOVIDADES_MAX = 30;
+export const NOVIDADE_TITULO_MAX = 60;
+export const ID_NOVIDADE_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
+export interface ConfigApoiador {
+  convites: Record<ConviteApoiador, boolean>;
+  /** Ex.: "R$ 4,90". */
+  precoMensal: string | null;
+  /** Ex.: "R$ 39,90". */
+  precoAnual: string | null;
+  /** Depois de "Agora não" (ou do convite pós-partida), quantos dias até convidar de novo. */
+  diasEntreConvites: number;
+  /** Partidas salvas pelo usuário antes do primeiro convite pós-partida. */
+  partidasParaConvite: number;
+  novidades: NovidadeAntecipada[];
+}
+
+export const PRECO_APOIADOR_MAX = 20;
+export const DIAS_CONVITE = { min: 1, max: 365, padrao: 30 } as const;
+export const PARTIDAS_CONVITE = { min: 1, max: 100, padrao: 5 } as const;
+
+export const APOIADOR_PADRAO: ConfigApoiador = {
+  convites: { perfil: true, inicio: true, configuracoes: true, posPartida: true, espacoAnuncio: true },
+  precoMensal: null,
+  precoAnual: null,
+  diasEntreConvites: DIAS_CONVITE.padrao,
+  partidasParaConvite: PARTIDAS_CONVITE.padrao,
+  novidades: [],
+};
+
 export interface ConfigSistema {
   versoes: Record<Plataforma, { min: string | null; latest: string | null }>;
   /** Texto da tela/faixa de atualização (substitui APP_UPDATE_MESSAGE quando preenchido). */
@@ -74,6 +122,7 @@ export interface ConfigSistema {
   aviso: string | null;
   /** false = função desligada (o servidor recusa ações novas; o app esconde o que depende dela). */
   funcoes: Record<Funcao, boolean>;
+  apoiador: ConfigApoiador;
 }
 
 export const CONFIG_PADRAO: ConfigSistema = {
@@ -81,6 +130,7 @@ export const CONFIG_PADRAO: ConfigSistema = {
   mensagemAtualizacao: null,
   aviso: null,
   funcoes: { desafios: true, amistosos: true, anuncios: true, acompanharConfirmacoes: true },
+  apoiador: APOIADOR_PADRAO,
 };
 
 export const MENSAGEM_MAX = 200;
@@ -93,6 +143,43 @@ const textoOuNull = (v: unknown, max: number): string | null => {
   return t ? t.slice(0, max) : null;
 };
 const versaoOuNull = (v: unknown): string | null => (versaoValida(v) ? v : null);
+const inteiroEntre = (v: unknown, faixa: { min: number; max: number; padrao: number }): number =>
+  typeof v === "number" && Number.isInteger(v) && v >= faixa.min && v <= faixa.max ? v : faixa.padrao;
+/** Texto de preço: precisa ter algum número (evita que um texto qualquer apareça no lugar do valor). */
+const precoOuNull = (v: unknown): string | null => {
+  const t = textoOuNull(v, PRECO_APOIADOR_MAX);
+  return t && /\d/.test(t) ? t : null;
+};
+
+/** Lista de novidades do documento: descarta itens inválidos e ids repetidos (nunca quebra a política). */
+export const normalizarNovidades = (bruto: unknown): NovidadeAntecipada[] => {
+  if (!Array.isArray(bruto)) return [];
+  const vistos = new Set<string>();
+  const saida: NovidadeAntecipada[] = [];
+  for (const item of bruto) {
+    if (!isRecord(item) || typeof item.id !== "string" || !ID_NOVIDADE_RE.test(item.id) || vistos.has(item.id)) continue;
+    const titulo = textoOuNull(item.titulo, NOVIDADE_TITULO_MAX);
+    if (!titulo) continue;
+    const estado = (ESTADOS_NOVIDADE as readonly unknown[]).includes(item.estado) ? (item.estado as EstadoNovidade) : "desligada";
+    vistos.add(item.id);
+    saida.push({ id: item.id, titulo, estado });
+    if (saida.length >= NOVIDADES_MAX) break;
+  }
+  return saida;
+};
+
+export const normalizarApoiador = (bruto: unknown): ConfigApoiador => {
+  const a = isRecord(bruto) ? bruto : {};
+  const c = isRecord(a.convites) ? a.convites : {};
+  return {
+    convites: Object.fromEntries(CONVITES_APOIADOR.map((k) => [k, c[k] !== false])) as Record<ConviteApoiador, boolean>,
+    precoMensal: precoOuNull(a.precoMensal),
+    precoAnual: precoOuNull(a.precoAnual),
+    diasEntreConvites: inteiroEntre(a.diasEntreConvites, DIAS_CONVITE),
+    partidasParaConvite: inteiroEntre(a.partidasParaConvite, PARTIDAS_CONVITE),
+    novidades: normalizarNovidades(a.novidades),
+  };
+};
 
 /** Lê o documento campo a campo: o que estiver inválido volta ao padrão (nunca bloqueia por erro de configuração). */
 export const normalizarConfig = (bruto: unknown): ConfigSistema => {
@@ -113,6 +200,7 @@ export const normalizarConfig = (bruto: unknown): ConfigSistema => {
       anuncios: f.anuncios !== false,
       acompanharConfirmacoes: f.acompanharConfirmacoes !== false,
     },
+    apoiador: normalizarApoiador(d.apoiador),
   };
 };
 
@@ -162,6 +250,7 @@ export interface PoliticaPublica {
   message: string | null;
   aviso: string | null;
   funcoes: Record<Funcao, boolean>;
+  apoiador: ConfigApoiador;
 }
 
 /**
@@ -184,6 +273,7 @@ export const aplicarConfigRemota = (
     message: cfg.mensagemAtualizacao ?? base.message,
     aviso: cfg.aviso,
     funcoes: { ...cfg.funcoes },
+    apoiador: { ...cfg.apoiador, convites: { ...cfg.apoiador.convites }, novidades: cfg.apoiador.novidades.map((n) => ({ ...n })) },
   };
 };
 

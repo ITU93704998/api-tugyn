@@ -127,6 +127,54 @@ test('salvar config: valida versões, mínima ≤ recente, tamanhos e interrupto
   assert.match(A.parseConfigEnviada({ ...ok, funcoes: { desafios: true } }).error, /Interruptores/);
 });
 
+test('apoiador: padrão ligado, normaliza campo a campo e vai para a política pública', () => {
+  const pad = S.normalizarConfig(null).apoiador;
+  assert.deepEqual({ ...pad.convites }, { perfil: true, inicio: true, configuracoes: true, posPartida: true, espacoAnuncio: true });
+  assert.deepEqual([pad.precoMensal, pad.precoAnual, pad.diasEntreConvites, pad.partidasParaConvite], [null, null, 30, 5]);
+  const c = S.normalizarConfig({ apoiador: { convites: { inicio: false }, precoMensal: ' R$  5,90 ', precoAnual: 'grátis', diasEntreConvites: 0, partidasParaConvite: 3 } }).apoiador;
+  assert.equal(c.convites.inicio, false);
+  assert.equal(c.convites.perfil, true, 'só false explícito desliga');
+  assert.equal(c.precoMensal, 'R$ 5,90');
+  assert.equal(c.precoAnual, null, 'texto sem número é ignorado');
+  assert.equal(c.diasEntreConvites, 30, 'fora da faixa volta ao padrão');
+  assert.equal(c.partidasParaConvite, 3);
+  const pub = S.aplicarConfigRemota({ minVersion: null, latestVersion: null, storeUrl: null, message: null }, S.normalizarConfig({ apoiador: { precoMensal: 'R$ 4,90' } }), 'android');
+  assert.equal(pub.apoiador.precoMensal, 'R$ 4,90');
+});
+
+test('apoiador: o painel valida convites, preços e números; ausente = padrão', () => {
+  const base = { versoes: { ios: { min: null, latest: null }, android: { min: null, latest: null } }, mensagemAtualizacao: null, aviso: null, funcoes: { desafios: true, amistosos: true, anuncios: true, acompanharConfirmacoes: true } };
+  const ap = { convites: { perfil: true, inicio: false, configuracoes: true, posPartida: true, espacoAnuncio: true }, precoMensal: 'R$ 4,90', precoAnual: '', diasEntreConvites: 15, partidasParaConvite: 5 };
+  const r = A.parseConfigEnviada({ ...base, apoiador: ap });
+  assert.equal(r.ok, true);
+  assert.equal(r.value.apoiador.convites.inicio, false);
+  assert.equal(r.value.apoiador.precoAnual, null);
+  assert.equal(r.value.apoiador.diasEntreConvites, 15);
+  assert.equal(A.parseConfigEnviada(base).value.apoiador.diasEntreConvites, 30);
+  assert.match(A.parseConfigEnviada({ ...base, apoiador: { ...ap, convites: { perfil: true } } }).error, /Convites/);
+  assert.match(A.parseConfigEnviada({ ...base, apoiador: { ...ap, precoMensal: 'barato' } }).error, /R\$ 4,90/);
+  assert.match(A.parseConfigEnviada({ ...base, apoiador: { ...ap, precoAnual: 'R$ ' + '9'.repeat(30) } }).error, /20/);
+  assert.match(A.parseConfigEnviada({ ...base, apoiador: { ...ap, diasEntreConvites: 400 } }).error, /1 a 365/);
+  assert.match(A.parseConfigEnviada({ ...base, apoiador: { ...ap, partidasParaConvite: 2.5 } }).error, /1 a 100/);
+});
+
+test('acesso antecipado: normaliza a lista e o painel valida id, nome e situação', () => {
+  const lida = S.normalizarConfig({ apoiador: { novidades: [{ id: 'nova-estatistica', titulo: ' Nova  estatística ', estado: 'apoiadores' }, { id: 'nova-estatistica', titulo: 'Repetida', estado: 'todos' }, { id: 'X!', titulo: 'Inválida', estado: 'todos' }, { id: 'sem-estado', titulo: 'Sem estado' }, { id: 'sem-nome', estado: 'todos' }] } }).apoiador.novidades;
+  assert.deepEqual(lida.map((n) => `${n.id}:${n.titulo}:${n.estado}`), ['nova-estatistica:Nova estatística:apoiadores', 'sem-estado:Sem estado:desligada']);
+  assert.deepEqual([...S.normalizarConfig(null).apoiador.novidades], []);
+  const pub = S.aplicarConfigRemota({ minVersion: null, latestVersion: null, storeUrl: null, message: null }, S.normalizarConfig({ apoiador: { novidades: [{ id: 'aa', titulo: 'A', estado: 'todos' }] } }), null);
+  assert.equal(pub.apoiador.novidades[0].estado, 'todos');
+  const ok = [{ id: 'nova-estatistica', titulo: 'Nova estatística', estado: 'apoiadores' }];
+  assert.equal(A.parseNovidadesEnviadas(ok).ok, true);
+  assert.deepEqual(A.parseNovidadesEnviadas(undefined).value, []);
+  assert.match(A.parseNovidadesEnviadas([{ id: 'Nova', titulo: 'x', estado: 'todos' }]).error, /inválido/);
+  assert.match(A.parseNovidadesEnviadas([...ok, ...ok]).error, /repetido/);
+  assert.match(A.parseNovidadesEnviadas([{ id: 'aa', titulo: ' ', estado: 'todos' }]).error, /nome/);
+  assert.match(A.parseNovidadesEnviadas([{ id: 'aa', titulo: 'x'.repeat(61), estado: 'todos' }]).error, /60/);
+  assert.match(A.parseNovidadesEnviadas([{ id: 'aa', titulo: 'x', estado: 'beta' }]).error, /Situação/);
+  assert.match(A.parseNovidadesEnviadas(Array.from({ length: 31 }, (_, i) => ({ id: 'n' + i, titulo: 'x', estado: 'todos' }))).error, /30/);
+});
+
 test('sem Firebase Functions (plano gratuito): rotinas das Functions ficam "não usadas" e as filas usam o prazo da rotina diária', () => {
   const ts_ = (m) => ({ toMillis: () => m });
   for (const id of ['push_reenvio', 'push_recibos']) {

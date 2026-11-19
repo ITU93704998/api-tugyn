@@ -20,6 +20,17 @@ import {
   esquecerConfig,
   lerConfig,
   normalizarConfig,
+  normalizarApoiador,
+  CONVITES_APOIADOR,
+  DIAS_CONVITE,
+  PARTIDAS_CONVITE,
+  PRECO_APOIADOR_MAX,
+  type ConfigApoiador,
+  type NovidadeAntecipada,
+  ESTADOS_NOVIDADE,
+  ID_NOVIDADE_RE,
+  NOVIDADES_MAX,
+  NOVIDADE_TITULO_MAX,
   versaoValida,
 } from "./sistema";
 import { compareVersions, resolvePolicy } from "./version";
@@ -281,7 +292,67 @@ export const parseConfigEnviada = (body: unknown): Parse<ConfigSistema> => {
     if (typeof f[nome] !== "boolean") return { ok: false, error: "Interruptores inválidos." };
     funcoes[nome] = f[nome] as boolean;
   }
-  return { ok: true, value: { versoes, mensagemAtualizacao: mensagem.value, aviso: aviso.value, funcoes } };
+  const apoiador = parseApoiadorEnviado(b.apoiador);
+  if (!apoiador.ok) return apoiador;
+  return { ok: true, value: { versoes, mensagemAtualizacao: mensagem.value, aviso: aviso.value, funcoes, apoiador: apoiador.value } };
+};
+
+/** Divulgação do Apoiador vinda do painel. Ausente (painel antigo) = padrão. */
+export const parseApoiadorEnviado = (valor: unknown): Parse<ConfigApoiador> => {
+  if (valor === undefined || valor === null) return { ok: true, value: normalizarApoiador(null) };
+  if (!isRecord(valor)) return { ok: false, error: "Configuração do Apoiador inválida." };
+  const c = isRecord(valor.convites) ? valor.convites : {};
+  const convites = {} as ConfigApoiador["convites"];
+  for (const nome of CONVITES_APOIADOR) {
+    if (typeof c[nome] !== "boolean") return { ok: false, error: "Convites do Apoiador inválidos." };
+    convites[nome] = c[nome] as boolean;
+  }
+  const preco = (v: unknown, nome: string): Parse<string | null> => {
+    if (v === null || v === undefined) return { ok: true, value: null };
+    if (typeof v !== "string") return { ok: false, error: `${nome} inválido.` };
+    const t = v.replace(/\s+/g, " ").trim();
+    if (!t) return { ok: true, value: null };
+    if (t.length > PRECO_APOIADOR_MAX) return { ok: false, error: `${nome}: no máximo ${PRECO_APOIADOR_MAX} caracteres.` };
+    if (!/\d/.test(t)) return { ok: false, error: `${nome}: escreva o valor, por exemplo R$ 4,90.` };
+    return { ok: true, value: t };
+  };
+  const mensal = preco(valor.precoMensal, "Preço mensal");
+  if (!mensal.ok) return mensal;
+  const anual = preco(valor.precoAnual, "Preço anual");
+  if (!anual.ok) return anual;
+  const inteiro = (v: unknown, faixa: { min: number; max: number }, nome: string): Parse<number> =>
+    typeof v === "number" && Number.isInteger(v) && v >= faixa.min && v <= faixa.max
+      ? { ok: true, value: v }
+      : { ok: false, error: `${nome}: use um número inteiro de ${faixa.min} a ${faixa.max}.` };
+  const dias = inteiro(valor.diasEntreConvites, DIAS_CONVITE, "Dias entre convites");
+  if (!dias.ok) return dias;
+  const partidas = inteiro(valor.partidasParaConvite, PARTIDAS_CONVITE, "Partidas antes do convite");
+  if (!partidas.ok) return partidas;
+  const novidades = parseNovidadesEnviadas(valor.novidades);
+  if (!novidades.ok) return novidades;
+  return { ok: true, value: { convites, precoMensal: mensal.value, precoAnual: anual.value, diasEntreConvites: dias.value, partidasParaConvite: partidas.value, novidades: novidades.value } };
+};
+
+/** Acesso antecipado vindo do painel. Ausente (painel antigo) = lista vazia. */
+export const parseNovidadesEnviadas = (valor: unknown): Parse<NovidadeAntecipada[]> => {
+  if (valor === undefined || valor === null) return { ok: true, value: [] };
+  if (!Array.isArray(valor)) return { ok: false, error: "Lista de novidades inválida." };
+  if (valor.length > NOVIDADES_MAX) return { ok: false, error: `No máximo ${NOVIDADES_MAX} novidades.` };
+  const vistos = new Set<string>();
+  const saida: NovidadeAntecipada[] = [];
+  for (const item of valor) {
+    if (!isRecord(item)) return { ok: false, error: "Novidade inválida." };
+    const id = typeof item.id === "string" ? item.id.trim() : "";
+    if (!ID_NOVIDADE_RE.test(id)) return { ok: false, error: `Id "${id.slice(0, 40)}" inválido: use de 2 a 40 letras minúsculas, números e hífen (ex.: nova-estatistica).` };
+    if (vistos.has(id)) return { ok: false, error: `O id "${id}" está repetido.` };
+    const titulo = typeof item.titulo === "string" ? item.titulo.replace(/\s+/g, " ").trim() : "";
+    if (!titulo) return { ok: false, error: `Dê um nome para a novidade "${id}".` };
+    if (titulo.length > NOVIDADE_TITULO_MAX) return { ok: false, error: `Nome de "${id}": no máximo ${NOVIDADE_TITULO_MAX} caracteres.` };
+    if (!(ESTADOS_NOVIDADE as readonly unknown[]).includes(item.estado)) return { ok: false, error: `Situação inválida em "${id}".` };
+    vistos.add(id);
+    saida.push({ id, titulo, estado: item.estado as NovidadeAntecipada["estado"] });
+  }
+  return { ok: true, value: saida };
 };
 
 /** O que vale hoje vindo das variáveis da Vercel (para o painel mostrar a origem de cada valor). */
