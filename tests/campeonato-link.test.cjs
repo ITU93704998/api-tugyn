@@ -56,3 +56,17 @@ test('campeonato-link: taça escolhida no lugar do escudo, sem o rótulo "Campeo
   assert.doesNotMatch(classica, /<script>\|x/);
   assert.equal(L.cartaoDoCampeonato(L.campeonatoDoDocumento(doc()), NOW).rotulo, '');
 });
+
+test('inscrições fechadas: times completos ou em andamento não mostram prazo, vagas nem valor na página e no cartão', () => {
+  const cheio = L.campeonatoDoDocumento(doc({ aprovados: 8, maxTimes: 8 }));
+  assert.equal(L.situacaoDoCampeonato(cheio, NOW).texto, 'Times completos. O campeonato começa em breve.');
+  assert.equal(L.cartaoDoCampeonato(cheio, NOW).destaque, 'Times completos · começa em breve');
+  const html = pagina(cheio);
+  assert.ok(!html.includes('Inscrições até') && !html.includes('R$') && !html.includes('de 8 confirmados'));
+  assert.ok(html.includes('Acompanhe pelo app Tugyn.'));
+  const andamento = pagina(L.campeonatoDoDocumento(doc({ status: 'em_andamento', aprovados: 6 })));
+  assert.ok(!andamento.includes('Inscrições até') && !andamento.includes('R$') && andamento.includes('6 times'));
+  // Aberto continua com tudo.
+  const aberto = pagina(L.campeonatoDoDocumento(doc({ aprovados: 3 })));
+  assert.ok(aberto.includes('Inscrições até') && aberto.includes('3 de 8 confirmados') && aberto.includes('Inscreva seu time pelo app Tugyn.'));
+});

@@ -7,6 +7,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tacaSvg } from "./tacaSvg";
+import { ajustarTitulo, caberEm, larguraDoTexto } from "./medirTexto";
 
 export interface DadosCartao {
   /** Faixa de cima: "CAMPEONATO ENTRE TIMES", "CONVITE PARA A TURMA"... */
@@ -22,6 +23,8 @@ export interface DadosCartao {
   escudo?: { url: string; cor: string; sigla: string } | null;
   /** Campeonato: a taça escolhida (texto das peças; null = clássica), à direita no lugar do escudo. */
   taca?: string | null;
+  /** Campeonato: os nomes dos patrocinadores ("A · B · C"), numa faixa embaixo. */
+  patrocinadores?: string;
 }
 
 export const LARGURA_CARTAO = 1200;
@@ -91,11 +94,18 @@ const img = (src: string, style: Record<string, unknown>): No => ({ type: "img",
 
 /** A árvore do cartão (sem JSX: objetos no formato que o gerador aceita). Separada para os testes. */
 export const arvoreDoCartao = (d: DadosCartao, imagens: { logo: string; fundo: string | null; escudo: string | null }): No => {
-  const titulo = cortar(d.titulo, 60);
-  const tamanhoTitulo = titulo.length > 34 ? 60 : titulo.length > 22 ? 72 : 84;
   const temEscudo = Boolean(d.escudo) || d.taca !== undefined;
+  // Largura útil do texto (1200 - 2 x 64), menos a taça/escudo (até 336) e o espaço entre eles: o título nunca invade a taça.
+  const largura = temEscudo ? 690 : 1072;
+  // Título pela largura medida: uma linha grande, ou até duas menores (palavra comprida demais é cortada com "…").
+  const umaLinha = ajustarTitulo(d.titulo, [84, 72, 60], largura, 1);
+  const titulo = umaLinha.linhas[0].endsWith("…") ? ajustarTitulo(d.titulo, [60, 52, 44, 38], largura, 2) : umaLinha;
+  const textoAbrir = "Abra no app Tugyn";
+  const larguraDestaque = 1072 - larguraDoTexto(textoAbrir, 24) - 40;
+  // Faixa dos patrocinadores: 1072 menos o padding (2 x 20), o rótulo e o espaço entre eles.
+  const larguraPatrocinio = 1072 - 40 - larguraDoTexto("PATROCÍNIO", 20, 2) - 16;
   const escudo = d.taca !== undefined
-    ? img(`data:image/svg+xml;base64,${Buffer.from(tacaSvg(d.taca, 480, 600, "cartao")).toString("base64")}`, { width: 336, height: 420 })
+    ? img(`data:image/svg+xml;base64,${Buffer.from(tacaSvg(d.taca, 480, 600, "cartao")).toString("base64")}`, d.patrocinadores ? { width: 256, height: 320 } : { width: 336, height: 420 })
     : d.escudo
     ? imagens.escudo
       ? img(imagens.escudo, { width: 288, height: 288, objectFit: "contain" })
@@ -121,16 +131,20 @@ export const arvoreDoCartao = (d: DadosCartao, imagens: { logo: string; fundo: s
         div({ fontSize: 40, fontWeight: 800, letterSpacing: -1 }, "Tugyn")),
       // Miolo
       div({ alignItems: "center", justifyContent: "space-between", gap: 40 },
-        div({ flexDirection: "column", gap: 18, maxWidth: temEscudo ? 720 : 1072 },
+        div({ flexDirection: "column", gap: 18, width: largura, flexShrink: 0 },
           d.rotulo ? div({ alignSelf: "flex-start", background: "#FE7552", color: "#FFFFFF", fontSize: 24, fontWeight: 800, letterSpacing: 2, padding: "8px 18px", borderRadius: 999 },
-            cortar(d.rotulo.toUpperCase(), 40)) : null,
-          div({ fontSize: tamanhoTitulo, fontWeight: 800, lineHeight: 1.05, letterSpacing: -2 }, titulo),
-          d.detalhes ? div({ fontSize: 32, fontWeight: 400, color: "#E4DED8" }, cortar(d.detalhes, 70)) : null),
-        escudo),
-      // Rodapé
-      div({ alignItems: "center", justifyContent: "space-between" },
-        d.destaque ? div({ fontSize: 30, fontWeight: 700, color: "#FFB59E" }, cortar(d.destaque, 64)) : div({}),
-        div({ fontSize: 24, fontWeight: 700, color: "#B5AEA6" }, "Abra no app Tugyn")),
+            caberEm(d.rotulo.toUpperCase(), 24, largura - 36, 2)) : null,
+          div({ flexDirection: "column" }, ...titulo.linhas.map((linha) => div({ fontSize: titulo.fonte, fontWeight: 800, lineHeight: 1.05, letterSpacing: -2, whiteSpace: "nowrap" }, linha))),
+          d.detalhes ? div({ fontSize: 32, fontWeight: 400, color: "#E4DED8", whiteSpace: "nowrap" }, caberEm(d.detalhes, 32, largura)) : null),
+        escudo ? div({ flexShrink: 0 }, escudo) : null),
+      // Rodapé (com patrocinadores: a chamada em cima e a faixa "PATROCÍNIO" embaixo)
+      div({ flexDirection: "column", gap: 14 },
+        div({ alignItems: "center", justifyContent: "space-between" },
+          d.destaque ? div({ fontSize: 30, fontWeight: 700, color: "#FFB59E", whiteSpace: "nowrap" }, caberEm(d.destaque, 30, larguraDestaque)) : div({}),
+          div({ fontSize: 24, fontWeight: 700, color: "#B5AEA6", whiteSpace: "nowrap" }, textoAbrir)),
+        d.patrocinadores ? div({ alignItems: "center", gap: 16, padding: "12px 20px", borderRadius: 16, background: "rgba(23,33,47,0.88)", width: 1072, overflow: "hidden" },
+          div({ fontSize: 20, fontWeight: 800, letterSpacing: 2, color: "#FE7552", flexShrink: 0 }, "PATROCÍNIO"),
+          div({ fontSize: 26, fontWeight: 700, color: "#FFFFFF", whiteSpace: "nowrap" }, caberEm(d.patrocinadores, 26, larguraPatrocinio))) : null),
     ),
   );
 };

@@ -65,12 +65,28 @@ test('cartão do campeonato: chamada conforme a situação', () => {
   assert.equal(camp.cartaoDoCampeonato({ ...base, inscricaoCentavos: 0, aprovados: 7 }, agora).destaque, 'Inscrições até 20/11 · 1 vaga · Grátis');
   assert.equal(camp.cartaoDoCampeonato(base, Date.UTC(2026, 10, 21)).destaque, 'Inscrições encerradas · começa em breve');
   assert.equal(camp.cartaoDoCampeonato({ ...base, status: 'cancelado' }, agora).destaque, 'Campeonato cancelado');
+  assert.equal(c.patrocinadores, '');
+  assert.equal(camp.cartaoDoCampeonato({ ...base, patrocinadores: ['Arena', 'Farmácia Vida'] }, agora).patrocinadores, 'Arena · Farmácia Vida');
+  assert.equal(camp.listaDeNomes(['A', 'B', 'C']), 'A, B e C');
+  const doc = camp.campeonatoDoDocumento({ nome: 'Copa', status: 'inscricoes', patrocinadores: [{ nome: ' Arena ', publicId: 'x' }, { nome: '' }, null] });
+  assert.equal(doc.patrocinadores.join('|'), 'Arena');
 });
 
 test('árvore do cartão: texto cortado, sem escudo ocupa a largura; com escudo sem imagem usa a sigla', () => {
   const textos = (no) => typeof no === 'string' ? [no] : (no.props.children ?? []).flatMap(textos);
   const longo = cartao.arvoreDoCartao({ rotulo: 'Time', titulo: 'x'.repeat(80), detalhes: '', destaque: '' }, { logo: 'data:', fundo: null, escudo: null });
-  assert.ok(textos(longo).some((t) => t.length === 60 && t.endsWith('…')));
+  const medir = require(path.join(root, 'api/_lib/medirTexto.ts'));
+  // Título longo: até duas linhas, cada uma dentro da largura útil (sem taça, 1072).
+  const linhasTitulo = textos(longo).filter((t) => /^x+…?$/.test(t));
+  assert.ok(linhasTitulo.length >= 1 && linhasTitulo.length <= 2);
+  assert.ok(linhasTitulo.every((t) => medir.larguraDoTexto(t, 38) <= 1072));
+  // Com a taça e letras largas: o título fica nos 690 da coluna e os patrocinadores cabem na faixa.
+  const largo = cartao.arvoreDoCartao({ rotulo: '', titulo: 'W'.repeat(60), detalhes: 'W'.repeat(80), destaque: '', taca: null, patrocinadores: Array.from({ length: 6 }, () => 'W'.repeat(40)).join(' · ') }, { logo: 'data:', fundo: null, escudo: null });
+  const tw = textos(largo).filter((t) => /^W+…$/.test(t));
+  assert.ok(tw.length >= 2, 'título e detalhes cortados');
+  assert.ok(textos(largo).filter((t) => t.startsWith('WWW') && t.includes('·')).every((t) => t.endsWith('…') && medir.larguraDoTexto(t, 26) <= 1072 - 40 - medir.larguraDoTexto('PATROCÍNIO', 20, 2) - 16));
+  assert.equal(medir.caberEm('Copa', 30, 1000), 'Copa');
+  assert.deepEqual([...medir.quebrarEmLinhas('Copa Tocantins de Futsal Amador', 40, 300, 2)].length, 2);
   const time = cartao.arvoreDoCartao({ rotulo: 'Time', titulo: 'Os Brabos', detalhes: 'Society', destaque: '5 jogadores', escudo: { url: '', cor: '#123456', sigla: 'BRA' } }, { logo: 'data:', fundo: null, escudo: null });
   assert.ok(textos(time).includes('BRA'));
 });

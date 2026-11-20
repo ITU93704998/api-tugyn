@@ -39,11 +39,11 @@ import { gerarCartao, type DadosCartao } from "../_lib/cartaoLink";
  */
 const PREVIA_TIMEOUT_MS = 2500;
 
-const comPrazo = async <T>(leitura: Promise<T>, rotulo: string): Promise<T | null> => {
+const comPrazo = async <T>(leitura: Promise<T>, rotulo: string, prazoMs = PREVIA_TIMEOUT_MS): Promise<T | null> => {
   let timer: NodeJS.Timeout | undefined;
   try {
     const limite = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), PREVIA_TIMEOUT_MS);
+      timer = setTimeout(() => resolve(null), prazoMs);
     });
     return await Promise.race([leitura, limite]);
   } catch (error) {
@@ -106,7 +106,13 @@ const buscarCampeonato = async (idOuCodigo: string): Promise<{ id: string; campe
   const campeonato = snap.exists ? campeonatoDoDocumento(snap.data()) : null;
   return campeonato ? { id, campeonato } : null;
 };
-const lerCampeonato = (idOuCodigo: string) => comPrazo(buscarCampeonato(idOuCodigo), "campeonato-link");
+/**
+ * Campeonato: duas leituras seguidas (código → id e o documento). Com a função fria, 2,5 s não bastavam, a página saía
+ * como "não encontrado" e a imagem virava o ícone (a prévia do WhatsApp ficava sem o cartão). Página: 5 s; imagem: 8 s.
+ */
+const PRAZO_CAMPEONATO_PAGINA_MS = 5000;
+const PRAZO_CAMPEONATO_IMAGEM_MS = 8000;
+const lerCampeonato = (idOuCodigo: string, prazoMs = PRAZO_CAMPEONATO_PAGINA_MS) => comPrazo(buscarCampeonato(idOuCodigo), "campeonato-link", prazoMs);
 
 const CABECALHOS_SEGURANCA: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
@@ -130,7 +136,7 @@ const idValido = (tipo: TipoLink, id: unknown): id is string =>
 /** Dados do cartão para a imagem; null se não houver o que mostrar. */
 const dadosDoCartao = async (tipo: TipoLink, id: string): Promise<DadosCartao | null> => {
   if (tipo === "campeonato") {
-    const r = await lerCampeonato(id);
+    const r = await lerCampeonato(id, PRAZO_CAMPEONATO_IMAGEM_MS);
     return r ? cartaoDoCampeonato(r.campeonato, Date.now()) : null;
   }
   if (tipo === "time" || tipo === "convite") {

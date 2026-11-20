@@ -3,7 +3,7 @@
  * (vercel.json reescreve para /api/turma/<id>?tipo=campeonato, sem criar uma função nova; mesma lógica de turma e time).
  *
  * Mostra só o que o catálogo do app já mostra a qualquer pessoa: nome, situação, formato, modalidade, cidade, datas,
- * vagas, valor da inscrição e o banner. Nada de organizador, elencos, ids de usuário ou pagamentos.
+ * vagas, valor da inscrição, o banner e os nomes dos patrocinadores. Nada de organizador, elencos, ids de usuário ou pagamentos.
  * Campeonatos de teste (`testeTugyn`) e os que estão sendo excluídos aparecem como "não encontrado".
  * O botão abre o app em `tugyn://campeonato/<id>`; com o app instalado, o próprio link https já abre o app.
  */
@@ -21,6 +21,8 @@ export interface CampeonatoPublico {
   maxTimes: number; aprovados: number; banner: string;
   /** Taça escolhida pelo organizador (texto das peças); null = taça clássica. */
   trofeu: string | null;
+  /** Nomes dos patrocinadores (até 6), já públicos no topo do campeonato no app. */
+  patrocinadores: string[];
 }
 
 const FORMATOS: Record<string, string> = { triangular: "Triangular", quadrangular: "Quadrangular", mata: "Mata-mata", grupos_mata: "Grupos + mata-mata" };
@@ -49,6 +51,8 @@ export const campeonatoDoDocumento = (dados: unknown): CampeonatoPublico | null 
     maxTimes: num(d.maxTimes, 2, 64) ?? 0, aprovados: num(d.aprovados, 0, 64) ?? 0,
     banner: fotoPequena(d.bannerUrl, CORTE_BANNER_LINK),
     trofeu: normalizarDesenhoTrofeu(d.trofeuDesenho),
+    patrocinadores: (Array.isArray(d.patrocinadores) ? d.patrocinadores : [])
+      .map((p) => limpar((p as Record<string, unknown> | null)?.nome, 40)).filter(Boolean).slice(0, 6),
   };
 };
 
@@ -57,12 +61,17 @@ const dataBrasilia = (ms: number): string =>
 const reais = (centavos: number): string =>
   centavos > 0 ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(centavos / 100) : "Grátis";
 
-/** Situação para a faixa: inscrições abertas (com prazo), encerradas, em andamento, encerrado ou cancelado. */
+/** Inscrições abertas de verdade: status de inscrições, no prazo e com vaga. Fora disso, a página não mostra prazo, vagas nem valor. */
+export const inscricoesAbertas = (c: CampeonatoPublico, agoraMs: number): boolean =>
+  c.status === "inscricoes" && (c.inscricoesAte === null || c.inscricoesAte > agoraMs) && c.maxTimes - c.aprovados > 0;
+
+/** Situação para a faixa: inscrições abertas (com prazo), times completos, encerradas, em andamento, encerrado ou cancelado. */
 export const situacaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { texto: string; aviso: boolean } => {
   if (c.status === "cancelado") return { texto: "Campeonato cancelado pelo organizador.", aviso: true };
   if (c.status === "encerrado") return { texto: "Campeonato encerrado. Veja o campeão e a tabela no app.", aviso: false };
   if (c.status === "em_andamento") return { texto: "Campeonato em andamento. Acompanhe os jogos e a tabela no app.", aviso: false };
   if (c.inscricoesAte !== null && c.inscricoesAte <= agoraMs) return { texto: "Inscrições encerradas. O campeonato começa em breve.", aviso: false };
+  if (c.maxTimes - c.aprovados <= 0) return { texto: "Times completos. O campeonato começa em breve.", aviso: false };
   const vagas = Math.max(0, c.maxTimes - c.aprovados);
   return { texto: `Inscrições abertas${c.inscricoesAte !== null ? ` até ${dataBrasilia(c.inscricoesAte)}` : ""}. ${vagas} ${vagas === 1 ? "vaga" : "vagas"} de ${c.maxTimes}.`, aviso: false };
 };
@@ -73,6 +82,9 @@ interface PaginaCampeonatoParams {
   cartaoUrl?: string | null;
 }
 
+/** "A", "A e B", "A, B e C". */
+export const listaDeNomes = (nomes: string[]): string => (nomes.length <= 1 ? nomes.join("") : `${nomes.slice(0, -1).join(", ")} e ${nomes[nomes.length - 1]}`);
+
 const linhaInfo = (rotulo: string, valor: string): string =>
   `<li style="display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid var(--borda)"><span style="color:var(--texto2)">${esc(rotulo)}</span><strong style="text-align:right">${esc(valor)}</strong></li>`;
 
@@ -82,7 +94,7 @@ export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos
   const situacao = c ? situacaoDoCampeonato(c, agoraMs) : null;
   const titulo = c ? `${c.nome} · Campeonato no Tugyn` : "Campeonato no Tugyn";
   const descricao = c
-    ? `${[c.formato, c.modalidade, local].filter(Boolean).join(" · ")}. ${situacao!.texto} Inscreva seu time pelo app Tugyn.`
+    ? `${[c.formato, c.modalidade, local].filter(Boolean).join(" · ")}. ${situacao!.texto}${c.patrocinadores?.length ? ` Patrocínio: ${listaDeNomes(c.patrocinadores)}.` : ""} ${inscricoesAbertas(c, agoraMs) ? "Inscreva seu time pelo app Tugyn." : "Acompanhe pelo app Tugyn."}`
     : "Campeonatos entre times no app Tugyn.";
   const imagemMeta = c?.banner
     ? `<meta property="og:image" content="${esc(c.banner)}">
@@ -102,10 +114,11 @@ export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos
   <section class="cartao">
     <p class="secao">Informações</p>
     <ul role="list" style="list-style:none;margin:0;padding:0;font-size:14px">
-      ${linhaInfo("Times", `${c.aprovados} de ${c.maxTimes} confirmados`)}
-      ${c.status === "inscricoes" && c.inscricoesAte !== null ? linhaInfo("Inscrições até", dataBrasilia(c.inscricoesAte)) : ""}
+      ${linhaInfo("Times", inscricoesAbertas(c, agoraMs) ? `${c.aprovados} de ${c.maxTimes} confirmados` : `${c.aprovados || c.maxTimes} ${(c.aprovados || c.maxTimes) === 1 ? "time" : "times"}`)}
+      ${inscricoesAbertas(c, agoraMs) && c.inscricoesAte !== null ? linhaInfo("Inscrições até", dataBrasilia(c.inscricoesAte)) : ""}
       ${c.dataInicio !== null ? linhaInfo("Início", dataBrasilia(c.dataInicio)) : ""}
-      ${linhaInfo("Inscrição", reais(c.inscricaoCentavos))}
+      ${inscricoesAbertas(c, agoraMs) ? linhaInfo("Inscrição", reais(c.inscricaoCentavos)) : ""}
+      ${c.patrocinadores?.length ? linhaInfo("Patrocínio", listaDeNomes(c.patrocinadores)) : ""}
     </ul>
   </section>`
     : `  ${topoHtml({ marca, eyebrow: "Tugyn", titulo: "Campeonato não encontrado" })}
@@ -120,7 +133,7 @@ export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos
 };
 
 /** Dados do cartão da prévia (imagem 1200x630): só o que a página já mostra. */
-export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rotulo: string; titulo: string; detalhes: string; destaque: string; taca: string | null } => {
+export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rotulo: string; titulo: string; detalhes: string; destaque: string; taca: string | null; patrocinadores: string } => {
   const local = [c.cidade, c.estado].filter(Boolean).join(", ");
   const vagas = Math.max(0, c.maxTimes - c.aprovados);
   const destaque =
@@ -128,7 +141,8 @@ export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rot
     : c.status === "encerrado" ? "Encerrado · veja o campeão e a tabela"
     : c.status === "em_andamento" ? "Em andamento · acompanhe os jogos e a tabela"
     : c.inscricoesAte !== null && c.inscricoesAte <= agoraMs ? "Inscrições encerradas · começa em breve"
+    : vagas <= 0 ? "Times completos · começa em breve"
     : [c.inscricoesAte !== null ? `Inscrições até ${dataBrasilia(c.inscricoesAte).slice(0, 5)}` : "Inscrições abertas",
         `${vagas} ${vagas === 1 ? "vaga" : "vagas"}`, reais(c.inscricaoCentavos)].join(" · ");
-  return { taca: c.trofeu, rotulo: "", titulo: c.nome, detalhes: [c.formato, c.modalidade, local].filter(Boolean).join(" · "), destaque };
+  return { taca: c.trofeu, rotulo: "", titulo: c.nome, detalhes: [c.formato, c.modalidade, local].filter(Boolean).join(" · "), destaque, patrocinadores: (c.patrocinadores ?? []).join(" · ") };
 };

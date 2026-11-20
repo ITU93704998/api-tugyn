@@ -27,7 +27,7 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
   const id = body.patrocinadorId ?? `p_${randomBytes(8).toString("hex")}`;
   exigirCT(typeof id === "string" && /^p_[a-f0-9]{16}$/.test(id), "Patrocinador inválido.");
   const nome = removendo ? "" : textoCT(body.nome, 80, "Patrocinador", true);
-  const texto = removendo ? "" : textoCT(body.texto, 300, "Texto");
+  const texto = removendo ? "" : textoCT(body.texto, 200, "Texto");
   const site = removendo ? "" : textoCT(body.site, 500, "Site");
   if (site) { let u: URL; try { u = new URL(site); } catch { throw new RecusaCT(400, "Use um endereço https válido."); } exigirCT(u.protocol === "https:" && !u.username && !u.password, "Use um endereço https válido."); }
   const temImagem = !removendo && body.imagem != null;
