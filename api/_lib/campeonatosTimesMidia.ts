@@ -10,8 +10,12 @@ import { COLECAO_CT, exigirCT, RecusaCT, textoCT, type Dados } from "./campeonat
 
 const FILA = "midiaCampeonatosTimes";
 const DIA = 86_400_000;
-/** formato: "banner" = imagem deitada 3:1; "logo" = logo quadrada (inteira, com margem branca) ao lado do nome e da descrição. */
-type Patrocinador = { id: string; nome: string; texto: string; site: string | null; bannerUrl: string | null; publicId: string | null; formato?: "banner" | "logo" };
+/**
+ * formato: "banner" = imagem deitada 3:1; "logo" = logo quadrada (inteira, com margem branca) ao lado do nome e da descrição.
+ * cor: a cor da marca (#RRGGBB) que pinta o cartão (logo e só texto: o fundo; banner: a faixa do texto); null = visual padrão.
+ */
+type Patrocinador = { id: string; nome: string; texto: string; site: string | null; bannerUrl: string | null; publicId: string | null; formato?: "banner" | "logo"; cor?: string | null };
+const COR_MARCA = /^#[0-9A-Fa-f]{6}$/;
 const lista = (d: Dados) => Array.isArray(d.patrocinadores) ? d.patrocinadores as Patrocinador[] : [];
 const chave = (p: string) => createHash("sha256").update(p).digest("hex");
 const pode = (d: Dados, uid: string) => { exigirCT(d.organizadorId === uid, "Somente o organizador pode editar patrocinadores.", 403); exigirCT(d.status !== "cancelado" && d.status !== "encerrado", "Este campeonato está fechado.", 409); };
@@ -28,6 +32,8 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
   if (site) { let u: URL; try { u = new URL(site); } catch { throw new RecusaCT(400, "Use um endereço https válido."); } exigirCT(u.protocol === "https:" && !u.username && !u.password, "Use um endereço https válido."); }
   const temImagem = !removendo && body.imagem != null;
   const formato: "banner" | "logo" = body.formato === "logo" ? "logo" : "banner";
+  exigirCT(body.cor == null || body.cor === "" || (typeof body.cor === "string" && COR_MARCA.test(body.cor)), "Cor da marca inválida.");
+  const cor = typeof body.cor === "string" && COR_MARCA.test(body.cor) ? body.cor.toUpperCase() : null;
   const conta = temImagem ? getAccount("turmas") : null;
   if (temImagem) { const i = parseImage(body.imagem); if (!i.ok) throw new RecusaCT(i.status, i.error); exigirCT(conta, "Servidor não configurado para banners de turma e campeonato.", 503); }
   // ID determinístico (patrocinador + conteúdo): o retry da mesma imagem reaproveita o mesmo arquivo em vez de criar outro.
@@ -64,7 +70,7 @@ export async function patrocinadorCT(db: Firestore, uid: string, body: Dados): P
     const todos = lista(camp), anterior = todos.find((p) => p.id === id);
     exigirCT(removendo || anterior || todos.length < 6, "Use no máximo seis patrocinadores.");
     const alterados = todos.filter((p) => p.id !== id);
-    if (!removendo) alterados.push({ id, nome, texto, site: site || null, bannerUrl: bannerUrl ?? anterior?.bannerUrl ?? null, publicId: publicId ?? anterior?.publicId ?? null, formato: publicId ? formato : anterior?.formato ?? "banner" });
+    if (!removendo) alterados.push({ id, nome, texto, site: site || null, bannerUrl: bannerUrl ?? anterior?.bannerUrl ?? null, publicId: publicId ?? anterior?.publicId ?? null, formato: publicId ? formato : anterior?.formato ?? "banner", cor });
     // Assets antigos saem pela mesma fila, depois que a referência é removida atomicamente.
     if (anterior?.publicId && (removendo || publicId) && anterior.publicId !== publicId) tx.set(db.doc(`${FILA}/${chave(anterior.publicId)}`), { campeonatoId: cid, uid, publicId: anterior.publicId, status: "pendente", criadoEm: Date.now() - DIA, leaseAte: null });
     tx.update(ref, { patrocinadores: alterados, atualizadoEm: Date.now() });

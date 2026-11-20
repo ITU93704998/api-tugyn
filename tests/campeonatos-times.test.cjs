@@ -288,6 +288,23 @@ test('patrocinador com logo: imagem quadrada inteira (pad 400x400) e formato sal
   assert.equal(M.patrocinadoresPublicosCT({ patrocinadores: lista })[0].publicId, undefined);
 });
 
+test('patrocinador: cor da marca salva em maiúsculas em qualquer modelo e recusada se inválida', async () => {
+  const x = await cenario(); const conta = { cloud_name: 'teste', api_key: 'teste', api_secret: 'teste' };
+  const M = carregar('campeonatosTimesMidia', { 'cloudinary': { v2: { uploader: { upload: async (_img, o) => ({ public_id: o.public_id, secure_url: 'https://res.cloudinary.com/t/' + o.public_id }) } } }, './config': { getAccount: () => conta } }, true);
+  const base = { acao: 'patrocinador', campeonatoId: x.id, nome: 'Arena', imagem: 'data:image/jpeg;base64,/9j/AAAA' };
+  await M.patrocinadorCT(x.db, 'org', { ...base, patrocinadorId: 'p_00000000000000d1', formato: 'logo', cor: '#1f6f5c' });
+  await M.patrocinadorCT(x.db, 'org', { ...base, patrocinadorId: 'p_00000000000000d2', formato: 'banner', cor: '#1F6F5C', imagem: 'data:image/jpeg;base64,/9j/BBBB' });
+  await M.patrocinadorCT(x.db, 'org', { ...base, patrocinadorId: 'p_00000000000000d3', formato: 'logo', imagem: 'data:image/jpeg;base64,/9j/CCCC' });
+  await M.patrocinadorCT(x.db, 'org', { acao: 'patrocinador', campeonatoId: x.id, nome: 'Só texto', patrocinadorId: 'p_00000000000000d5', cor: '#b91c1c' });
+  await assert.rejects(M.patrocinadorCT(x.db, 'org', { ...base, patrocinadorId: 'p_00000000000000d4', formato: 'logo', cor: 'vermelho' }), /Cor da marca/);
+  const lista = x.db.data.get(x.base).patrocinadores, de = (id) => lista.find((p) => p.id === id);
+  assert.equal(de('p_00000000000000d1').cor, '#1F6F5C');
+  assert.equal(de('p_00000000000000d2').cor, '#1F6F5C');
+  assert.equal(de('p_00000000000000d5').cor, '#B91C1C');
+  assert.equal(de('p_00000000000000d3').cor, null);
+  assert.equal(M.patrocinadoresPublicosCT({ patrocinadores: lista }).find((p) => p.id === 'p_00000000000000d1').cor, '#1F6F5C');
+});
+
 function regulamento() {
   const arquivos = new Map(), apagados = [], assinados = [];
   const travas = new Map();
