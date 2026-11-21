@@ -70,3 +70,12 @@ test('inscrições fechadas: times completos ou em andamento não mostram prazo,
   const aberto = pagina(L.campeonatoDoDocumento(doc({ aprovados: 3 })));
   assert.ok(aberto.includes('Inscrições até') && aberto.includes('3 de 8 confirmados') && aberto.includes('Inscreva seu time pelo app Tugyn.'));
 });
+
+test('campeonato-link: a versão do cartão (endereço da imagem) muda com um patrocinador novo e fica igual sem mudança', () => {
+  const v = (extra) => L.versaoDoCartao(L.cartaoDoCampeonato(L.campeonatoDoDocumento(doc(extra)), NOW));
+  const um = v({ patrocinadores: [{ nome: 'Padaria Sol' }] });
+  assert.match(um, /^[a-f0-9]{10}$/);
+  assert.equal(v({ patrocinadores: [{ nome: 'Padaria Sol' }] }), um, 'mesmo conteúdo, mesmo endereço (a CDN aproveita)');
+  assert.notEqual(v({ patrocinadores: [{ nome: 'Padaria Sol' }, { nome: 'Auto Peças Norte' }] }), um, 'patrocinador novo, imagem nova');
+  assert.notEqual(v({ patrocinadores: [{ nome: 'Padaria Sol' }], aprovados: 5 }), um, 'vagas mudaram, imagem nova');
+});

@@ -166,12 +166,15 @@ export async function limparRegulamentosCT(db: Firestore, ate: number): Promise<
       await item.ref.delete(); r.apagados++;
     } catch {
       r.falhas++;
-      // Reagenda com espera crescente (1 h, 2 h, 4 h… até 24 h); depois de várias falhas, desiste e registra.
+      // Reagenda com espera crescente (1 h, 2 h, 4 h… até 24 h). Depois de várias falhas, o item NÃO sai da fila (ele é o
+      // único controle do arquivo): fica marcado como "falhou", com o caminho e as tentativas, e segue tentando uma vez
+      // por dia até a remoção ser confirmada; cada falha nesse estado gera um registro para acompanhamento.
       const tentativas = Number(item.get("tentativas") ?? 0) + 1;
       const espera = Math.min(24 * 3_600_000, 3_600_000 * 2 ** (tentativas - 1));
+      const falhou = tentativas >= MAX_TENTATIVAS_LIMPEZA;
+      if (falhou) console.warn(JSON.stringify({ evt: "regulamento_pdf_limpeza_falhou", campeonatoId: item.get("campeonatoId"), tentativas }));
       try {
-        if (tentativas >= MAX_TENTATIVAS_LIMPEZA) { console.warn(JSON.stringify({ evt: "regulamento_pdf_limpeza_desistiu", campeonatoId: item.get("campeonatoId") })); await item.ref.delete(); }
-        else await item.ref.update({ tentativas, leaseAte: null, criadoEm: Date.now() - ESPERA_LIMPEZA_MS + espera });
+        await item.ref.update({ tentativas, leaseAte: null, criadoEm: Date.now() - ESPERA_LIMPEZA_MS + espera, ...(falhou ? { status: "falhou", falhouEm: Date.now() } : {}) });
       } catch { /* tenta na próxima rodada */ }
     }
   }

@@ -89,6 +89,25 @@ async function autorUsuario(tx: Transaction, db: Firestore, uid: string): Promis
 function campoId(body: Dados): string { exigirCT(typeof body.campeonatoId === "string" && ID_CT.test(body.campeonatoId), "Campeonato inválido."); return body.campeonatoId; }
 function timeId(body: Dados): string { exigirCT(typeof body.timeId === "string" && ID_TIME_CT.test(body.timeId), "Time inválido."); return body.timeId; }
 
+/**
+ * "Meus campeonatos": quando é o próximo jogo de cada campeonato em andamento da página (o jogo pendente com data mais
+ * cedo; um atrasado, sem resultado, também conta). Uma leitura por campeonato em andamento e nenhuma para os outros
+ * (índice composto `jogos`: status + quando). Só quando o app pede (`proximoJogo: true`, a tela "Meus campeonatos"): o hub
+ * não paga essas leituras. Se a consulta falhar (índice ainda não publicado), o campeonato vai em `falhas`, e o app avisa
+ * que não conseguiu consultar (em vez de dizer que não há jogo).
+ */
+async function proximoJogoEmCT(docs: QueryDocumentSnapshot[]): Promise<{ datas: Map<string, number | null>; falhas: Set<string> }> {
+  const datas = new Map<string, number | null>(), falhas = new Set<string>();
+  await Promise.all(docs.filter((d) => d.get("status") === "em_andamento").map(async (d) => {
+    try {
+      const s = await d.ref.collection("jogos").where("status", "==", "pendente").where("quando", ">", 0).orderBy("quando").limit(1).get();
+      const quando = s.docs[0]?.get("quando");
+      datas.set(d.id, typeof quando === "number" && Number.isFinite(quando) ? quando : null);
+    } catch (e) { falhas.add(d.id); console.warn("[campeonatosTimes] próximo jogo indisponível:", (e as Error)?.message); }
+  }));
+  return { datas, falhas };
+}
+
 export async function listarCT(db: Firestore, uid: string, body: Dados): Promise<Dados> {
   exigirCT(body.filtro === "meus" || body.filtro === "abertos", "Filtro inválido.");
   let q = db.collection(COLECAO_CT).where(body.filtro === "meus" ? "envolvidos" : "status", body.filtro === "meus" ? "array-contains" : "==", body.filtro === "meus" ? uid : "inscricoes");
@@ -138,7 +157,13 @@ export async function listarCT(db: Firestore, uid: string, body: Dados): Promise
   const s = await q.limit(21).get();
   const pagina = s.docs.slice(0, 20), ultimo = pagina.at(-1);
   const visiveis = body.filtro === "abertos" && !testador ? pagina.filter((s) => s.get("testeTugyn") !== true) : pagina;
-  return { campeonatos: visiveis.map(resumo), proximoCursor: s.docs.length > 20 && ultimo ? Buffer.from(JSON.stringify([ultimo.get(campoOrdem), ultimo.id])).toString("base64url") : null, ...(local ? { local } : {}) };
+  const proximos = body.filtro === "meus" && body.proximoJogo === true ? await proximoJogoEmCT(visiveis) : null;
+  const comProximo = (d: QueryDocumentSnapshot) => {
+    if (!proximos) return resumo(d);
+    if (proximos.falhas.has(d.id)) return { ...resumo(d), proximoJogoFalhou: true };
+    return proximos.datas.has(d.id) ? { ...resumo(d), proximoJogoEm: proximos.datas.get(d.id) ?? null } : resumo(d);
+  };
+  return { campeonatos: visiveis.map(comProximo), proximoCursor: s.docs.length > 20 && ultimo ? Buffer.from(JSON.stringify([ultimo.get(campoOrdem), ultimo.id])).toString("base64url") : null, ...(local ? { local } : {}) };
 }
 
 export async function lerDetalheCT(db: Firestore, uid: string, body: Dados): Promise<Dados> {
@@ -810,6 +835,12 @@ const VALIDADE_ESTATISTICAS = HORA;
 const VERSAO_ESTATISTICAS = 2;
 type TimeNoCard = TimeDoAtleta & { amistososGols: number; gols: number; assistencias: number; jogos: number; titulos: number; campeonatos: number };
 const MAX_TIMES_CARD = 30;
+/**
+ * Ids de TODOS os times contados no `totalTimes` (a lista `porTime` guarda só 30). Sem eles, um time antigo já contado,
+ * fora dos 30, parecia novo ao voltar ao elenco e o total subia de novo. Teto alto, só por segurança do documento.
+ */
+const MAX_TIMES_CONTADOS = 500;
+const idsContados = (v: unknown): string[] | null => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : null;
 /** Ordem da tela: atuais primeiro, depois mais jogos e mais gols. Ex-time sem nenhum número fica de fora. */
 const ordenarTimesCard = (ts: TimeNoCard[]): TimeNoCard[] => ts
   .filter((t) => t.atual || t.jogos || t.amistososGols || t.campeonatos)
@@ -906,9 +937,19 @@ export async function timeDoCardEscolherCT(db: Firestore, uid: string, body: Dad
     const novos = [...atuais.values()].filter((t) => !conhecidos.has(t.timeId)).map((t) => ({ ...t, ...zerado }));
     const todos = [...guardada.map((t) => ({ ...t, ...(atuais.get(t.timeId) ?? {}), atual: atuais.has(t.timeId) })), ...novos];
     const ficam = ordenarTimesCard(todos);
-    // A lista guardada já pode estar cortada: o total segue o anterior, com os times que entraram e os que saíram.
-    const totalTimes = Math.max(ficam.length, Number(s.get("totalTimes") ?? guardada.length) + novos.length - (todos.length - ficam.length));
-    tx.set(ref, { timeDoCard: timeId, porTime: ficam.slice(0, MAX_TIMES_CARD), totalTimes }, { merge: true });
+    const saem = todos.filter((t) => !ficam.includes(t)).map((t) => t.timeId);
+    // O total só sobe por um time que ainda NÃO foi contado. A lista guardada (30) pode estar cortada, então quem decide
+    // é `timesContados` (todos os ids do total). Cálculo antigo, sem ela e com a lista cortada: não dá para saber se o
+    // time é novo, e o total não sobe (o próximo cálculo acerta); nunca conta o mesmo time duas vezes.
+    const totalGuardado = Number(s.get("totalTimes") ?? guardada.length);
+    const salvos = idsContados(s.get("timesContados"));
+    const cortada = salvos === null && totalGuardado > guardada.length;
+    const contados = new Set(salvos ?? guardada.map((t) => t.timeId));
+    const entram = cortada ? [] : novos.map((t) => t.timeId).filter((id) => !contados.has(id));
+    const saiDoTotal = saem.filter((id) => contados.has(id));
+    const totalTimes = Math.max(ficam.length, totalGuardado + entram.length - saiDoTotal.length);
+    entram.forEach((id) => contados.add(id)); saiDoTotal.forEach((id) => contados.delete(id));
+    tx.set(ref, { timeDoCard: timeId, porTime: ficam.slice(0, MAX_TIMES_CARD), totalTimes, ...(cortada ? {} : { timesContados: [...contados].slice(0, MAX_TIMES_CONTADOS) }) }, { merge: true });
   });
   return { timeDoCard: timeId };
 }
@@ -957,7 +998,7 @@ async function calcularEstatisticasCT(db: Firestore, ref: ReturnType<Firestore["
   const totalTimes = ordenados.length;
   const { incompleto: turmaIncompleta, ...campeonatosTurma } = turma;
   const incompleto = camps.size >= LIMITE_CAMPEONATOS_ESTATISTICAS || turmaIncompleta || amistosos.incompleto;
-  const doc = { estatisticas: est, amistosos: { gols: golsAmistosos }, porTime: lista, totalTimes, campeonatosTurma, calculadoEm: agora, incompleto, versao: VERSAO_ESTATISTICAS, calculandoAte: 0 };
+  const doc = { estatisticas: est, amistosos: { gols: golsAmistosos }, porTime: lista, totalTimes, timesContados: ordenados.map((t) => t.timeId).slice(0, MAX_TIMES_CONTADOS), campeonatosTurma, calculadoEm: agora, incompleto, versao: VERSAO_ESTATISTICAS, calculandoAte: 0 };
   await ref.set(doc, { merge: true }); // merge: a escolha do time do card (`timeDoCard`) continua
   return { ...doc, timeDoCard };
 }

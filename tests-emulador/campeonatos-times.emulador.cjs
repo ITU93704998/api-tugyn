@@ -21,13 +21,10 @@ async function main(){
   for(const x of r)if(x.status==='fulfilled')limpar.push(db.doc('campeonatosTimes/'+x.value.campeonatoId));
   assert.equal((await db.doc('controleCampeonatosTimes/'+org).get()).get('ativos'),3);
   const id=r.find(x=>x.status==='fulfilled').value.campeonatoId,ref=db.doc('campeonatosTimes/'+id);
-  for(const [u,jogador]of [[a,a],[b,a],[c,c]])await S.inscreverCT(db,u,{campeonatoId:id,timeId:u+'_1',jogadorIds:[jogador],tentativaId:"inicial_"+u},agora);
-  const aprovacoes=await Promise.allSettled([a,b].map(u=>S.responderCT(db,org,{campeonatoId:id,timeId:u+'_1',aceitar:true},agora)));
-  assert.equal(aprovacoes.filter(x=>x.status==='fulfilled').length,1,'um atleta só em um time');
-  assert.equal((await ref.get()).get('aprovados'),1,'contagem não diverge');
-  const ganhou=aprovacoes[0].status==='fulfilled'?a:b,perdeu=ganhou===a?b:a;
-  if(perdeu===a){await S.cancelarInscricaoCT(db,org,{campeonatoId:id,timeId:b+'_1'},agora);await S.inscreverCT(db,b,{campeonatoId:id,timeId:b+'_1',jogadorIds:[b],tentativaId:"corrigir_"+b},agora);await S.responderCT(db,org,{campeonatoId:id,timeId:b+'_1',aceitar:true},agora);}
-  else await S.inscreverCT(db,b,{campeonatoId:id,timeId:b+'_1',jogadorIds:[b],tentativaId:"corrigir_"+b},agora);
+   // Atleta já inscrito por um time: a API recusa na INSCRIÇÃO do segundo time (antes só barrava na aprovação).
+   await S.inscreverCT(db,a,{campeonatoId:id,timeId:a+'_1',jogadorIds:[a],tentativaId:'inicial_'+a},agora);
+   await assert.rejects(S.inscreverCT(db,b,{campeonatoId:id,timeId:b+'_1',jogadorIds:[a],tentativaId:'conflito_'+b},agora),e=>e.code==='atleta_em_outro_time');
+   for(const u of [b,c])await S.inscreverCT(db,u,{campeonatoId:id,timeId:u+'_1',jogadorIds:[u],tentativaId:'inicial_'+u},agora);
   for(const u of [a,b,c])await S.responderCT(db,org,{campeonatoId:id,timeId:u+'_1',aceitar:true},agora);
   await Promise.all([S.iniciarCT(db,org,{campeonatoId:id},agora),S.iniciarCT(db,org,{campeonatoId:id},agora)]);
   const jogos=await ref.collection('jogos').get();assert.equal(jogos.size,3,'duplo toque não duplica tabela');
@@ -37,7 +34,7 @@ async function main(){
   const final=await ref.get();assert.equal(final.get('status'),'encerrado');assert.ok(final.get('campeaoTimeId'));
   const detalhe=await S.lerDetalheCT(db,org,{campeonatoId:id});assert.equal(detalhe.campeonato.status,'encerrado');assert.equal(detalhe.jogos.length,3);assert.equal(detalhe.classificacao.length,3);
   assert.equal((await db.doc('controleCampeonatosTimes/'+org).get()).get('ativos'),2,'encerramento decrementa cota só uma vez');
-  console.log('Emulador API: criação concorrente, atleta duplicado, aprovação, início concorrente e resultados concorrentes aprovados.');
+  console.log('Emulador API: criação concorrente, atleta duplicado recusado na inscrição, aprovação, início concorrente e resultados concorrentes aprovados.');
  }finally{for(const r of limpar)await db.recursiveDelete(r);await db.doc('controleCampeonatosTimes/'+org).delete();await deleteApp(app);}
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

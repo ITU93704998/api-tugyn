@@ -1310,3 +1310,43 @@ test('cards do perfil: com mais de 30 times a lista mostra 30 e o total conta to
   await S.timeDoCardEscolherCT(x.db, 'a', { timeId: 'a_1' });
   assert.equal((await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + 1)).totalTimes, r.totalTimes, 'a escolha mantém o total');
 });
+
+test('cards do perfil: ex-time já contado, fora dos 30 guardados, volta ao elenco e não conta duas vezes', async () => {
+  const x = await cenario();
+  for (let i = 0; i < 31; i++) {
+    x.db.data.set(`times/ex${i}_1`, { nome: `Ex ${i}`, membros: ['z'] });
+    x.db.data.set(`times/ex${i}_1/resumo/geral`, { jogadores: { a: { nome: 'A', gols: 1 } }, artilheirosIds: ['a'], artilheirosVersao: 1 });
+  }
+  const r = await S.estatisticasAtletaCT(x.db, 'a', {}, NOW);
+  const naLista = new Set(r.porTime.map((t) => t.timeId));
+  const foraDaLista = Array.from({ length: 31 }, (_, i) => `ex${i}_1`).find((id) => !naLista.has(id));
+  assert.ok(foraDaLista, 'algum ex-time ficou fora dos 30 guardados');
+  x.db.data.get(`times/${foraDaLista}`).membros = ['z', 'a']; // voltou ao elenco
+  await S.timeDoCardEscolherCT(x.db, 'a', { timeId: foraDaLista });
+  const depois = await S.estatisticasAtletaCT(x.db, 'a', {}, NOW + 1);
+  assert.equal(depois.totalTimes, r.totalTimes, 'o time já estava no total');
+  assert.equal(depois.timeDoCard, foraDaLista);
+});
+test('meus: próximo jogo de cada campeonato em andamento (pendente com data mais cedo), sem ler os outros',async()=>{
+ const db=new DB(),id=n=>'ct_'+n.toString(16).padStart(24,'0'),agora=Date.now();
+ db.data.set('campeonatosTimes/'+id(1),{status:'em_andamento',envolvidos:['a'],criadoEm:NOW});
+ db.data.set('campeonatosTimes/'+id(2),{status:'em_andamento',envolvidos:['a'],criadoEm:NOW-1});
+ db.data.set('campeonatosTimes/'+id(3),{status:'inscricoes',envolvidos:['a'],criadoEm:NOW-2,inscricoesAte:agora+100000});
+ db.data.set('campeonatosTimes/'+id(1)+'/jogos/j1',{status:'finalizado',quando:agora-5000});
+ db.data.set('campeonatosTimes/'+id(1)+'/jogos/j2',{status:'pendente',quando:agora+90000});
+ db.data.set('campeonatosTimes/'+id(1)+'/jogos/j3',{status:'pendente',quando:agora+30000});
+ db.data.set('campeonatosTimes/'+id(1)+'/jogos/j4',{status:'pendente',quando:null});
+ db.data.set('campeonatosTimes/'+id(2)+'/jogos/j1',{status:'pendente',quando:null});
+ db.data.set('campeonatosTimes/'+id(3)+'/jogos/j1',{status:'pendente',quando:agora+1000});
+ const por=Object.fromEntries((await S.listarCT(db,'a',{filtro:'meus',proximoJogo:true})).campeonatos.map(c=>[c.id,c.proximoJogoEm]));
+ // Em inscrições não consulta (o campo nem vem).
+ assert.deepEqual(por,{[id(1)]:agora+30000,[id(2)]:null,[id(3)]:undefined});
+ // O hub não pede: nenhuma consulta de jogos.
+ assert.equal((await S.listarCT(db,'a',{filtro:'meus'})).campeonatos.some(c=>'proximoJogoEm' in c||'proximoJogoFalhou' in c),false);
+ // Consulta recusada (índice não publicado): avisa a falha, não diz "sem jogo".
+ const orig=Query.prototype.get;Query.prototype.get=function(){if(this.path.endsWith('/jogos'))return Promise.reject(new Error('FAILED_PRECONDITION'));return orig.call(this);};
+ const aviso=console.warn;console.warn=()=>{};
+ try{const f=(await S.listarCT(db,'a',{filtro:'meus',proximoJogo:true})).campeonatos.find(c=>c.id===id(1));assert.equal(f.proximoJogoFalhou,true);assert.equal('proximoJogoEm' in f,false);}
+ finally{Query.prototype.get=orig;console.warn=aviso;}
+ assert.equal('proximoJogoEm' in (await S.listarCT(db,'a',{filtro:'abertos'})).campeonatos[0],false);
+});

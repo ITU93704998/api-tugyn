@@ -7,6 +7,7 @@
  * Campeonatos de teste (`testeTugyn`) e os que estão sendo excluídos aparecem como "não encontrado".
  * O botão abre o app em `tugyn://campeonato/<id>`; com o app instalado, o próprio link https já abre o app.
  */
+import { createHash } from "node:crypto";
 import { blocoDasLojas, documentoPublico, esc, topoHtml, type Plataforma } from "./paginaPublica";
 import { normalizarDesenhoTrofeu } from "./desenhoTrofeu";
 import { tacaSvg } from "./tacaSvg";
@@ -131,6 +132,14 @@ export const renderizarPaginaCampeonato = ({ campeonato: c, id, agoraMs, lojaIos
   ${blocoDasLojas(lojaIos, lojaAndroid, plataforma)}`,
   });
 };
+
+/**
+ * Versão do cartão: muda quando muda algo que a imagem mostra (patrocinadores, nome, vagas, situação, taça…). Vai no
+ * endereço da imagem (`?v=`): o WhatsApp e a CDN guardam a imagem pelo endereço, então sem ela um patrocinador novo
+ * não aparecia na prévia (a imagem antiga seguia valendo).
+ */
+export const versaoDoCartao = (cartao: ReturnType<typeof cartaoDoCampeonato>): string =>
+  createHash("sha1").update(JSON.stringify(cartao)).digest("hex").slice(0, 10);
 
 /** Dados do cartão da prévia (imagem 1200x630): só o que a página já mostra. */
 export const cartaoDoCampeonato = (c: CampeonatoPublico, agoraMs: number): { rotulo: string; titulo: string; detalhes: string; destaque: string; taca: string | null; patrocinadores: string } => {

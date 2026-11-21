@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getFirestore } from "firebase-admin/firestore";
 import { getFirebaseApp } from "../_lib/auth";
@@ -18,7 +19,7 @@ import {
   type ConvitePublico,
   type TimePublico,
 } from "../_lib/timeLink";
-import { campeonatoDoDocumento, cartaoDoCampeonato, isValidCampeonatoId, renderizarPaginaCampeonato, type CampeonatoPublico } from "../_lib/campeonatoLink";
+import { campeonatoDoDocumento, cartaoDoCampeonato, isValidCampeonatoId, renderizarPaginaCampeonato, versaoDoCartao, type CampeonatoPublico } from "../_lib/campeonatoLink";
 import { CODIGO_CAMPEONATO, CODIGO_TURMA, caminhoPublico, campeonatoPorCodigo, turmaPorCodigo, type TipoLink } from "../_lib/linkCurto";
 import { gerarCartao, type DadosCartao } from "../_lib/cartaoLink";
 
@@ -133,6 +134,33 @@ const idValido = (tipo: TipoLink, id: unknown): id is string =>
       ? isValidLinkId(id)
       : isValidTurmaId(id);
 
+/** Cartão do time ou da convocação (o mesmo que a imagem desenha). */
+const cartaoDoTime = (tipo: "time" | "convite", t: NonNullable<Awaited<ReturnType<typeof lerTime>>> | NonNullable<Awaited<ReturnType<typeof lerConvite>>>): DadosCartao => {
+  const jogadores = tipo === "time" ? (t as TimePublico).jogadores.length : 0;
+  return {
+    rotulo: tipo === "time" ? "Time" : "Convocação",
+    titulo: `${t.nome}${t.sigla ? ` (${t.sigla})` : ""}`,
+    detalhes: t.detalhes,
+    destaque: tipo === "time" ? `${jogadores} ${jogadores === 1 ? "jogador" : "jogadores"} no elenco` : "Toque para pedir para entrar no time",
+    escudo: { url: t.escudo, cor: t.cor, sigla: t.sigla },
+  };
+};
+
+/** Cartão do convite da turma (a partir da prévia pública). */
+const cartaoDaTurma = (previa: NonNullable<NonNullable<Awaited<ReturnType<typeof lerTurma>>>["previa"]>): DadosCartao => ({
+  rotulo: "Convite para a turma",
+  titulo: previa.nome,
+  detalhes: [previa.arenaNome, previa.dias, previa.horario].filter(Boolean).join(" · "),
+  destaque: "Toque para pedir para entrar",
+});
+
+/**
+ * Endereço da imagem com a versão do conteúdo (`?v=`): mudou o que o cartão mostra (escudo, nome, elenco, patrocinador…),
+ * muda o endereço, e o WhatsApp e a CDN buscam a imagem nova em vez de reaproveitar a antiga.
+ */
+const comVersaoDoCartao = (cartaoUrl: string | null, cartao: unknown): string | null =>
+  cartaoUrl ? `${cartaoUrl}?v=${createHash("sha1").update(JSON.stringify(cartao)).digest("hex").slice(0, 10)}` : null;
+
 /** Dados do cartão para a imagem; null se não houver o que mostrar. */
 const dadosDoCartao = async (tipo: TipoLink, id: string): Promise<DadosCartao | null> => {
   if (tipo === "campeonato") {
@@ -141,24 +169,10 @@ const dadosDoCartao = async (tipo: TipoLink, id: string): Promise<DadosCartao | 
   }
   if (tipo === "time" || tipo === "convite") {
     const t = tipo === "time" ? await lerTime(id) : await lerConvite(id);
-    if (!t) return null;
-    const jogadores = tipo === "time" ? (t as TimePublico).jogadores.length : 0;
-    return {
-      rotulo: tipo === "time" ? "Time" : "Convocação",
-      titulo: `${t.nome}${t.sigla ? ` (${t.sigla})` : ""}`,
-      detalhes: t.detalhes,
-      destaque: tipo === "time" ? `${jogadores} ${jogadores === 1 ? "jogador" : "jogadores"} no elenco` : "Toque para pedir para entrar no time",
-      escudo: { url: t.escudo, cor: t.cor, sigla: t.sigla },
-    };
+    return t ? cartaoDoTime(tipo, t) : null;
   }
   const r = await lerTurma(id);
-  if (!r?.previa) return null;
-  return {
-    rotulo: "Convite para a turma",
-    titulo: r.previa.nome,
-    detalhes: [r.previa.arenaNome, r.previa.dias, r.previa.horario].filter(Boolean).join(" · "),
-    destaque: "Toque para pedir para entrar",
-  };
+  return r?.previa ? cartaoDaTurma(r.previa) : null;
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -236,8 +250,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 5 min na CDN: compartilhar no grupo não vira uma leitura por pessoa; vagas e situação se atualizam logo.
     res.setHeader("Cache-Control", r ? "public, s-maxage=300, stale-while-revalidate=600" : "public, s-maxage=60");
     const { paginaUrl, cartaoUrl } = enderecos(r?.id ?? bruto);
+    const agoraMs = Date.now();
+    // A imagem leva a versão do conteúdo no endereço: mudou o cartão (ex.: patrocinador novo), muda o endereço e o
+    // WhatsApp/CDN buscam a imagem nova em vez de reaproveitar a antiga.
+    const cartaoVersionado = r && cartaoUrl ? `${cartaoUrl}?v=${versaoDoCartao(cartaoDoCampeonato(r.campeonato, agoraMs))}` : null; // mesma regra de comVersaoDoCartao
     return res.status(r ? 200 : 404).send(
-      renderizarPaginaCampeonato({ campeonato: r?.campeonato ?? null, id: r?.id ?? bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: r ? cartaoUrl : null }),
+      renderizarPaginaCampeonato({ campeonato: r?.campeonato ?? null, id: r?.id ?? bruto, agoraMs, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: cartaoVersionado }),
     );
   }
 
@@ -248,7 +266,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { paginaUrl, cartaoUrl } = enderecos(bruto);
     return res
       .status(convite ? 200 : 404)
-      .send(renderizarPaginaConvite({ convite, codigo: bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: convite ? cartaoUrl : null }));
+      .send(renderizarPaginaConvite({ convite, codigo: bruto, agoraMs: Date.now(), lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: convite ? comVersaoDoCartao(cartaoUrl, cartaoDoTime("convite", convite)) : null }));
   }
 
   if (tipo === "time") {
@@ -258,7 +276,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { paginaUrl, cartaoUrl } = enderecos(bruto);
     return res
       .status(time ? 200 : 404)
-      .send(renderizarPaginaTime({ time, linkId: bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: time ? cartaoUrl : null }));
+      .send(renderizarPaginaTime({ time, linkId: bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: time ? comVersaoDoCartao(cartaoUrl, cartaoDoTime("time", time)) : null }));
   }
 
   const r = await lerTurma(bruto);
@@ -266,6 +284,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { paginaUrl, cartaoUrl } = enderecos(bruto);
   // O botão abre o app com o id da turma (resolvido do código); sem resolver, com o que veio (o app também resolve código).
   return res.status(200).send(
-    renderizarPagina({ id: r?.turmaId ?? bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: r?.previa ? cartaoUrl : null, previa: r?.previa ?? null }),
+    renderizarPagina({ id: r?.turmaId ?? bruto, lojaIos, lojaAndroid, plataforma, iconUrl, paginaUrl, cartaoUrl: r?.previa ? comVersaoDoCartao(cartaoUrl, cartaoDaTurma(r.previa)) : null, previa: r?.previa ?? null }),
   );
 }
