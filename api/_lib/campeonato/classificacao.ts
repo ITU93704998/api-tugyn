@@ -277,6 +277,20 @@ export const aplicarJogo = (
   return { jogos, campeao, status: campeao ? "encerrado" : "andamento" };
 };
 
+/**
+ * Pênaltis conferidos sobre o estado ATUAL (dentro da transação): a tela decide se pede pênaltis pelo placar que ela vê,
+ * mas um gol lançado em outro aparelho pode mudar isso. Confronto empatado sem pênaltis válidos é recusado (a chave
+ * travaria sem vencedor); pênaltis num jogo que já tem vencedor são descartados. Jogo sem placar passa como está.
+ */
+export const conferirPenaltisDoJogo = (jogos: Jogos, jogoId: string, jogo: JogoCampeonato): JogoCampeonato => {
+  if (!temResultado(jogo)) return jogo;
+  if (!precisaPenaltis(jogos, jogoId, jogo.golsCasa as number, jogo.golsFora as number)) return jogo.penaltis ? { ...jogo, penaltis: null } : jogo;
+  const p = jogo.penaltis;
+  if (!p || !golsValidos(p[0]) || !golsValidos(p[1])) throw new Error("O confronto empatou: informe os pênaltis.");
+  if (p[0] === p[1]) throw new Error("Os pênaltis precisam ter um vencedor.");
+  return jogo;
+};
+
 // ─── Artilharia ──────────────────────────────────────────────────────────────
 
 export interface Artilheiro {
