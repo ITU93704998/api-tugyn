@@ -21,8 +21,13 @@ export const MODALIDADES = ["campo", "society", "futsal"] as const;
 export const GENEROS = ["masculino", "feminino", "misto"] as const;
 export type Regiao = "cidade" | "estado";
 export const LIMITE_MAX = 20;
-/** Lidos a mais por lote: os ocultos, os do próprio usuário, o time de referência e os de outra modalidade saem depois. */
+/**
+ * Lidos a mais por lote. Com filtro de modalidade, muitos saem depois (os de outra modalidade), então a folga é maior.
+ * Sem ele, quase todos entram (só saem os ocultos, os do próprio usuário e o de referência): 1 a mais basta para saber se
+ * há próxima página, e se faltar algum o lote seguinte completa.
+ */
 const FOLGA_LEITURA = 10;
+const FOLGA_SEM_MODALIDADE = 1;
 /** Lotes por página no máximo (sem filtro que corte muito, o 1º já enche). */
 const MAX_LOTES = 4;
 export const BUSCA_MAX = 40;
@@ -177,7 +182,7 @@ export const explorarTimes = async (
   if (termo) base = base.where("nomeBusca", "array-contains", termo);
   base = base.orderBy(FieldPath.documentId());
 
-  const tamanho = p.limite + FOLGA_LEITURA;
+  const tamanho = p.limite + (p.modalidade ? FOLGA_LEITURA : FOLGA_SEM_MODALIDADE);
   const times: ReturnType<typeof timeDaVitrine>[] = [];
   let ultimoLido = p.cursor;
   let acabou = false;

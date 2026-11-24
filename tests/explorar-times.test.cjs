@@ -228,3 +228,17 @@ test('conserto de passagem: só grava se o time não mudou desde a leitura (um n
   await E.explorarTimes(db, 'eu', { action: 'time_explorar', timeId: 'eu_1', regiao: 'cidade', modalidade: '', genero: '', limite: 20, cursor: '', busca: '' }, async () => null);
   assert.deepEqual(times.leo_1.nomeBusca, E.palavrasDoNome('Tigres'));
 });
+
+test('folga de leitura: sem filtro de modalidade lê só 1 a mais que a página; com o filtro, 10 a mais', async () => {
+  const times = { eu_1: { membros: ['eu'], cidade: PALMAS } };
+  for (let i = 0; i < 30; i += 1) times[`t${String(i).padStart(2, '0')}_1`] = { nome: `Time ${i}`, membros: ['o'], cidade: PALMAS, chave: 'ABC234', modalidade: 'futsal' };
+  const db = bancoFalso(times);
+  const pedido = { action: 'time_explorar', timeId: 'eu_1', regiao: 'estado', modalidade: '', genero: '', limite: 20, cursor: '', busca: '' };
+  const r = await E.explorarTimes(db, 'eu', pedido, async () => null);
+  assert.equal(r.body.times.length, 20);
+  assert.equal(db.consultas[0].limite, 21);
+  assert.ok(r.body.proximoCursor, 'o 21º diz que há mais');
+  db.consultas.length = 0;
+  await E.explorarTimes(db, 'eu', { ...pedido, modalidade: 'futsal' }, async () => null);
+  assert.equal(db.consultas[0].limite, 30);
+});

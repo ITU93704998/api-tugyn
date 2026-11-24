@@ -319,3 +319,11 @@ test('modalidade do jogo: a escolhida, senão a principal de quem convida, senã
   assert.equal(A.modalidadeDoJogo(meu, { modalidade: 'futsal' }, 'society'), null);
   assert.equal(A.parseAmistosoBody({ action: 'amistoso_propor', timeId: 'dono_1', adversarioId: 'rival_1', data: '2030-01-10', hora: '10:00', local: 'Arena', modalidade: 'praia' }).ok, false);
 });
+
+test('forma do time: a letra nova entra na frente, guarda só 5 e ignora valores estranhos', () => {
+  assert.deepEqual([...A.formaComResultado(undefined, 2, 1)], ['V']);
+  assert.deepEqual([...A.formaComResultado(['D', 'E'], 1, 1)], ['E', 'D', 'E']);
+  assert.deepEqual([...A.formaComResultado(['V', 'V', 'E', 'D', 'V'], 0, 3)], ['D', 'V', 'V', 'E', 'D']);
+  assert.deepEqual([...A.formaComResultado(['X', 'V', 7], 3, 0)], ['V', 'V']);
+  assert.equal(A.MAX_FORMA, 5);
+});

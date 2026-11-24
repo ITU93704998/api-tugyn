@@ -689,6 +689,18 @@ const somarNoResumo = (tx: Transaction, db: Firestore, timeId: string, golsPro: 
   );
 };
 
+/**
+ * `forma` no documento do time: as letras dos 5 últimos amistosos com placar (V, E ou D; o mais recente primeiro). A aba
+ * Times mostra a sequência sem ler o histórico (o documento do time ela já recebe). Gravada SÓ pelo servidor (as regras
+ * não deixam o app escrever esse campo), na mesma transação que soma o resultado no resumo.
+ */
+export const MAX_FORMA = 5;
+export const formaComResultado = (atual: unknown, golsPro: number, golsContra: number): ("V" | "E" | "D")[] => {
+  const letra: "V" | "E" | "D" = golsPro > golsContra ? "V" : golsPro === golsContra ? "E" : "D";
+  const antes = Array.isArray(atual) ? atual.filter((r): r is "V" | "E" | "D" => r === "V" || r === "E" || r === "D") : [];
+  return [letra, ...antes].slice(0, MAX_FORMA);
+};
+
 type Feito = { ok: true; amistoso: Doc; outro: Doc; outroDono: string; plano: Plano; aviso: Aviso | null };
 
 /**
@@ -728,6 +740,13 @@ const agirNoResultado = (
       const paraId = String((amistoso.para as Doc)?.timeId ?? "");
       somarNoResumo(tx, db, deId, plano.resultado.golsDe, plano.resultado.golsPara);
       somarNoResumo(tx, db, paraId, plano.resultado.golsPara, plano.resultado.golsDe);
+      // A sequência nos dois times (já lidos nesta transação): sem leitura a mais.
+      for (const [id, snap] of [[meuId, meu], [outroId, outroTime]] as const) {
+        if (!snap?.exists) continue;
+        const pro = id === deId ? plano.resultado.golsDe : plano.resultado.golsPara;
+        const contra = id === deId ? plano.resultado.golsPara : plano.resultado.golsDe;
+        tx.update(timeRef(db, id), { forma: formaComResultado(snap.get("forma"), pro, contra) });
+      }
     }
     gravar(mudanca);
     if ("ok" in pedido) return pedido;
