@@ -13,10 +13,14 @@ import { dentroDoLimite } from "./rateLimit";
 /**
  * Notificações do painel para os usuários do app (Tugyn APP › Notificações): POST /api/version?resource=notificacoes, só `admin`.
  *  - locais     { atualizar? }                     cidades (e estados) dos usuários cadastrados, com quantos usuários há em cada
- *  - enviar     { envioId, titulo, texto, alvo }   cria a campanha (ou retoma a mesma) e avança o que couber nesta chamada
+ *  - enviar     { envioId, titulo, texto, alvo, destino? }  cria a campanha (ou retoma a mesma) e avança o que couber nesta chamada
  *  - progresso  { envioId }                        avança mais um pedaço e devolve a situação (o painel chama enquanto não termina)
  *  - historico  { antesDe? }                       os envios, do mais recente, 20 por vez
- *  - teste      { titulo, texto }                  manda só para os aparelhos do próprio administrador
+ *  - teste      { titulo, texto, destino? }        manda só para os aparelhos do próprio administrador
+ *
+ * DESTINO (opcional): o que o toque na notificação abre. Sem destino, só abre o app. { tipo: "turma" | "campeonato", id } (a
+ * turma ou o campeonato precisa existir) ou { tipo: "pagina", id: torneios | apoiador | desafios | criar-partida }. Vai nos
+ * dados do aviso como destino/destinoId; o app só abre destinos que conhece (versões antigas ignoram e só abrem o app).
  *
  * CAMPANHA DURÁVEL: `notificacoesGerais/{envioId}` guarda a mensagem, o público, a fase e os totais; `lotes/` guarda até 100
  * aparelhos cada, com o resultado de CADA aparelho. Cada chamada (do painel ou da rotina protegida de /api/push) avança com prazo:
@@ -56,6 +60,11 @@ export interface Local { cityId: string; cidade: string; uf: string; usuarios: n
 export interface Locais { geradoEm: number; locais: Local[]; semCidade: number; total: number; atualizando?: boolean }
 export type Alvo = { tipo: "todos" } | { tipo: "estado"; uf: string } | { tipo: "cidade"; cityId: string };
 export interface Mensagem { titulo: string; texto: string }
+export type Destino = { tipo: "turma"; id: string } | { tipo: "campeonato"; id: string } | { tipo: "pagina"; id: Pagina };
+export const PAGINAS = ["torneios", "apoiador", "desafios", "criar-partida"] as const;
+export type Pagina = (typeof PAGINAS)[number];
+const TURMA_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const CAMPEONATO_ID = /^ct_[a-f0-9]{24}$/;
 type Fase = "preparando" | "enviando" | "concluido";
 export type ResultadoFinal = "enviado" | "parcial" | "incerto" | "sem-aparelhos" | "excedeu-limite";
 type Saida = "accepted" | "invalid" | "failed" | "uncertain";
@@ -66,6 +75,7 @@ interface Campanha {
   titulo: string;
   texto: string;
   alvo: Alvo & { rotulo: string };
+  destino?: Destino & { rotulo: string };
   payloadHash: string;
   fase: Fase;
   resultado?: ResultadoFinal;
@@ -95,6 +105,8 @@ interface Lote {
   enviadoEm?: number;
 }
 
+const DESTINO_INVALIDO = "Destino inválido: escolha só abrir o app, uma turma, um campeonato ou uma das páginas da lista.";
+
 export class Recusa extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
@@ -118,6 +130,32 @@ export const parseMensagem = (body: Record<string, unknown>): Mensagem | null =>
   return titulo && texto ? { titulo, texto } : null;
 };
 
+/** { destino } com o destino válido (ou sem destino: só abre o app); null = destino com formato inválido. */
+export const parseDestino = (raw: unknown): { destino?: Destino } | null => {
+  if (raw === undefined || raw === null || raw === "") return {};
+  if (typeof raw !== "object") return null;
+  const { tipo, id } = raw as { tipo?: unknown; id?: unknown };
+  if (tipo === "turma" && typeof id === "string" && TURMA_ID.test(id)) return { destino: { tipo, id } };
+  if (tipo === "campeonato" && typeof id === "string" && CAMPEONATO_ID.test(id)) return { destino: { tipo, id } };
+  if (tipo === "pagina" && (PAGINAS as readonly unknown[]).includes(id)) return { destino: { tipo, id: id as Pagina } };
+  return null;
+};
+
+const NOME_DA_PAGINA: Record<Pagina, string> = { torneios: "Torneios", apoiador: "Tugyn Apoiador", desafios: "Desafios", "criar-partida": "Criar partida" };
+
+export const rotuloDoDestino = (d: Destino): string =>
+  d.tipo === "pagina" ? `Página: ${NOME_DA_PAGINA[d.id]}` : d.tipo === "turma" ? `Turma: ${d.id}` : `Campeonato: ${d.id}`;
+
+/** Dados do aviso que o app usa para abrir o destino ao tocar. */
+export const dadosDoDestino = (d?: Destino): Record<string, string> => (d ? { destino: d.tipo, destinoId: d.id } : {});
+
+/** Turma ou campeonato precisa existir (evita mandar para milhares de pessoas um toque que não abre nada). */
+export async function conferirDestino(db: Firestore, d?: Destino): Promise<void> {
+  if (!d || d.tipo === "pagina") return;
+  const doc = await db.doc(d.tipo === "turma" ? `turmas/${d.id}` : `campeonatosTimes/${d.id}`).get();
+  if (!doc.exists) throw new Recusa(400, d.tipo === "turma" ? "Turma não encontrada. Confira o código da turma." : "Campeonato não encontrado. Confira o código do campeonato.");
+}
+
 export const parseAlvo = (raw: unknown): Alvo | null => {
   if (typeof raw !== "object" || raw === null) return null;
   const a = raw as Record<string, unknown>;
@@ -128,8 +166,8 @@ export const parseAlvo = (raw: unknown): Alvo | null => {
 };
 
 /** Identidade do conteúdo: o mesmo envioId só vale para a mesma mensagem e o mesmo destino (já normalizados). */
-export const hashDoPedido = (alvo: Alvo, msg: Mensagem): string =>
-  createHash("sha256").update(JSON.stringify([msg.titulo, msg.texto, alvo.tipo, alvo.tipo === "estado" ? alvo.uf : alvo.tipo === "cidade" ? alvo.cityId : ""])).digest("hex").slice(0, 32);
+export const hashDoPedido = (alvo: Alvo, msg: Mensagem, destino?: Destino): string =>
+  createHash("sha256").update(JSON.stringify([msg.titulo, msg.texto, alvo.tipo, alvo.tipo === "estado" ? alvo.uf : alvo.tipo === "cidade" ? alvo.cityId : "", ...(destino ? [destino.tipo, destino.id] : [])])).digest("hex").slice(0, 32);
 
 const ativa = (status: unknown, excluindoEm: unknown): boolean => status !== "suspended" && excluindoEm == null;
 
@@ -212,6 +250,7 @@ export interface Progresso {
   titulo: string;
   texto: string;
   alvo: string;
+  destino: string;
   usuarios: number;
   dispositivos: number;
   aceitos: number;
@@ -227,7 +266,8 @@ const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ?
 /** Documento → situação para o painel. Documentos do formato antigo (sem lotes) aparecem como concluídos. */
 export const progressoDe = (envioId: string, x: Record<string, unknown>): Progresso => {
   const alvo = (x.alvo ?? {}) as { rotulo?: unknown };
-  const base = { envioId, titulo: String(x.titulo ?? ""), texto: String(x.texto ?? ""), alvo: String(alvo.rotulo ?? ""), usuarios: n(x.usuarios), dispositivos: n(x.dispositivos), aceitos: n(x.aceitos), criadoEm: n(x.criadoEm) };
+  const destino = (x.destino ?? {}) as { rotulo?: unknown };
+  const base = { envioId, titulo: String(x.titulo ?? ""), texto: String(x.texto ?? ""), alvo: String(alvo.rotulo ?? ""), destino: String(destino.rotulo ?? ""), usuarios: n(x.usuarios), dispositivos: n(x.dispositivos), aceitos: n(x.aceitos), criadoEm: n(x.criadoEm) };
   if (x.schema !== 2) {
     const enviado = x.estado === "enviado";
     return { ...base, fase: "concluido", resultado: enviado ? (n(x.falhas) ? "parcial" : "enviado") : "incerto", falhas: n(x.falhas), incertos: enviado ? 0 : base.dispositivos, pendentes: 0 };
@@ -243,9 +283,9 @@ export const progressoDe = (envioId: string, x: Record<string, unknown>): Progre
 };
 
 /** Cria a campanha; com o mesmo id e o mesmo conteúdo, devolve a existente; com outro conteúdo, recusa (409). */
-export async function criarCampanha(db: Firestore, adminUid: string, envioId: string, alvo: Alvo, msg: Mensagem, agora: number): Promise<{ repetido: boolean }> {
+export async function criarCampanha(db: Firestore, adminUid: string, envioId: string, alvo: Alvo, msg: Mensagem, agora: number, destino?: Destino): Promise<{ repetido: boolean }> {
   const ref = db.doc(`${CAMPANHAS}/${envioId}`);
-  const payloadHash = hashDoPedido(alvo, msg);
+  const payloadHash = hashDoPedido(alvo, msg, destino);
   return db.runTransaction(async (tx) => {
     const atual = await tx.get(ref);
     if (atual.exists) {
@@ -254,6 +294,7 @@ export async function criarCampanha(db: Firestore, adminUid: string, envioId: st
     }
     const campanha: Campanha = {
       schema: 2, adminUid, titulo: msg.titulo, texto: msg.texto, alvo: { ...alvo, rotulo: rotuloDoAlvo(alvo) }, payloadHash,
+      ...(destino ? { destino: { ...destino, rotulo: rotuloDoDestino(destino) } } : {}),
       fase: "preparando", cursor: null, pagina: 0, usuarios: 0, dispositivos: 0, aceitos: 0, falhas: 0, incertos: 0,
       owner: "", leaseUntil: 0, criadoEm: agora, atualizadoEm: agora,
     };
@@ -410,7 +451,7 @@ async function enviarLote(
 }
 
 async function enviarLotes(db: Firestore, ref: DocumentReference, c: Campanha, envioId: string, prazo: number, agora: () => number, send: typeof sendExpoPush): Promise<void> {
-  const draft: PushDraft = { title: c.titulo, body: c.texto, data: { tipo: "aviso_geral", turmaId: "", notificationId: envioId } };
+  const draft: PushDraft = { title: c.titulo, body: c.texto, data: { tipo: "aviso_geral", turmaId: "", notificationId: envioId, ...dadosDoDestino(c.destino) } };
   const abertos = await ref.collection("lotes").where("estado", "in", ["pendente", "enviando"]).limit(60).get();
   const prontos: DocumentReference[] = [];
   for (const d of abertos.docs) {
@@ -499,11 +540,14 @@ export async function handleNotificacoes(req: VercelRequest, res: VercelResponse
     if (acao === "teste") {
       const msg = parseMensagem(body);
       if (!msg) return res.status(400).json({ error: `Escreva o título (até ${TITULO_MAX} caracteres) e a mensagem (até ${TEXTO_MAX}).` });
+      const dTeste = parseDestino(body.destino);
+      if (!dTeste) return res.status(400).json({ error: DESTINO_INVALIDO });
+      await conferirDestino(db, dTeste.destino);
       // Pela fila de avisos (retry e recibos dela). A chave muda a cada minuto: dois cliques seguidos não mandam duas vezes.
       const r = await enviarAviso(db, {
         evento: "aviso_geral_teste", turmaId: "", recipientUids: [user.uid], dedupeUid: user.uid, dedupeMs: 60_000,
-        dedupeKey: `aviso_teste_${user.uid}_${hashDoPedido({ tipo: "todos" }, msg).slice(0, 12)}_${Math.floor(Date.now() / 60_000)}`,
-        draft: { title: msg.titulo, body: msg.texto, data: { tipo: "aviso_geral", turmaId: "" } },
+        dedupeKey: `aviso_teste_${user.uid}_${hashDoPedido({ tipo: "todos" }, msg, dTeste.destino).slice(0, 12)}_${Math.floor(Date.now() / 60_000)}`,
+        draft: { title: msg.titulo, body: msg.texto, data: { tipo: "aviso_geral", turmaId: "", ...dadosDoDestino(dTeste.destino) } },
       });
       return res.status(200).json({ aceitos: r.enviados, motivo: r.motivo ?? null });
     }
@@ -513,9 +557,12 @@ export async function handleNotificacoes(req: VercelRequest, res: VercelResponse
     if (!msg) return res.status(400).json({ error: `Escreva o título (até ${TITULO_MAX} caracteres) e a mensagem (até ${TEXTO_MAX}).` });
     const alvo = parseAlvo(body.alvo);
     if (!alvo) return res.status(400).json({ error: "Escolha para quem enviar: todos, um estado ou uma cidade." });
-    const { repetido } = await criarCampanha(db, user.uid, body.envioId, alvo, msg, Date.now());
+    const d = parseDestino(body.destino);
+    if (!d) return res.status(400).json({ error: DESTINO_INVALIDO });
+    await conferirDestino(db, d.destino);
+    const { repetido } = await criarCampanha(db, user.uid, body.envioId, alvo, msg, Date.now(), d.destino);
     const progresso = await avancar(db, body.envioId);
-    console.log(JSON.stringify({ evt: "notificacao_geral", tipo: alvo.tipo, fase: progresso.fase, dispositivos: progresso.dispositivos, repetido }));
+    console.log(JSON.stringify({ evt: "notificacao_geral", tipo: alvo.tipo, destino: d.destino?.tipo ?? "app", fase: progresso.fase, dispositivos: progresso.dispositivos, repetido }));
     return res.status(200).json({ ...progresso, ...(repetido ? { repetido: true } : {}) });
   } catch (erro) {
     if (erro instanceof Recusa) return res.status(erro.status).json({ error: erro.message });

@@ -63,6 +63,11 @@ test('propor: dono, outro time, outro dono, mesma modalidade, sem bloqueio, praz
   assert.equal(A.motivoParaNaoPropor(cenario({ adversarioId: 'dono_1' })).code, 'mesmo-time');
   assert.equal(A.motivoParaNaoPropor(cenario({ adversario: time({ donoId: 'dono' }) })).code, 'mesmo-dono');
   assert.equal(A.motivoParaNaoPropor(cenario({ adversario: time({ donoId: 'rival', modalidade: 'futsal' }) })).code, 'modalidade');
+  // Várias modalidades: basta uma em comum; a escolhida precisa ser dos dois.
+  const futsalESociety = time({ donoId: 'rival', modalidade: 'futsal', modalidades: ['futsal', 'society'] });
+  assert.equal(A.motivoParaNaoPropor(cenario({ adversario: futsalESociety })), null);
+  assert.equal(A.motivoParaNaoPropor(cenario({ adversario: futsalESociety, modalidade: 'futsal' })).code, 'modalidade');
+  assert.equal(A.motivoParaNaoPropor(cenario({ adversario: futsalESociety, modalidade: 'society' })), null);
   assert.equal(A.motivoParaNaoPropor(cenario({ bloqueio: true })).code, 'bloqueado');
   assert.equal(A.motivoParaNaoPropor(cenario({ quando: AGORA + 10 * 60_000 })).code, 'cedo');
   assert.equal(A.motivoParaNaoPropor(cenario({ quando: AGORA + 121 * 24 * 3600_000 })).code, 'longe');
@@ -303,4 +308,14 @@ test('LIB-03: a busca do par só filtra status que nunca bloqueiam; histórico l
   const ativo = { de: { timeId: 'rival_1' }, para: { timeId: 'dono_1' }, status: 'aceito', quando: Timestamp.fromMillis(AGORA + 3600_000) };
   const filtrados = [...antigos, ativo].filter((a) => A.STATUS_QUE_BLOQUEIAM.includes(a.status));
   assert.equal(A.motivoParaNaoPropor(cenario({ comEle: filtrados })).code, 'em-andamento');
+});
+
+test('modalidade do jogo: a escolhida, senão a principal de quem convida, senão a 1ª em comum', () => {
+  const meu = { modalidade: 'society', modalidades: ['society', 'futsal'] };
+  assert.equal(A.modalidadeDoJogo(meu, { modalidade: 'futsal', modalidades: ['futsal', 'society'] }), 'society');
+  assert.equal(A.modalidadeDoJogo(meu, { modalidade: 'futsal' }), 'futsal');
+  assert.equal(A.modalidadeDoJogo(meu, { modalidade: 'futsal', modalidades: ['futsal', 'society'] }, 'futsal'), 'futsal');
+  assert.equal(A.modalidadeDoJogo(meu, { modalidade: 'campo' }), null);
+  assert.equal(A.modalidadeDoJogo(meu, { modalidade: 'futsal' }, 'society'), null);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_propor', timeId: 'dono_1', adversarioId: 'rival_1', data: '2030-01-10', hora: '10:00', local: 'Arena', modalidade: 'praia' }).ok, false);
 });

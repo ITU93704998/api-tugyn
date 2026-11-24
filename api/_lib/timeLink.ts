@@ -12,6 +12,7 @@
  */
 import { blocoDasLojas, documentoPublico, esc, escudoHtml, topoHtml, type Plataforma } from "./paginaPublica";
 import { limpar } from "./turmaLink";
+import { modalidadePrincipal, modalidadesDoTime, posicaoNaModalidade } from "./modalidadesTime";
 
 export const isValidLinkId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9]{16}$/.test(value);
 
@@ -80,7 +81,9 @@ export const timeDoDocumento = (dados: unknown): TimePublico | null => {
   const cidade = d.cidade && typeof d.cidade === "object" ? (d.cidade as Record<string, unknown>) : {};
   const lugar = [limpar(cidade.city, 60), limpar(cidade.state, 20)].filter(Boolean).join(", ");
   const categoria = [GENEROS[String(d.genero)], d.faixaEtaria === "veterano" ? "Veterano" : ""].filter(Boolean).join(" ");
-  const detalhes = [MODALIDADES[String(d.modalidade)] ?? "", categoria, lugar].filter(Boolean).join(" · ");
+  // Todas as modalidades do time, a principal primeiro ("Society · Futsal").
+  const detalhes = [modalidadesDoTime(d).map((m) => MODALIDADES[m]).join(" · "), categoria, lugar].filter(Boolean).join(" · ");
+  const principal = modalidadePrincipal(d);
   const sigla = typeof d.sigla === "string" && /^[A-Z0-9]{3}$/.test(d.sigla) ? d.sigla : "";
   const jogadores = Object.entries(mapa)
     .slice(0, MAX_JOGADORES)
@@ -91,7 +94,9 @@ export const timeDoDocumento = (dados: unknown): TimePublico | null => {
       const camisa = camisas[uid] && typeof camisas[uid] === "object" ? camisas[uid] : {};
       const numero = Number.isInteger(camisa?.numero) && (camisa?.numero as number) >= 0 && (camisa?.numero as number) <= 99 ? (camisa?.numero as number) : null;
       // "Treinador" só vale para o dono (as regras já garantem; aqui é defesa extra).
-      const posicao = camisa?.posicao === "treinador" ? (uid === donoId ? "Treinador" : "") : POSICOES[String(camisa?.posicao)] ?? "";
+      // A posição na modalidade principal (cada jogador tem uma por modalidade).
+      const naPrincipal = posicaoNaModalidade(camisa, principal);
+      const posicao = naPrincipal === "treinador" ? (uid === donoId ? "Treinador" : "") : POSICOES[naPrincipal] ?? "";
       return nomeJogador ? [{ nome: nomeJogador, foto: fotoPequena(jogador.foto), dono: uid === donoId, numero, posicao, capitao: camisa?.capitao === true }] : [];
     })
     .sort((a, b) => Number(b.dono) - Number(a.dono) || (a.numero ?? 100) - (b.numero ?? 100) || a.nome.localeCompare(b.nome, "pt-BR"));

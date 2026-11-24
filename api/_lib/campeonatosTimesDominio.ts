@@ -1,4 +1,5 @@
 import { normalizarDesenhoTrofeu } from "./desenhoTrofeu";
+import { jogaModalidade, posicaoNaModalidade, type ModalidadeTime } from "./modalidadesTime";
 import { gerarTabela, REGRAS_PADRAO } from "./campeonato/tabela";
 import { aplicarResultado, calcularClassificacao, campeaoDe, resolverJogos, temResultado } from "./campeonato/classificacao";
 import type { Campeonato, JogoCampeonato, TimeCampeonato } from "./campeonato/types";
@@ -179,7 +180,7 @@ export function treinadorCT(time: Dados, id: unknown): TreinadorCT | null {
 }
 export function elencoCT(time: Dados, camp: Dados, quem: string, ids: unknown): AtletaCT[] {
   exigirCT(time.donoId === quem, "Somente o dono pode inscrever este time.", 403);
-  exigirCT(time.modalidade === camp.modalidade, "O time precisa ter a mesma modalidade do campeonato.");
+  exigirCT(jogaModalidade(time, camp.modalidade), "O time precisa jogar a modalidade do campeonato.");
   exigirCT(camp.genero === "livre" || time.genero === camp.genero, "O time não corresponde à categoria deste campeonato.");
   exigirCT(camp.faixaEtaria !== "veterano" || time.faixaEtaria === "veterano", "Este campeonato é da categoria veterano.");
   exigirCT(Array.isArray(ids) && ids.length >= Number(camp.minJogadores) && ids.length <= Number(camp.maxJogadores), `Selecione entre ${camp.minJogadores} e ${camp.maxJogadores} atletas.`);
@@ -191,7 +192,8 @@ export function elencoCT(time: Dados, camp: Dados, quem: string, ids: unknown): 
     exigirCT(camisa.posicao !== "treinador", "Treinador não conta como atleta inscrito.");
     return { id, nome: textoCT(jogador.nome, 80, "Nome do jogador", true), foto: fotoAtletaCT(jogador.foto),
       numero: typeof camisa.numero === "number" && Number.isInteger(camisa.numero) && camisa.numero >= 0 && camisa.numero <= 99 ? camisa.numero : null,
-      posicao: typeof camisa.posicao === "string" ? camisa.posicao.slice(0, 30) : null };
+      // A posição do atleta NA MODALIDADE do campeonato (cada jogador tem uma por modalidade do time).
+      posicao: posicaoNaModalidade(camisa, camp.modalidade as ModalidadeTime) || null };
   });
   // Requisitos por posição (campeonatos novos): conferidos na inscrição e de novo na aprovação, com as posições atuais.
   const requisitos = requisitosDoCT(camp);

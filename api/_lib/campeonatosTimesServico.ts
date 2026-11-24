@@ -1,9 +1,10 @@
 import { ID_MODELO_TROFEU, MAX_MODELOS_TROFEU, modelosGravados, nomeDoModelo, normalizarDesenhoTrofeu } from "./desenhoTrofeu";
 import { completarFotosInscricoesCT } from "./campeonatosTimesFotos";
 import { createHash, randomBytes } from "node:crypto";
-import { FieldPath, type Firestore, type Transaction, type DocumentSnapshot, type QuerySnapshot, type QueryDocumentSnapshot } from "firebase-admin/firestore";
+import { FieldPath, Timestamp, type Firestore, type Transaction, type DocumentSnapshot, type QuerySnapshot, type QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { calcularTrofeusTimes } from "./campeonatosTimesTrofeus";
 import { perfilDisponivel } from "./suspensao";
+import { posicaoNaModalidade, type ModalidadeTime } from "./modalidadesTime";
 import { sortear } from "./campeonato/tabela";
 import { localizacaoDoPerfil } from "./mapaUsuarios";
 import { milissegundosTime } from "./galeriaTimes";
@@ -744,7 +745,7 @@ export async function transferirAtletaCT(db: Firestore, uid: string, body: Dados
     exigirCT(!erroOrigem, `${a.timeNome}: ${erroOrigem}`, 409);
     const novo = { id: jid, nome: textoCT(objetoCT(jogadoresTime[jid]).nome, 80, "Nome do jogador", true), foto: fotoAtletaCT(perfil.get("profileImage")),
       numero: typeof camisa.numero === "number" && Number.isInteger(camisa.numero) && camisa.numero >= 0 && camisa.numero <= 99 ? camisa.numero : null,
-      posicao: typeof camisa.posicao === "string" ? camisa.posicao.slice(0, 30) : null };
+      posicao: posicaoNaModalidade(camisa, camp.modalidade as ModalidadeTime) || null };
     tx.update(ira, { jogadores: restantes, atualizadoEm: agora });
     tx.update(irb, { jogadores: [...b.jogadores, novo], atualizadoEm: agora });
     tx.set(trava(ref, jid), { timeId: para, status: "aprovado", desde: agora, atualizadoEm: agora });
@@ -830,7 +831,21 @@ export async function proximosJogosCT(db: Firestore, uid: string): Promise<Dados
 const LIMITE_PROXIMOS = 10;
 
 const COLECAO_ESTATISTICAS = "estatisticasAtletasCT";
+/** Até 1 h o cálculo guardado vale direto. */
 const VALIDADE_ESTATISTICAS = HORA;
+/**
+ * De 1 h a 6 h, ele vale se nada que entra nos números mudou desde o cálculo (`nadaMudouDesde`: poucas leituras, em vez
+ * de refazer tudo). Depois de 6 h, recalcula de qualquer jeito (pega o que a conferência não vê: campeonato apagado,
+ * reaberto na turma, entrada ou saída de time).
+ */
+const VALIDADE_MAXIMA_ESTATISTICAS = 6 * HORA;
+const MAX_TURMAS_CONFERIDAS = 20;
+/**
+ * Conferência que terminou sem mudança vale por 5 min para os próximos pedidos (de qualquer visitante), sem refazer as
+ * consultas. Fica presa ao cálculo conferido (`conferido.calculadoEm`): não muda a data do cálculo nem estica as 6 h.
+ * Uma mudança nesses 5 min aparece no fim deles.
+ */
+const VALIDADE_CONFERENCIA = 5 * 60_000;
 /** Formato do documento guardado: mudou o que é calculado, sobe o número (o guardado antigo é recalculado). */
 const VERSAO_ESTATISTICAS = 2;
 type TimeNoCard = TimeDoAtleta & { amistososGols: number; gols: number; assistencias: number; jogos: number; titulos: number; campeonatos: number };
@@ -854,7 +869,8 @@ export const timeDoCardCT = (porTime: TimeNoCard[], escolhido: unknown): string 
   return ordem[0]?.timeId ?? null;
 };
 /**
- * Números dos cards do perfil que o servidor calcula (guardados por 1 h em `estatisticasAtletasCT/{uid}`):
+ * Números dos cards do perfil que o servidor calcula (guardados em `estatisticasAtletasCT/{uid}`: 1 h direto e até 6 h se
+ * nada mudou desde o cálculo, ver `aindaValeSemMudanca`):
  *  - card Times: campeonatos entre times (campeonatos, jogos do time em que estava inscrita, gols, assistências, cartões e
  *    títulos) mais os gols dos amistosos, com a divisão por time e o time do card;
  *  - card Turmas: a parte dos campeonatos da turma (as partidas das turmas o app já soma).
@@ -882,6 +898,7 @@ export async function estatisticasAtletaCT(db: Firestore, uid: string, body: Dad
   };
   const cache = await ref.get();
   if (valido(cache)) return resposta(cache.data()!);
+  if (await aindaValeSemMudanca(db, alvo, cache, agora)) return resposta(cache.data()!);
   const reserva = await db.runTransaction(async (tx) => {
     const s = await tx.get(ref);
     // Outro pedido terminou entre a leitura acima e agora: usa o resultado dele.
@@ -908,6 +925,39 @@ export async function estatisticasAtletaCT(db: Firestore, uid: string, body: Dad
   }
 }
 const ESPERA_ESTATISTICAS_MS = 500;
+
+/**
+ * Cálculo de 1 h a 6 h atrás: ainda vale se nada que entra nos números mudou depois dele. Confere com consultas de no
+ * máximo 1 documento cada (sem nada novo, cada uma custa 1 leitura):
+ *  - campeonatos entre times em que a pessoa está (`envolvidos`) atualizados depois do cálculo (resultado, correção,
+ *    reabertura, finalização, inscrição);
+ *  - resumos de amistosos dos times em que ela já fez gol (`artilheirosIds`; o primeiro gol entra na lista na mesma
+ *    gravação) atualizados depois do cálculo;
+ *  - em cada turma somada no cálculo, um campeonato encerrado atualizado depois dele.
+ * Qualquer falha (ex.: índice ainda não criado) conta como "mudou": recalcula, como antes.
+ */
+async function aindaValeSemMudanca(db: Firestore, alvo: string, s: DocumentSnapshot, agora: number): Promise<boolean> {
+  const calculadoEm = Number(s.get("calculadoEm") ?? 0);
+  const turmas = idsContados(s.get("turmasContadas"));
+  if (!s.exists || !s.get("estatisticas") || s.get("versao") !== VERSAO_ESTATISTICAS || turmas === null) return false;
+  if (calculadoEm <= agora - VALIDADE_MAXIMA_ESTATISTICAS || turmas.length > MAX_TURMAS_CONFERIDAS) return false;
+  const conferido = s.get("conferido") as { calculadoEm?: unknown; em?: unknown } | undefined;
+  if (conferido && conferido.calculadoEm === calculadoEm && Number(conferido.em ?? 0) > agora - VALIDADE_CONFERENCIA) return true;
+  if (!(await nadaMudouDesde(db, alvo, calculadoEm, turmas).catch(() => false))) return false;
+  // Guarda a confirmação (1 gravação a cada 5 min no máximo). Só se o documento não mudou desde a leitura: um recálculo
+  // que terminou no meio não recebe a confirmação do cálculo anterior. Falhar aqui não atrapalha a resposta.
+  await s.ref.update({ conferido: { calculadoEm, em: agora } }, ...(s.updateTime ? [{ lastUpdateTime: s.updateTime }] : [])).catch(() => undefined);
+  return true;
+}
+export async function nadaMudouDesde(db: Firestore, alvo: string, desdeMs: number, turmas: string[]): Promise<boolean> {
+  const desde = Timestamp.fromMillis(desdeMs);
+  const consultas = [
+    db.collection(COLECAO_CT).where("envolvidos", "array-contains", alvo).where("atualizadoEm", ">", desdeMs).limit(1).get(),
+    db.collectionGroup("resumo").where("artilheirosIds", "array-contains", alvo).where("atualizadoEm", ">", desde).limit(1).get(),
+    ...turmas.map((t) => db.collection(`turmas/${t}/campeonatos`).where("status", "==", "encerrado").where("atualizadoEm", ">", desde).limit(1).get()),
+  ];
+  return (await Promise.all(consultas)).every((r) => r.empty);
+}
 
 /**
  * Escolher o time do card (`timeId`) ou voltar ao automático (`null`). Só um time em que a pessoa está hoje.
@@ -996,9 +1046,9 @@ async function calcularEstatisticasCT(db: Firestore, ref: ReturnType<Firestore["
   const ordenados = ordenarTimesCard([...porTime.values()]);
   const lista = ordenados.slice(0, MAX_TIMES_CARD);
   const totalTimes = ordenados.length;
-  const { incompleto: turmaIncompleta, ...campeonatosTurma } = turma;
+  const { incompleto: turmaIncompleta, turmas: turmasContadas, ...campeonatosTurma } = turma;
   const incompleto = camps.size >= LIMITE_CAMPEONATOS_ESTATISTICAS || turmaIncompleta || amistosos.incompleto;
-  const doc = { estatisticas: est, amistosos: { gols: golsAmistosos }, porTime: lista, totalTimes, timesContados: ordenados.map((t) => t.timeId).slice(0, MAX_TIMES_CONTADOS), campeonatosTurma, calculadoEm: agora, incompleto, versao: VERSAO_ESTATISTICAS, calculandoAte: 0 };
+  const doc = { estatisticas: est, amistosos: { gols: golsAmistosos }, porTime: lista, totalTimes, timesContados: ordenados.map((t) => t.timeId).slice(0, MAX_TIMES_CONTADOS), turmasContadas, campeonatosTurma, calculadoEm: agora, incompleto, versao: VERSAO_ESTATISTICAS, calculandoAte: 0 };
   await ref.set(doc, { merge: true }); // merge: a escolha do time do card (`timeDoCard`) continua
   return { ...doc, timeDoCard };
 }

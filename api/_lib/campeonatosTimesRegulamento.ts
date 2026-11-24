@@ -3,6 +3,7 @@ import type { Firestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { getFirebaseApp } from "./auth";
 import { perfilDisponivel } from "./suspensao";
+import { jogaModalidade } from "./modalidadesTime";
 import { idDoCT } from "./campeonatosTimesServico";
 import { agendarAvisosCT, avisoCT, textosCT, timeTodo } from "./campeonatosTimesAvisos";
 import { COLECAO_CT, exigirCT, RecusaCT, textoCT, type Dados } from "./campeonatosTimesDominio";
@@ -181,7 +182,7 @@ export async function limparRegulamentosCT(db: Firestore, ate: number): Promise<
   return r;
 }
 
-/** Pode abrir o PDF: organizador, mesário, dono de time inscrito ou dono de um time da mesma modalidade. */
+/** Pode abrir o PDF: organizador, mesário, dono de time inscrito ou dono de um time que joga a modalidade. */
 export async function podeAbrirRegulamentoCT(db: Firestore, uid: string, cid: string, camp: Dados): Promise<boolean> {
   if (camp.organizadorId === uid) return true;
   if (Array.isArray(camp.mesarios) && (camp.mesarios as { uid?: unknown }[]).some((m) => m?.uid === uid)) return true;
@@ -189,7 +190,7 @@ export async function podeAbrirRegulamentoCT(db: Firestore, uid: string, cid: st
     db.collection(`${COLECAO_CT}/${cid}/inscricoes`).where("donoId", "==", uid).limit(1).get(),
     db.collection("times").where("donoId", "==", uid).limit(30).get(),
   ]);
-  return !inscritos.empty || times.docs.some((t) => t.get("modalidade") === camp.modalidade);
+  return !inscritos.empty || times.docs.some((t) => jogaModalidade(t.data(), camp.modalidade));
 }
 
 /** Link assinado (10 minutos) para abrir o PDF. */

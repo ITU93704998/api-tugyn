@@ -758,7 +758,7 @@ test('busca por nome no catálogo: sem acento, sem maiúscula, mínimo de 2 letr
  assert.deepEqual(await ach('sao joao'),['Copa São João']);assert.deepEqual(await ach('JOÃO'),['Copa São João']);assert.deepEqual(await ach('zz'),[]);
  await assert.rejects(ach('c'),/2 a 40/);
 });
-test('meus próximos jogos e estatísticas do atleta (com cache de 1 h)',async()=>{
+test('meus próximos jogos e estatísticas do atleta (cache de 1 h; até 6 h se nada mudou)',async()=>{
  const{db,id,jogos}=await iniciado();
  const p=await S.proximosJogosCT(db,'a');assert.equal(p.jogos.length,2);assert.ok(p.jogos.every(j=>j.campeonatoId===id&&(j.casa.timeId==='a_1'||j.fora.timeId==='a_1')));
  const j1=jogos.find(j=>j.casa==='a_1'||j.fora==='a_1');
@@ -768,7 +768,9 @@ test('meus próximos jogos e estatísticas do atleta (com cache de 1 h)',async()
  assert.deepEqual(JSON.parse(JSON.stringify(e.estatisticas)),{campeonatos:1,jogos:1,gols:2,assistencias:0,amarelos:1,vermelhos:0,titulos:0});
  db.data.delete('campeonatosTimes/'+id);
  assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+1000)).estatisticas.gols,2,'cache');
- assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+2*3600000)).estatisticas.gols,0,'recalcula depois de 1 h');
+ // Apagar o campeonato não aparece na conferência barata: vale até o limite de 6 h, depois recalcula.
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+2*3600000)).estatisticas.gols,2,'nada mudou: vale até 6 h');
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+7*3600000)).estatisticas.gols,0,'recalcula depois de 6 h');
  db.data.get('users/a').isPublic=false;
  assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW)).estatisticas,null,'perfil privado: visitante não vê');
  assert.ok((await S.estatisticasAtletaCT(db,'a',{},NOW)).estatisticas,'o dono vê as próprias');
@@ -785,6 +787,68 @@ test('rotina agendada: prazo encerrado avisa o organizador; véspera do jogo avi
  assert.deepEqual([...enviados.find(a=>a.dedupeKey.startsWith('ct_prazo_')).recipientUids],['org']);
  const lem=enviados.find(a=>a.dedupeKey.startsWith('ct_lembrete_'));
  assert.equal(lem.recipientUids.length,2);assert.equal(lem.draft.title,'Seu jogo é amanhã');
+});
+test('cards de 1 h a 6 h: nada mudou vale sem refazer a conta; resultado novo, gol de amistoso ou campeonato da turma encerrado recalculam',async()=>{
+ const{Timestamp}=require('firebase-admin/firestore');
+ const{db,id,jogos}=await iniciado();
+ db.data.set('turmas/t1',{participantes:['a']});
+ const ja=jogos.filter(j=>j.casa==='a_1'||j.fora==='a_1');
+ const lancar=async(j,gols,quando)=>S.resultadoCT(db,'org',V(j,{campeonatoId:id,jogoId:j.id,golsCasa:j.casa==='a_1'?gols:0,golsFora:j.casa==='a_1'?0:gols,gols:{a:gols}}),quando);
+ await lancar(ja[0],1,NOW);
+ const abrir=async(quando)=>{
+  const old=Query.prototype.get;const paths=[];Query.prototype.get=async function(){paths.push(this.path);return old.call(this);};
+  try{return{r:await S.estatisticasAtletaCT(db,'b',{uid:'a'},quando),paths};}finally{Query.prototype.get=old;}
+ };
+ assert.equal((await abrir(NOW+1000)).r.estatisticas.gols,1);
+ assert.deepEqual(db.data.get('estatisticasAtletasCT/a').turmasContadas,['t1']);
+ // 2 h depois, nada mudou: 3 consultas de conferência (campeonatos entre times, resumos, a turma) e nenhum recálculo.
+ const quieto=await abrir(NOW+2*3600000);
+ assert.equal(quieto.r.calculadoEm,NOW+1000);
+ assert.deepEqual(quieto.paths,['campeonatosTimes','**/resumo','turmas/t1/campeonatos']);
+ // Resultado novo no campeonato: recalcula (depois dos 5 min em que a confirmação acima vale).
+ const r6=NOW+2*3600000+6*60000;
+ await lancar(ja[1],2,r6-1);
+ const novo=await abrir(r6);
+ assert.equal(novo.r.estatisticas.gols,3);assert.equal(novo.r.calculadoEm,r6);
+ // Gol marcado num amistoso (resumo de um time em que a pessoa já marcou): recalcula.
+ const depois=NOW+4*3600000;
+ db.data.set('times/a_1/resumo/geral',{artilheirosIds:['a'],jogadores:{a:{gols:4}},atualizadoEm:Timestamp.fromMillis(depois)});
+ assert.equal((await abrir(depois+1)).r.calculadoEm,depois+1,'amistoso');
+ // Campeonato da turma encerrado depois do cálculo: recalcula. Em andamento (jogo ao vivo) não conta.
+ db.data.set('turmas/t1/campeonatos/c1',{status:'andamento',atualizadoEm:Timestamp.fromMillis(depois+10)});
+ assert.equal((await abrir(depois+2*3600000)).r.calculadoEm,depois+1,'em andamento não recalcula');
+ db.data.get('turmas/t1/campeonatos/c1').status='encerrado';
+ // Depois dos 5 min da confirmação anterior (dentro deles, a mudança espera o fim da janela).
+ assert.equal((await abrir(depois+2*3600000+6*60000)).r.calculadoEm,depois+2*3600000+6*60000,'encerrado recalcula');
+});
+test('cards de 1 h a 6 h: a conferência sem mudança vale 5 min para os próximos pedidos, presa ao cálculo e sem esticar as 6 h',async()=>{
+ const{db}=await iniciado();
+ db.data.set('turmas/t1',{participantes:['a']});
+ const abrir=async(quando)=>{
+  const old=Query.prototype.get;const paths=[];Query.prototype.get=async function(){paths.push(this.path);return old.call(this);};
+  try{return{r:await S.estatisticasAtletaCT(db,'b',{uid:'a'},quando),paths};}finally{Query.prototype.get=old;}
+ };
+ await abrir(NOW);
+ const h2=NOW+2*3600000;
+ assert.equal((await abrir(h2)).paths.length,3);
+ assert.deepEqual(db.data.get('estatisticasAtletasCT/a').conferido,{calculadoEm:NOW,em:h2});
+ const logo=await abrir(h2+1);
+ assert.deepEqual(logo.paths,[],'outro pedido logo depois: sem consultas');assert.equal(logo.r.calculadoEm,NOW,'a data do cálculo não muda');
+ assert.equal((await abrir(h2+6*60000)).paths.length,3,'passados 5 min, confere de novo');
+ // Confirmação de outro cálculo não vale.
+ db.data.get('estatisticasAtletasCT/a').conferido={calculadoEm:NOW-1,em:h2+7*60000};
+ assert.equal((await abrir(h2+8*60000)).paths.length,3);
+ // Nunca estica o limite de 6 h.
+ db.data.get('estatisticasAtletasCT/a').conferido={calculadoEm:NOW,em:NOW+6*3600000-1000};
+ assert.equal((await abrir(NOW+6*3600000)).r.calculadoEm,NOW+6*3600000,'limite de 6 h: recalcula');
+});
+test('cards de 1 h a 6 h: cálculo antigo (sem a lista de turmas) ou conferência que falha recalculam, como antes',async()=>{
+ const{db}=await iniciado();
+ db.data.set('estatisticasAtletasCT/a',{estatisticas:{campeonatos:9},calculadoEm:NOW-2*3600000,versao:2});
+ assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW)).calculadoEm,NOW,'sem turmasContadas');
+ db.data.get('estatisticasAtletasCT/a').calculadoEm=NOW-2*3600000;
+ const old=Query.prototype.get;Query.prototype.get=async function(){if(this.path==='**/resumo'&&this.filters.some(([k])=>k==='atualizadoEm'))throw Error('índice ausente');return old.call(this);};
+ try{assert.equal((await S.estatisticasAtletaCT(db,'b',{uid:'a'},NOW+1)).calculadoEm,NOW+1,'falhou a conferência');}finally{Query.prototype.get=old;}
 });
 test('exclusão de conta: cartões anonimizados, sai dos mesários e o cache de estatísticas é apagado',async()=>{
  const E=carregar('campeonatosTimesExclusao');

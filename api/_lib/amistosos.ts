@@ -20,6 +20,8 @@ import {
 import { DEDUPE_MS, type PushDraft } from "./push";
 import { type Aviso, COLECAO_AVISOS, avisoPendente, enviarAviso } from "./pushEnvio";
 import { isValidLinkId, timeDoDocumento } from "./timeLink";
+import { type PedidoExplorar, type PedidoIndexar, type PedidoVitrine, definirVitrine, explorarTimes, indexarNome, parseExplorar, parseIndexar, parseVitrine } from "./explorarTimes";
+import { MODALIDADES_TIME, type ModalidadeTime, NOME_MODALIDADE, modalidadePrincipal, modalidadesDoTime, modalidadesEmComum } from "./modalidadesTime";
 
 /**
  * Chave pública dos times e amistosos entre times (pela rota `POST /api/desafios`: o plano da Vercel não comporta outra função).
@@ -28,7 +30,9 @@ import { isValidLinkId, timeDoDocumento } from "./timeLink";
  *  - time_link { linkId }                                      quem tocou em "Abrir no Tugyn" na página do time: quem é do
  *                                                               time recebe o id (abre o time); os outros, a chave (abre o
  *                                                               time público, como quem digita a chave)
- *  - amistoso_propor { timeId, adversarioId, data, hora, local }   o dono convida outro time da mesma modalidade
+ *  - amistoso_propor { timeId, adversarioId, data, hora, local, modalidade? }   o dono convida outro time; a modalidade do
+ *                                                               jogo é uma das que os dois times têm (sem ela, versões antigas:
+ *                                                               a principal de quem convida, se o outro também joga, ou a 1ª em comum)
  *  - amistoso_responder { timeId, amistosoId, aceitar }       o dono do time convidado aceita ou recusa
  *  - amistoso_cancelar { timeId, amistosoId }                 o dono de qualquer um dos dois desmarca (antes do jogo)
  *  - time_encerrar { timeId }                                  o dono apaga o time: cancela os amistosos em aberto nos
@@ -38,6 +42,9 @@ import { isValidLinkId, timeDoDocumento } from "./timeLink";
  *  - amistoso_recusar_placar { timeId, amistosoId }            não concordar de novo: o jogo fica sem acordo
  *  - amistoso_artilheiros { timeId, amistosoId, gols }         o dono marca quem fez os gols do próprio time
  *  - amistoso_apurar { timeId }                                alguém do elenco abre os jogos: aplica os prazos vencidos
+ *  - time_explorar { timeId, regiao, modalidade, genero, limite, cursor, busca }   adversários na cidade/estado do time (`explorarTimes.ts`)
+ *  - time_vitrine { timeId, visivel }                           o dono tira (ou põe) o time em "Explorar adversários"
+ *  - time_indexar { timeId }                                    atualiza as palavras do nome para a busca (depois de criar/renomear)
  * Regras do resultado em `amistososResultado.ts`. O retrospecto de cada time fica em `times/{id}/resumo/geral`.
  * O amistoso fica em `times/{id}/amistosos/{amistosoId}` com uma cópia em cada time (o elenco de cada um lê a sua; o app
  * não grava). A chave fica em `chavesTime/{chave}` (só o servidor lê e grava) e no campo `chave` do time.
@@ -73,7 +80,7 @@ export type AmistosoRequest =
   | { action: "time_chave"; timeId: string }
   | { action: "time_buscar"; chave: string }
   | { action: "time_link"; linkId: string }
-  | { action: "amistoso_propor"; timeId: string; adversarioId: string; data: string; hora: string; local: string }
+  | { action: "amistoso_propor"; timeId: string; adversarioId: string; data: string; hora: string; local: string; modalidade: ModalidadeTime | "" }
   | { action: "amistoso_responder"; timeId: string; amistosoId: string; aceitar: boolean }
   | { action: "amistoso_cancelar"; timeId: string; amistosoId: string }
   | { action: "time_encerrar"; timeId: string }
@@ -81,13 +88,16 @@ export type AmistosoRequest =
   | { action: "amistoso_confirmar"; timeId: string; amistosoId: string }
   | { action: "amistoso_recusar_placar"; timeId: string; amistosoId: string }
   | { action: "amistoso_artilheiros"; timeId: string; amistosoId: string; gols: Record<string, number> }
-  | { action: "amistoso_apurar"; timeId: string };
+  | { action: "amistoso_apurar"; timeId: string }
+  | PedidoExplorar
+  | PedidoVitrine
+  | PedidoIndexar;
 
 type Parse = { ok: true; value: AmistosoRequest } | { ok: false; error: string };
 
 export const ehAcaoDeAmistoso = (body: unknown): boolean => {
   const action = (body as { action?: unknown } | null)?.action;
-  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_link" || action === "time_encerrar");
+  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_link" || action === "time_encerrar" || action === "time_explorar" || action === "time_vitrine" || action === "time_indexar");
 };
 
 export const normalizarChave = (valor: unknown): string | null => {
@@ -147,7 +157,9 @@ export const parseAmistosoBody = (body: unknown): Parse => {
       }
       const local = limparLocal(b.local);
       if (!local) return { ok: false, error: `Informe o local (de ${LOCAL_MIN} a ${LOCAL_MAX} caracteres).` };
-      return { ok: true, value: { action: "amistoso_propor", timeId: b.timeId as string, adversarioId: b.adversarioId, data: b.data, hora: b.hora, local } };
+      const modalidade = b.modalidade ?? "";
+      if (modalidade !== "" && !(MODALIDADES_TIME as readonly unknown[]).includes(modalidade)) return { ok: false, error: "Modalidade inválida." };
+      return { ok: true, value: { action: "amistoso_propor", timeId: b.timeId as string, adversarioId: b.adversarioId, data: b.data, hora: b.hora, local, modalidade: modalidade as ModalidadeTime | "" } };
     }
     case "amistoso_responder":
       if (!timeOk || typeof b.amistosoId !== "string" || !AMISTOSO_ID.test(b.amistosoId)) return { ok: false, error: "Amistoso inválido." };
@@ -175,6 +187,12 @@ export const parseAmistosoBody = (body: unknown): Parse => {
     }
     case "amistoso_apurar":
       return timeOk ? { ok: true, value: { action: "amistoso_apurar", timeId: b.timeId as string } } : { ok: false, error: "Time inválido." };
+    case "time_explorar":
+      return parseExplorar(b);
+    case "time_indexar":
+      return parseIndexar(b);
+    case "time_vitrine":
+      return parseVitrine(b);
     default:
       return { ok: false, error: "Ação inválida." };
   }
@@ -210,7 +228,8 @@ export const timePublico = (timeId: string, d: Doc, uid: string) => {
     cor: texto(d.cor, 7),
     corSecundaria: texto(d.corSecundaria, 7),
     escudoUrl: texto(d.escudoUrl, 500),
-    modalidade: texto(d.modalidade, 10),
+    modalidade: modalidadePrincipal(d),
+    modalidades: modalidadesDoTime(d),
     genero: texto(d.genero, 10),
     faixaEtaria: texto(d.faixaEtaria, 10),
     cidade: cidade?.city ? { city: texto(cidade.city, 100), state: texto(cidade.state, 40) } : null,
@@ -237,7 +256,17 @@ export interface CenarioProposta {
   pendentes: Doc[];
   /** Todos os amistosos do MEU time com este adversário (histórico do par). */
   comEle: Doc[];
+  /** Modalidade escolhida para o jogo ("" ou ausente = escolher pelas modalidades dos dois times). */
+  modalidade?: string;
 }
+
+/** Modalidade do jogo: a escolhida; sem escolha, a principal de quem convida (se o outro joga) ou a 1ª em comum. */
+export const modalidadeDoJogo = (meu: Doc, adversario: Doc, pedida = ""): ModalidadeTime | null => {
+  const comum = modalidadesEmComum(meu, adversario);
+  if (pedida) return (comum as string[]).includes(pedida) ? (pedida as ModalidadeTime) : null;
+  const principal = modalidadePrincipal(meu);
+  return comum.includes(principal) ? principal : comum[0] ?? null;
+};
 
 type Negado = { ok: false; status: number; code: string; error: string };
 const negar = (status: number, code: string, error: string): Negado => ({ ok: false, status, code, error });
@@ -256,7 +285,8 @@ export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
   if (!c.adversario) return negar(404, "time-inexistente", "Este time não existe mais.");
   if (c.adversarioId === c.meuId) return negar(400, "mesmo-time", "Escolha outro time.");
   if (c.adversario.donoId === c.uid) return negar(400, "mesmo-dono", "Os dois times são seus.");
-  if (c.adversario.modalidade !== c.meu.modalidade) return negar(400, "modalidade", "Só times da mesma modalidade marcam amistoso.");
+  if (modalidadesEmComum(c.meu, c.adversario).length === 0) return negar(400, "modalidade", "Os dois times não jogam nenhuma modalidade em comum.");
+  if (!modalidadeDoJogo(c.meu, c.adversario, c.modalidade ?? "")) return negar(400, "modalidade", "Escolha uma modalidade que os dois times jogam.");
   if (c.bloqueio) return negar(403, "bloqueado", "Não é possível marcar amistoso com este time.");
   if (c.quando < c.agora + ANTECEDENCIA_MS) return negar(400, "cedo", "Escolha um horário com pelo menos 30 minutos de antecedência.");
   if (c.quando > c.agora + PRAZO_MAXIMO_MS) return negar(400, "longe", "Marque com no máximo 120 dias de antecedência.");
@@ -296,6 +326,11 @@ export const outroLado = (amistoso: Doc, meuId: string): Doc => ((amistoso.de as
 export type EventoAmistoso = "novo" | "aceito" | "recusado" | "cancelado" | "placar" | "contestado" | "confirmado" | "sem_acordo";
 
 const nome = (d: Doc | undefined): string => texto(d?.nome, NOME_MAX) || "Um time";
+/** " de futsal" (amistosos antigos não guardam a modalidade). */
+const deModalidade = (amistoso: Doc): string => {
+  const m = amistoso.modalidade as ModalidadeTime;
+  return NOME_MODALIDADE[m] ? ` de ${NOME_MODALIDADE[m].toLowerCase()}` : "";
+};
 
 export const avisoDeAmistoso = (evento: EventoAmistoso, amistoso: Doc, quemAgiu: Doc, paraTimeId: string): PushDraft => {
   const quando = quandoTexto(millis(amistoso.quando));
@@ -303,7 +338,7 @@ export const avisoDeAmistoso = (evento: EventoAmistoso, amistoso: Doc, quemAgiu:
   const data = { tipo: "time_amistoso" as const, turmaId: "", timeId: paraTimeId };
   switch (evento) {
     case "novo":
-      return { title: "Convite para amistoso", body: `${nome(quemAgiu)} chamou o seu time para um amistoso: ${quando} · ${local}`, data };
+      return { title: "Convite para amistoso", body: `${nome(quemAgiu)} chamou o seu time para um amistoso${deModalidade(amistoso)}: ${quando} · ${local}`, data };
     case "aceito":
       return { title: "Amistoso confirmado!", body: `${nome(quemAgiu)} aceitou o amistoso de ${quando} · ${local}`, data };
     case "recusado":
@@ -485,6 +520,7 @@ const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { 
       bloqueio: Boolean(bloqueioA?.exists || bloqueioB?.exists),
       pendentes: pendentes.docs.map((d) => d.data()),
       comEle: [...enviados.docs, ...recebidos.docs].map((d) => d.data()),
+      modalidade: p.modalidade,
     });
     if (negado) return negado;
     const doc = {
@@ -492,6 +528,7 @@ const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { 
       para: resumoDoTime(p.adversarioId, adversario.data() ?? {}),
       quando: Timestamp.fromMillis(quando),
       local: p.local,
+      modalidade: modalidadeDoJogo(meu.data() ?? {}, adversario.data() ?? {}, p.modalidade) as ModalidadeTime,
       status: "pendente" as StatusAmistoso,
       criadoEm: FieldValue.serverTimestamp(),
       atualizadoEm: FieldValue.serverTimestamp(),
@@ -835,5 +872,14 @@ export const executarAmistoso = (db: Firestore, uid: string, pedido: AmistosoReq
       return marcarArtilheiros(db, uid, pedido);
     case "amistoso_apurar":
       return apurar(db, uid, pedido.timeId);
+    case "time_explorar":
+      return explorarTimes(db, uid, pedido, async (timeId) => {
+        const r = await pegarChave(db, uid, timeId, false);
+        return r.ok && typeof r.body?.chave === "string" ? r.body.chave : null;
+      });
+    case "time_vitrine":
+      return definirVitrine(db, uid, pedido);
+    case "time_indexar":
+      return indexarNome(db, uid, pedido);
   }
 };

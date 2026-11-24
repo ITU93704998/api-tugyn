@@ -320,3 +320,27 @@ test('transporte: no máximo 6 conexões simultâneas, resultados na ordem (NG-0
   assert.equal(r.length, 5000);
   assert.equal(r[4999].token, msgs[4999].to);
 });
+
+test('destino do aviso: sem destino só abre o app; turma, campeonato e páginas conhecidas; o resto é recusado', () => {
+  assert.deepEqual({ ...N.parseDestino(undefined) }, {});
+  assert.deepEqual({ ...N.parseDestino(null) }, {});
+  assert.deepEqual(JSON.parse(JSON.stringify(N.parseDestino({ tipo: 'turma', id: 'abc_123' }))), { destino: { tipo: 'turma', id: 'abc_123' } });
+  const cid = 'ct_' + 'f'.repeat(24);
+  assert.deepEqual(JSON.parse(JSON.stringify(N.parseDestino({ tipo: 'campeonato', id: cid }))), { destino: { tipo: 'campeonato', id: cid } });
+  for (const p of ['torneios', 'apoiador', 'desafios', 'criar-partida']) assert.equal(N.parseDestino({ tipo: 'pagina', id: p }).destino.id, p);
+  for (const ruim of ['turma', { tipo: 'turma', id: '../x' }, { tipo: 'campeonato', id: 'ct_1' }, { tipo: 'pagina', id: 'configuracoes' }, { tipo: 'pagina', id: 'toString' }, { tipo: 'url', id: 'https://x.com' }]) {
+    assert.equal(N.parseDestino(ruim), null, JSON.stringify(ruim));
+  }
+});
+
+test('destino vai nos dados do aviso, muda o hash do pedido e aparece no histórico', () => {
+  assert.deepEqual({ ...N.dadosDoDestino(undefined) }, {});
+  assert.deepEqual({ ...N.dadosDoDestino({ tipo: 'pagina', id: 'apoiador' }) }, { destino: 'pagina', destinoId: 'apoiador' });
+  const msg = { titulo: 'Oi', texto: 'Teste' };
+  const semDestino = N.hashDoPedido({ tipo: 'todos' }, msg);
+  assert.equal(N.hashDoPedido({ tipo: 'todos' }, msg, undefined), semDestino, 'sem destino: hash igual ao de antes');
+  assert.notEqual(N.hashDoPedido({ tipo: 'todos' }, msg, { tipo: 'pagina', id: 'torneios' }), semDestino);
+  assert.equal(N.rotuloDoDestino({ tipo: 'pagina', id: 'criar-partida' }), 'Página: Criar partida');
+  assert.equal(N.progressoDe('x', { schema: 2, fase: 'concluido', destino: { rotulo: 'Turma: abc' } }).destino, 'Turma: abc');
+  assert.equal(N.progressoDe('x', { schema: 2, fase: 'concluido' }).destino, '');
+});

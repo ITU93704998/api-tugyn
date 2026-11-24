@@ -12,7 +12,7 @@ import { temResultado } from "./campeonato/classificacao";
  *  - Campeonatos da turma (card Turmas): só os ENCERRADOS das turmas de que a pessoa participa hoje, conferidos com a
  *    mesma validação da galeria de troféus (um campeonato que não confere não soma nada).
  *
- * Quem chama: `estatisticasAtletaCT` (resultado guardado por 1 h em `estatisticasAtletasCT/{uid}`).
+ * Quem chama: `estatisticasAtletaCT` (resultado guardado em `estatisticasAtletasCT/{uid}`: 1 h direto, até 6 h se nada mudou).
  */
 
 const LIMITE_TIMES = 20;
@@ -151,10 +151,12 @@ async function completarArtilheiros(db: Firestore, ref: DocumentReference, lote:
 export interface NumerosCampeonatosTurma { campeonatos: number; gols: number; assistencias: number; jogos: number }
 
 /** Soma da pessoa nos campeonatos ENCERRADOS das turmas de que ela participa hoje (só os que passam na validação). */
-export async function campeonatosTurmaDoAtleta(db: Firestore, uid: string): Promise<NumerosCampeonatosTurma & { incompleto: boolean }> {
+export async function campeonatosTurmaDoAtleta(db: Firestore, uid: string): Promise<NumerosCampeonatosTurma & { incompleto: boolean; turmas: string[] }> {
   const total = { campeonatos: 0, gols: 0, assistencias: 0, jogos: 0 };
   const turmas = await db.collection("turmas").where("participantes", "array-contains", uid).limit(LIMITE_TURMAS).get();
   let incompleto = turmas.size >= LIMITE_TURMAS;
+  // Turmas cujos campeonatos foram somados: a conferência de "nada mudou" olha só elas (`estatisticasAtletaCT`).
+  const olhadas = turmas.docs.filter((t) => t.get("encerradaPor") !== "moderacao").map((t) => t.id);
   await Promise.all(turmas.docs.map(async (turma) => {
     if (turma.get("encerradaPor") === "moderacao") return;
     const camps = await turma.ref.collection("campeonatos").where("status", "==", "encerrado").limit(LIMITE_CAMPEONATOS_POR_TURMA).get();
@@ -174,5 +176,5 @@ export async function campeonatosTurmaDoAtleta(db: Firestore, uid: string): Prom
       }
     }
   }));
-  return { ...total, incompleto };
+  return { ...total, incompleto, turmas: olhadas };
 }
