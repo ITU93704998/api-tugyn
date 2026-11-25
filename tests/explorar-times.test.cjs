@@ -140,6 +140,15 @@ test('vitrine: só o dono tira o time da lista', async () => {
   assert.deepEqual(db.gravados, [{ id: 'eu_1', dados: { ocultoNaBusca: true } }]);
 });
 
+test('amistosos: só o dono pausa; time pausado sai da lista de adversários', async () => {
+  const db = bancoFalso({ eu_1: { donoId: 'eu', membros: ['eu', 'ana'] } });
+  assert.equal((await E.definirRecebeAmistosos(db, 'ana', { action: 'time_amistosos', timeId: 'eu_1', receber: false })).status, 403);
+  assert.ok((await E.definirRecebeAmistosos(db, 'eu', { action: 'time_amistosos', timeId: 'eu_1', receber: false })).ok);
+  assert.deepEqual(db.gravados, [{ id: 'eu_1', dados: { semAmistosos: true } }]);
+  assert.equal(E.entraNaLista('x_1', { semAmistosos: true, membros: ['x'] }, 'eu', 'eu_1'), false);
+  assert.equal(E.entraNaLista('x_1', { semAmistosos: false, membros: ['x'] }, 'eu', 'eu_1'), true);
+});
+
 test('modalidade: entra quem joga ela em qualquer posição da lista; times antigos pela principal', async () => {
   const times = {
     eu_1: { membros: ['eu'], cidade: PALMAS },

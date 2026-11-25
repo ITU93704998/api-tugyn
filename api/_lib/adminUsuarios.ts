@@ -263,6 +263,34 @@ export interface Estatisticas {
   partidas: number | null;
   desafios: number | null;
   moderacao: { denunciasAbertas: number | null; revisoesAbertas: number | null };
+  /** Retenção por semana de cadastro (as mais recentes primeiro). */
+  retencao: CoorteRetencao[];
+  /** Funil de ativação dos cadastros recentes; null quando a leitura falhou. */
+  funil: Funil | null;
+}
+
+/** Voltou depois de N dias: quantos podiam ter voltado (conta com N dias ou mais) e quantos voltaram. null = ninguém ainda pode. */
+export type MarcoRetencao = { elegiveis: number; voltaram: number } | null;
+
+export interface CoorteRetencao {
+  /** Segunda-feira da semana de cadastro (AAAA-MM-DD, Brasília). */
+  semana: string;
+  cadastros: number;
+  d1: MarcoRetencao;
+  d7: MarcoRetencao;
+  d30: MarcoRetencao;
+}
+
+export interface Funil {
+  /** Janela dos cadastros considerados: de `desdeDias` até `ateDias` dias atrás (a folga dá tempo de a pessoa começar). */
+  desdeDias: number;
+  ateDias: number;
+  contas: number;
+  perfil: number;
+  turma: number;
+  jogou: number;
+  /** Passou do limite de leitura: só as contas mais recentes entraram. */
+  parcial: boolean;
 }
 
 const diaNoFuso = (() => {
@@ -306,12 +334,134 @@ export function resumirContas(
   return { total, ativos, cadastros: { semana: soma(serie.slice(-7)), mes: soma(serie), porDia: serie } };
 }
 
-async function* lerContas(auth: Auth): AsyncGenerator<{ criadaEm: number; ultimoUso: number } | "limite"> {
+export const SEMANAS_RETENCAO = 12;
+const MARCOS = [1, 7, 30] as const;
+
+/** Segunda-feira (AAAA-MM-DD) da semana de um dia civil "AAAA-MM-DD". */
+export const segundaDaSemana = (dia: string): string => {
+  const d = new Date(`${dia}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.toISOString().slice(0, 10);
+};
+
+/**
+ * Retenção por semana de cadastro, a partir do Auth (criação e último uso). "Voltou depois de N dias" = o último uso é pelo menos
+ * N dias depois da criação: a pessoa usou o app em algum momento depois desse prazo (só temos o ÚLTIMO uso, não cada abertura).
+ * Só conta como elegível quem já tem N dias de conta. Pura: testada sem Auth.
+ */
+export function retencaoPorCoorte(contas: Iterable<{ criadaEm: number; ultimoUso: number }>, agora: number, semanas = SEMANAS_RETENCAO): CoorteRetencao[] {
+  const atual = segundaDaSemana(diaNoFuso(agora));
+  const chaves: string[] = [];
+  for (let i = 0; i < semanas; i++) {
+    const d = new Date(`${atual}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - 7 * i);
+    chaves.push(d.toISOString().slice(0, 10));
+  }
+  type Acc = { cadastros: number; marcos: Record<number, { elegiveis: number; voltaram: number }> };
+  const mapa = new Map<string, Acc>(chaves.map((k) => [k, { cadastros: 0, marcos: { 1: { elegiveis: 0, voltaram: 0 }, 7: { elegiveis: 0, voltaram: 0 }, 30: { elegiveis: 0, voltaram: 0 } } }]));
+  for (const c of contas) {
+    if (!(c.criadaEm > 0) || c.criadaEm > agora) continue;
+    const acc = mapa.get(segundaDaSemana(diaNoFuso(c.criadaEm)));
+    if (!acc) continue;
+    acc.cadastros++;
+    for (const n of MARCOS) {
+      if (agora - c.criadaEm < n * DIA_MS) continue;
+      acc.marcos[n].elegiveis++;
+      if (c.ultimoUso - c.criadaEm >= n * DIA_MS) acc.marcos[n].voltaram++;
+    }
+  }
+  const marco = (m: { elegiveis: number; voltaram: number }): MarcoRetencao => (m.elegiveis > 0 ? { ...m } : null);
+  return chaves.map((semana) => {
+    const a = mapa.get(semana)!;
+    return { semana, cadastros: a.cadastros, d1: marco(a.marcos[1]), d7: marco(a.marcos[7]), d30: marco(a.marcos[30]) };
+  });
+}
+
+export const FUNIL_DESDE_DIAS = 90;
+export const FUNIL_ATE_DIAS = 7;
+const FUNIL_MAX_CONTAS = 5000;
+
+/** Contas criadas na janela do funil (as mais recentes primeiro, até o limite). Pura. */
+export function contasDoFunil(contas: Array<{ uid: string; criadaEm: number }>, agora: number): { uids: string[]; parcial: boolean } {
+  const desde = agora - FUNIL_DESDE_DIAS * DIA_MS, ate = agora - FUNIL_ATE_DIAS * DIA_MS;
+  const naJanela = contas.filter((c) => c.criadaEm >= desde && c.criadaEm <= ate).sort((a, b) => b.criadaEm - a.criadaEm);
+  return { uids: naJanela.slice(0, FUNIL_MAX_CONTAS).map((c) => c.uid), parcial: naJanela.length > FUNIL_MAX_CONTAS };
+}
+
+/** Junta as etapas do funil. Pura: cada etapa só conta quem também passou pelas anteriores. */
+export function resumirFunil(uids: string[], comPerfil: Set<string>, emTurma: Set<string>, jogaram: Set<string>, parcial: boolean): Funil {
+  let perfil = 0, turma = 0, jogou = 0;
+  for (const uid of uids) {
+    if (!comPerfil.has(uid)) continue;
+    perfil++;
+    if (!emTurma.has(uid)) continue;
+    turma++;
+    if (jogaram.has(uid)) jogou++;
+  }
+  return { desdeDias: FUNIL_DESDE_DIAS, ateDias: FUNIL_ATE_DIAS, contas: uids.length, perfil, turma, jogou, parcial };
+}
+
+/** Até 30 valores por array-contains-any (limite do Firestore). */
+export const LOTE_TURMAS = 30;
+/** Divide os uids em lotes para a consulta de turmas (função pura, testada). */
+export function lotesDeUids(uids: string[], tamanho = LOTE_TURMAS): string[][] {
+  const lotes: string[][] = [];
+  for (let i = 0; i < uids.length; i += tamanho) lotes.push(uids.slice(i, i + tamanho));
+  return lotes;
+}
+
+/**
+ * Lê o que o funil precisa: perfis (só o campo de jogos) e as turmas DESSAS contas.
+ * As turmas vêm por array-contains-any em lotes de 30 (índice de participantes que o app já usa): só são lidas turmas
+ * que têm alguma conta da janela, nunca a coleção inteira. NÃO há teto fixo de leituras: cada turma devolvida em cada
+ * lote conta como leitura, uma turma com contas em vários lotes volta várias vezes e uma conta pode estar em várias
+ * turmas. O custo depende desses vínculos e pode passar do número de contas; o log admin_funil_leituras mede o real.
+ * `amostraParcial` = a leitura do Auth parou no limite: o funil sai marcado como parcial.
+ */
+async function calcularFunil(db: Firestore, contas: Array<{ uid: string; criadaEm: number }>, agora: number, amostraParcial = false): Promise<Funil | null> {
+  try {
+    const janela = contasDoFunil(contas, agora);
+    const uids = janela.uids;
+    const parcial = janela.parcial || amostraParcial;
+    const comPerfil = new Set<string>(), jogaram = new Set<string>(), emTurma = new Set<string>();
+    const alvo = new Set(uids);
+    for (let i = 0; i < uids.length; i += 100) {
+      const refs = uids.slice(i, i + 100).map((uid) => db.doc(`users/${uid}`));
+      const snaps = await db.getAll(...refs, { fieldMask: ["estatisticas.jogos"] });
+      for (const snap of snaps) {
+        if (!snap.exists) continue;
+        comPerfil.add(snap.id);
+        const jogos = (snap.get("estatisticas.jogos") as unknown);
+        if (typeof jogos === "number" && jogos > 0) jogaram.add(snap.id);
+      }
+    }
+    // Só as contas que passaram da etapa do perfil interessam para "em turma".
+    const lotes = lotesDeUids(uids.filter((uid) => comPerfil.has(uid)));
+    let leiturasTurmas = 0;
+    for (let i = 0; i < lotes.length; i += 10) {
+      const respostas = await Promise.all(lotes.slice(i, i + 10).map((lote) => db.collection("turmas").where("participantes", "array-contains-any", lote).select("participantes").get()));
+      for (const r of respostas) for (const t of r.docs) {
+        leiturasTurmas++;
+        const lista = t.get("participantes") as unknown;
+        if (Array.isArray(lista)) for (const uid of lista) if (typeof uid === "string" && alvo.has(uid)) emTurma.add(uid);
+      }
+    }
+    // Só números, para acompanhar o custo do funil conforme a base cresce.
+    console.info(JSON.stringify({ evt: "admin_funil_leituras", perfis: uids.length, lotesTurmas: lotes.length, turmas: leiturasTurmas }));
+    return resumirFunil(uids, comPerfil, emTurma, jogaram, parcial);
+  } catch (erro) {
+    console.error(JSON.stringify({ evt: "admin_funil_falhou", message: (erro as Error)?.message ?? String(erro) }));
+    return null;
+  }
+}
+
+async function* lerContas(auth: Auth): AsyncGenerator<{ uid: string; criadaEm: number; ultimoUso: number } | "limite"> {
   let pagina: string | undefined;
   for (let i = 0; i < AUTH_PAGINAS_MAX; i++) {
     const r = await auth.listUsers(AUTH_PAGINA, pagina);
     for (const u of r.users) {
       yield {
+        uid: u.uid,
         criadaEm: dataDoAuth(u.metadata?.creationTime),
         ultimoUso: dataDoAuth(u.metadata?.lastRefreshTime) || dataDoAuth(u.metadata?.lastSignInTime),
       };
@@ -351,12 +501,15 @@ export async function calcularEstatisticas(db: Firestore, auth: Auth, agora = Da
   ]);
 
   let completo = true;
-  const lidas: Array<{ criadaEm: number; ultimoUso: number }> = [];
+  const lidas: Array<{ uid: string; criadaEm: number; ultimoUso: number }> = [];
   for await (const c of lerContas(auth)) {
     if (c === "limite") completo = false;
     else lidas.push(c);
   }
   const contas = resumirContas(lidas, agora);
+  const retencao = retencaoPorCoorte(lidas, agora);
+  // Leitura do Auth parou no limite: retenção e funil ficam sobre uma amostra (o painel avisa por contas.completo).
+  const funil = await calcularFunil(db, lidas, agora, !completo);
   const [perfis, suspensos, turmas, encerradas, inativas, ambas, comAtividade, times, partidas, desafios, denuncias, revisoes] = await contagens;
   // Ativa = nem status "encerrada" nem ativo false (documentos antigos sem status contam como ativos, como no app).
   const ativas = turmas === null || encerradas === null || inativas === null || ambas === null ? null : Math.max(0, turmas - encerradas - inativas + ambas);
@@ -372,6 +525,8 @@ export async function calcularEstatisticas(db: Firestore, auth: Auth, agora = Da
     partidas,
     desafios,
     moderacao: { denunciasAbertas: denuncias, revisoesAbertas: revisoes },
+    retencao,
+    funil,
   };
 }
 

@@ -48,6 +48,11 @@ export interface PedidoIndexar {
   action: "time_indexar";
   timeId: string;
 }
+export interface PedidoRecebeAmistosos {
+  action: "time_amistosos";
+  timeId: string;
+  receber: boolean;
+}
 export interface PedidoVitrine {
   action: "time_vitrine";
   timeId: string;
@@ -80,6 +85,12 @@ export const parseVitrine = (b: Record<string, unknown>): Parse<PedidoVitrine> =
   if (typeof b.timeId !== "string" || !TIME_ID.test(b.timeId)) return { ok: false, error: "Time inválido." };
   if (typeof b.visivel !== "boolean") return { ok: false, error: "Escolha inválida." };
   return { ok: true, value: { action: "time_vitrine", timeId: b.timeId, visivel: b.visivel } };
+};
+
+export const parseRecebeAmistosos = (b: Record<string, unknown>): Parse<PedidoRecebeAmistosos> => {
+  if (typeof b.timeId !== "string" || !TIME_ID.test(b.timeId)) return { ok: false, error: "Time inválido." };
+  if (typeof b.receber !== "boolean") return { ok: false, error: "Escolha inválida." };
+  return { ok: true, value: { action: "time_amistosos", timeId: b.timeId, receber: b.receber } };
 };
 
 type Doc = Record<string, unknown>;
@@ -126,9 +137,9 @@ export const filtrosDaRegiao = (cidade: unknown, regiao: Regiao): [string, strin
   return city && state ? [["cidade.city", city], ["cidade.state", state]] : null;
 };
 
-/** Fica fora: o time de referência, os times em que quem pergunta está, os ocultos pelo dono. */
+/** Fica fora: o time de referência, os times em que quem pergunta está, os ocultos pelo dono e os que pausaram os convites. */
 export const entraNaLista = (id: string, d: Doc, uid: string, referenciaId: string): boolean =>
-  id !== referenciaId && d.ocultoNaBusca !== true && !(Array.isArray(d.membros) && d.membros.includes(uid));
+  id !== referenciaId && d.ocultoNaBusca !== true && d.semAmistosos !== true && !(Array.isArray(d.membros) && d.membros.includes(uid));
 
 /** Modalidade (qualquer uma do time) e nome (o índice traz candidatos; aqui confere com o nome atual). */
 export const passaNosFiltros = (d: Doc, modalidade: string, busca: string): boolean =>
@@ -243,4 +254,18 @@ export const definirVitrine = async (db: Firestore, uid: string, p: PedidoVitrin
   if (time.get("donoId") !== uid) return negar(403, "nao-dono", "Só o dono muda isso.");
   await ref.update({ ocultoNaBusca: !p.visivel });
   return { ok: true, body: { visivel: p.visivel } };
+};
+
+/**
+ * O dono pausa (ou volta a aceitar) convites de amistoso para o time (`semAmistosos`, gravado só aqui).
+ * Pausado: ninguém consegue propor amistoso a ele e ele sai de "Explorar adversários". Os convites que já chegaram
+ * e os jogos marcados continuam valendo; o próprio time ainda pode convidar outros.
+ */
+export const definirRecebeAmistosos = async (db: Firestore, uid: string, p: PedidoRecebeAmistosos): Promise<Resultado> => {
+  const ref = db.doc(`times/${p.timeId}`);
+  const time = await ref.get();
+  if (!time.exists) return negar(404, "nao-encontrado", "Este time não existe mais.");
+  if (time.get("donoId") !== uid) return negar(403, "nao-dono", "Só o dono muda isso.");
+  await ref.update({ semAmistosos: !p.receber });
+  return { ok: true, body: { receber: p.receber } };
 };

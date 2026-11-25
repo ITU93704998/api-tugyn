@@ -20,7 +20,7 @@ import {
 import { DEDUPE_MS, type PushDraft } from "./push";
 import { type Aviso, COLECAO_AVISOS, avisoPendente, enviarAviso } from "./pushEnvio";
 import { isValidLinkId, timeDoDocumento } from "./timeLink";
-import { type PedidoExplorar, type PedidoIndexar, type PedidoVitrine, definirVitrine, explorarTimes, indexarNome, parseExplorar, parseIndexar, parseVitrine } from "./explorarTimes";
+import { type PedidoExplorar, type PedidoIndexar, type PedidoRecebeAmistosos, type PedidoVitrine, definirRecebeAmistosos, definirVitrine, explorarTimes, indexarNome, parseExplorar, parseIndexar, parseRecebeAmistosos, parseVitrine } from "./explorarTimes";
 import { MODALIDADES_TIME, type ModalidadeTime, NOME_MODALIDADE, modalidadePrincipal, modalidadesDoTime, modalidadesEmComum } from "./modalidadesTime";
 
 /**
@@ -44,6 +44,7 @@ import { MODALIDADES_TIME, type ModalidadeTime, NOME_MODALIDADE, modalidadePrinc
  *  - amistoso_apurar { timeId }                                alguém do elenco abre os jogos: aplica os prazos vencidos
  *  - time_explorar { timeId, regiao, modalidade, genero, limite, cursor, busca }   adversários na cidade/estado do time (`explorarTimes.ts`)
  *  - time_vitrine { timeId, visivel }                           o dono tira (ou põe) o time em "Explorar adversários"
+ *  - time_amistosos { timeId, receber }                         o dono pausa (ou volta a aceitar) convites de amistoso
  *  - time_indexar { timeId }                                    atualiza as palavras do nome para a busca (depois de criar/renomear)
  * Regras do resultado em `amistososResultado.ts`. O retrospecto de cada time fica em `times/{id}/resumo/geral`.
  * O amistoso fica em `times/{id}/amistosos/{amistosoId}` com uma cópia em cada time (o elenco de cada um lê a sua; o app
@@ -91,13 +92,14 @@ export type AmistosoRequest =
   | { action: "amistoso_apurar"; timeId: string }
   | PedidoExplorar
   | PedidoVitrine
+  | PedidoRecebeAmistosos
   | PedidoIndexar;
 
 type Parse = { ok: true; value: AmistosoRequest } | { ok: false; error: string };
 
 export const ehAcaoDeAmistoso = (body: unknown): boolean => {
   const action = (body as { action?: unknown } | null)?.action;
-  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_link" || action === "time_encerrar" || action === "time_explorar" || action === "time_vitrine" || action === "time_indexar");
+  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_link" || action === "time_encerrar" || action === "time_explorar" || action === "time_vitrine" || action === "time_amistosos" || action === "time_indexar");
 };
 
 export const normalizarChave = (valor: unknown): string | null => {
@@ -193,6 +195,8 @@ export const parseAmistosoBody = (body: unknown): Parse => {
       return parseIndexar(b);
     case "time_vitrine":
       return parseVitrine(b);
+    case "time_amistosos":
+      return parseRecebeAmistosos(b);
     default:
       return { ok: false, error: "Ação inválida." };
   }
@@ -238,6 +242,7 @@ export const timePublico = (timeId: string, d: Doc, uid: string) => {
     chave: texto(d.chave, TAMANHO_CHAVE),
     souDono: d.donoId === uid,
     souMembro: membros.includes(uid),
+    recebeAmistosos: d.semAmistosos !== true,
   };
 };
 
@@ -285,6 +290,7 @@ export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
   if (!c.adversario) return negar(404, "time-inexistente", "Este time não existe mais.");
   if (c.adversarioId === c.meuId) return negar(400, "mesmo-time", "Escolha outro time.");
   if (c.adversario.donoId === c.uid) return negar(400, "mesmo-dono", "Os dois times são seus.");
+  if (c.adversario.semAmistosos === true) return negar(403, "sem-amistosos", "Este time não está recebendo convites de amistoso agora.");
   if (modalidadesEmComum(c.meu, c.adversario).length === 0) return negar(400, "modalidade", "Os dois times não jogam nenhuma modalidade em comum.");
   if (!modalidadeDoJogo(c.meu, c.adversario, c.modalidade ?? "")) return negar(400, "modalidade", "Escolha uma modalidade que os dois times jogam.");
   if (c.bloqueio) return negar(403, "bloqueado", "Não é possível marcar amistoso com este time.");
@@ -898,6 +904,8 @@ export const executarAmistoso = (db: Firestore, uid: string, pedido: AmistosoReq
       });
     case "time_vitrine":
       return definirVitrine(db, uid, pedido);
+    case "time_amistosos":
+      return definirRecebeAmistosos(db, uid, pedido);
     case "time_indexar":
       return indexarNome(db, uid, pedido);
   }

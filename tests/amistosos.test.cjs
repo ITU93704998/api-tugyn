@@ -62,6 +62,8 @@ test('propor: dono, outro time, outro dono, mesma modalidade, sem bloqueio, praz
   assert.equal(A.motivoParaNaoPropor(cenario({ adversario: null })).code, 'time-inexistente');
   assert.equal(A.motivoParaNaoPropor(cenario({ adversarioId: 'dono_1' })).code, 'mesmo-time');
   assert.equal(A.motivoParaNaoPropor(cenario({ adversario: time({ donoId: 'dono' }) })).code, 'mesmo-dono');
+  assert.equal(A.motivoParaNaoPropor(cenario({ adversario: time({ donoId: 'rival', semAmistosos: true }) })).code, 'sem-amistosos', 'time que pausou os convites não recebe');
+  assert.equal(A.motivoParaNaoPropor(cenario({ adversario: time({ donoId: 'rival', semAmistosos: false }) })), null);
   assert.equal(A.motivoParaNaoPropor(cenario({ adversario: time({ donoId: 'rival', modalidade: 'futsal' }) })).code, 'modalidade');
   // Várias modalidades: basta uma em comum; a escolhida precisa ser dos dois.
   const futsalESociety = time({ donoId: 'rival', modalidade: 'futsal', modalidades: ['futsal', 'society'] });
@@ -326,4 +328,12 @@ test('forma do time: a letra nova entra na frente, guarda só 5 e ignora valores
   assert.deepEqual([...A.formaComResultado(['V', 'V', 'E', 'D', 'V'], 0, 3)], ['D', 'V', 'V', 'E', 'D']);
   assert.deepEqual([...A.formaComResultado(['X', 'V', 7], 3, 0)], ['V', 'V']);
   assert.equal(A.MAX_FORMA, 5);
+});
+
+test('dados públicos: recebeAmistosos acompanha a pausa do dono', () => {
+  assert.equal(A.timePublico('t_1', time({ donoId: 'rival' }), 'x').recebeAmistosos, true);
+  assert.equal(A.timePublico('t_1', time({ donoId: 'rival', semAmistosos: true }), 'x').recebeAmistosos, false);
+  assert.equal(A.parseAmistosoBody({ action: 'time_amistosos', timeId: 'dono_1', receber: 'sim' }).ok, false);
+  assert.equal(A.parseAmistosoBody({ action: 'time_amistosos', timeId: 'dono_1', receber: false }).value.receber, false);
+  assert.ok(A.ehAcaoDeAmistoso({ action: 'time_amistosos' }));
 });
