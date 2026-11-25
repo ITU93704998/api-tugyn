@@ -53,6 +53,7 @@ import { limparReservasDeMidia } from "./_lib/midiaReservasJob";
 import { processarPendencias } from "./_lib/recalculos";
 import { dentroDoLimite } from "./_lib/rateLimit";
 import { FUNCAO_DESLIGADA, lerConfig, registrarRotina } from "./_lib/sistema";
+import { enviarSinalDeVida } from "./_lib/sinalDeVida";
 
 /**
  * POST /api/desafios   (corpo: { action, ... }, cabeçalho: Authorization: Bearer <login do Firebase>)
@@ -665,6 +666,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         problemas,
         resumo: { reavisos: resumo.reavisos, exclusoesPendentes: resumo.exclusoesPendentes, atrasoMaxMs: resumo.atrasoMaxMs },
       });
+      // Monitor externo (HEARTBEAT_URL): avisa se a rotina falhar ou deixar de rodar.
+      await enviarSinalDeVida(problemas.length === 0, problemas);
       if (problemas.length) {
         // Sucesso parcial NÃO responde 200: a Vercel registra a execução como falha e o log traz o motivo.
         console.error(JSON.stringify({ evt: "desafios_rotina_incompleta", problemas, ...resumo }));
@@ -679,6 +682,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       } catch {
         // sem Firestore: só o log acima
       }
+      await enviarSinalDeVida(false, ["falha_geral"]);
       return res.status(500).json({ error: "Falha na rotina." });
     }
   }

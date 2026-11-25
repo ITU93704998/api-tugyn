@@ -38,6 +38,8 @@ Tudo certo → `200` e o log `desafios_rotina` com as contagens, `atrasoMaxMs` e
 - `account_delete_stuck`
 - `rotina_etapa_falhou`
 
+**Monitor externo (sinal de vida).** Com `HEARTBEAT_URL` configurada (endereço https de ping, ex.: Healthchecks.io), a rotina envia um POST ao terminar: no endereço quando completa, em `<endereço>/fail` quando parcial ou com erro (corpo = só os códigos dos problemas). O monitor avisa se o sinal não chegar no prazo (período de 1 dia, tolerância de 1 h). Sem a variável, nada é enviado. Código: `_lib/sinalDeVida.ts`.
+
 ### Checklist de produção
 
 - [ ] **Plano da Vercel.** O cron precisa estar disponível no plano. A duração máxima precisa aceitar `maxDuration: 60`; no Hobby, o cron roda 1x por dia e o horário pode variar dentro da hora.
