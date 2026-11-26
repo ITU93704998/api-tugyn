@@ -2,16 +2,21 @@ import { Timestamp } from "firebase-admin/firestore";
 
 /**
  * Resultado dos amistosos (regras puras, testadas). Fluxo:
- *  1. Depois do horário do jogo, o dono de um dos times informa o placar: o outro tem `PRAZO_PLACAR_MS` para confirmar.
+ *  1. Depois do horário do jogo, o dono (ou o capitão) de um dos times informa o placar: o outro tem `PRAZO_PLACAR_MS` para confirmar.
  *  2. O outro pode não concordar UMA vez, informando outro placar: abre mais `PRAZO_PLACAR_MS` para o primeiro.
- *  3. Se o primeiro também não concordar, o jogo fica "sem acordo" e os dois times não podem mais se enfrentar.
+ *  3. Se o primeiro também não concordar, o jogo fica "sem acordo": não conta, e os dois times esperam
+ *     `ESPERA_SEM_ACORDO_MS` para marcar outro amistoso entre eles.
  *  4. Sem resposta dentro do prazo, o placar enviado vale (quem ficou calado aceitou).
- *  5. Confirmado ("finalizado"), cada dono marca quem fez os gols do próprio time por `PRAZO_ARTILHEIROS_MS` (pode corrigir).
+ *  5. Confirmado ("finalizado"), o dono (ou o capitão) de cada time marca quem fez os gols do próprio time por
+ *     `PRAZO_ARTILHEIROS_MS` (pode corrigir).
  * Jogo confirmado que ninguém finaliza em `PRAZO_FINALIZAR_MS` vira "sem placar" (não conta no resumo; libera outro amistoso).
  * Os prazos valem pela hora de agora (`efetivo`): a API aplica quando alguém age ou pede a apuração.
  */
 
-export const PRAZO_PLACAR_MS = 3600_000;
+/** 12 horas para confirmar (ou contestar) o placar: depois do jogo, ninguém responde em 1 hora (vestiário, volta para casa, noite). */
+export const PRAZO_PLACAR_MS = 12 * 3600_000;
+/** Sem acordo no placar: os dois times esperam 30 dias para marcar outro amistoso entre eles (antes era para sempre). */
+export const ESPERA_SEM_ACORDO_MS = 30 * 24 * 3600_000;
 export const PRAZO_FINALIZAR_MS = 3 * 24 * 3600_000;
 export const PRAZO_ARTILHEIROS_MS = 7 * 24 * 3600_000;
 export const MAX_GOLS = 99;
@@ -105,7 +110,17 @@ const golsValidos = (n: unknown): n is number => Number.isInteger(n) && (n as nu
 export const placarDoDocumento = (a: Doc, meuId: string, golsMeu: number, golsOutro: number) =>
   ladoId(a, "de") === meuId ? { golsDe: golsMeu, golsPara: golsOutro } : { golsDe: golsOutro, golsPara: golsMeu };
 
-const ehDono = (uid: string, meu: Doc | null): boolean => Boolean(meu && meu.donoId === uid);
+/**
+ * Quem cuida do placar e dos gols do time: o dono ou o capitão (camisa com `capitao: true`, que só o dono define; as regras
+ * do Firestore não deixam o próprio jogador se marcar). Assim o placar sai mesmo quando o dono não foi ao jogo.
+ */
+export const cuidaDoPlacar = (uid: string, meu: Doc | null): boolean => {
+  if (!meu || !uid) return false;
+  if (meu.donoId === uid) return true;
+  const membros = Array.isArray(meu.membros) ? (meu.membros as unknown[]) : [];
+  const camisas = (meu.camisas && typeof meu.camisas === "object" ? meu.camisas : {}) as Record<string, Doc | undefined>;
+  return membros.includes(uid) && camisas[uid]?.capitao === true;
+};
 
 /** Informar o placar (finalizar a partida) ou, na 1ª rodada do outro time, não concordar mandando outro placar. */
 export const motivoParaNaoInformarPlacar = (
@@ -117,7 +132,7 @@ export const motivoParaNaoInformarPlacar = (
   golsMeu: unknown,
   golsOutro: unknown,
 ): Negado | null => {
-  if (!ehDono(uid, meu)) return negar(403, "nao-dono", "Só o dono do time informa o placar.");
+  if (!cuidaDoPlacar(uid, meu)) return negar(403, "nao-dono", "Só o dono ou o capitão do time informa o placar.");
   if (!a || !envolve(a, meuId)) return negar(404, "inexistente", "Este amistoso não existe mais.");
   if (!golsValidos(golsMeu) || !golsValidos(golsOutro)) return negar(400, "placar-invalido", `Placar inválido (de 0 a ${MAX_GOLS} gols).`);
   const { status } = efetivo(a, agora);
@@ -140,7 +155,7 @@ export const motivoParaNaoInformarPlacar = (
 
 /** Confirmar o placar que o OUTRO time informou. */
 export const motivoParaNaoConfirmarPlacar = (uid: string, agora: number, meuId: string, meu: Doc | null, a: Doc | null): Negado | null => {
-  if (!ehDono(uid, meu)) return negar(403, "nao-dono", "Só o dono do time confirma o placar.");
+  if (!cuidaDoPlacar(uid, meu)) return negar(403, "nao-dono", "Só o dono ou o capitão do time confirma o placar.");
   if (!a || !envolve(a, meuId)) return negar(404, "inexistente", "Este amistoso não existe mais.");
   const { status } = efetivo(a, agora);
   if (status === "finalizado") return negar(409, "finalizado", "O placar deste amistoso já foi confirmado.");
@@ -174,7 +189,7 @@ export const motivoParaNaoMarcarArtilheiros = (
   a: Doc | null,
   gols: Record<string, number>,
 ): Negado | null => {
-  if (!ehDono(uid, meu)) return negar(403, "nao-dono", "Só o dono do time marca quem fez os gols.");
+  if (!cuidaDoPlacar(uid, meu)) return negar(403, "nao-dono", "Só o dono ou o capitão do time marca quem fez os gols.");
   if (!a || !envolve(a, meuId)) return negar(404, "inexistente", "Este amistoso não existe mais.");
   if (String(a.status) !== "finalizado") return negar(409, "nao-finalizado", "Só depois de o placar ser confirmado.");
   if (millis(a.finalizadoEm) + PRAZO_ARTILHEIROS_MS < agora) return negar(409, "prazo", "O prazo para marcar quem fez os gols (7 dias) acabou.");

@@ -185,7 +185,7 @@ export const criar = async (db: Firestore, uid: string, pedido: Extract<DesafioR
       dmDesafiado: dmB?.exists ? (dmB.data() ?? null) : null,
     });
     if (!auth.ok) return auth;
-    // Recriar só depois de cancelado (`autorizarCriacao` já nega os outros casos).
+    // Recriar só depois de cancelado ou expirado (`autorizarCriacao` já nega os outros casos).
     tx.set(ref, { ...auth.dados, criadoEm: FieldValue.serverTimestamp(), atualizadoEm: FieldValue.serverTimestamp() });
     // Vagas: regrava o mapa só com as válidas + a nova (o documento não cresce com vagas vencidas).
     const venceEm = vagaVenceEm(auth.dados, "pendente");

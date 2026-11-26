@@ -26,6 +26,7 @@ import {
 import { consultarRecibos, recuperarAvisosPendentes, enviarAviso } from "./_lib/pushEnvio";
 import { avancarCampanhasPendentes } from "./_lib/notificacoesGerais";
 import { dentroDoLimite } from "./_lib/rateLimit";
+import { ehVesperaDeJogo } from "./_lib/desafios";
 
 /**
  * POST /api/push   (corpo: { action, ... }, cabeçalho: Authorization: Bearer <login do Firebase>)
@@ -42,6 +43,7 @@ import { dentroDoLimite } from "./_lib/rateLimit";
  * Uma rota só (o plano gratuito da Vercel limita o número de funções). O uid vem SEMPRE do login; o destinatário vem SEMPRE do Firestore.
  */
 const TOKENS = "pushTokens";
+const DIA_MS = 24 * 3600_000;
 
 const registrar = async (db: Firestore, uid: string, token: string, platform: string): Promise<string> => {
   const ref = db.doc(`${TOKENS}/${tokenDocId(token)}`);
@@ -182,20 +184,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const turmaSnap = await db.doc(`turmas/${request.turmaId}`).get();
     const turma = turmaSnap.exists ? (turmaSnap.data() ?? null) : null;
 
+    // Partida de amanhã: só na véspera de verdade (dia e horário da turma), nunca só porque o app disse.
+    if ((request.evento === "presenca_confirmada" || request.evento === "partida_aberta") && request.amanha && !ehVesperaDeJogo(turma, Date.now())) {
+      return res.status(409).json({ error: "A partida de amanhã ainda não pode ser aberta." });
+    }
+
     if (request.evento === "presenca_confirmada") {
-      const { id: diaId } = diaDeBrasilia(Date.now());
+      const { id: diaId } = diaDeBrasilia(Date.now() + (request.amanha ? DIA_MS : 0));
       const jogoSnap = await db.doc(`turmas/${request.turmaId}/jogos/${diaId}`).get();
-      const auth = authorizeAttendanceConfirmed(user.uid, request.turmaId, diaId, turma, jogoSnap.exists ? (jogoSnap.data() ?? null) : null);
+      const auth = authorizeAttendanceConfirmed(user.uid, request.turmaId, diaId, turma, jogoSnap.exists ? (jogoSnap.data() ?? null) : null, request.amanha);
       if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
       const resultado = await enviarAviso(db, { evento: "presenca_confirmada", turmaId: request.turmaId, dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_PARTIDA_MS, recipientUids: [auth.recipientUid], dedupeUid: user.uid, draft: auth.draft });
       return res.status(200).json(resultado);
     }
 
     if (request.evento === "partida_aberta") {
-      // O "hoje" é o do SERVIDOR (Brasília): o app não escolhe o dia. A partida de hoje tem que existir, estar aberta e ter sido aberta por quem chama.
-      const { id: diaId } = diaDeBrasilia(Date.now());
+      // O dia é o do SERVIDOR (Brasília): o app só diz se é a partida de hoje ou a de amanhã (aberta na véspera). Ela tem que existir,
+      // estar aberta e ter sido aberta por quem chama.
+      const { id: diaId } = diaDeBrasilia(Date.now() + (request.amanha ? DIA_MS : 0));
       const jogoSnap = await db.doc(`turmas/${request.turmaId}/jogos/${diaId}`).get();
-      const auth = authorizeGameOpened(user.uid, request.turmaId, diaId, turma, jogoSnap.exists ? (jogoSnap.data() ?? null) : null);
+      const auth = authorizeGameOpened(user.uid, request.turmaId, diaId, turma, jogoSnap.exists ? (jogoSnap.data() ?? null) : null, request.amanha);
       if (!auth.ok) return res.status(auth.status).json({ error: auth.error });
       const resultado = await enviarAviso(db, { evento: "partida_aberta", turmaId: request.turmaId, dedupeKey: auth.dedupeKey, dedupeMs: DEDUPE_PARTIDA_MS, recipientUids: auth.recipientUids, dedupeUid: user.uid, draft: auth.draft });
       return res.status(200).json(resultado);

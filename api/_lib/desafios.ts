@@ -127,6 +127,15 @@ export interface DiaInfo {
   fimMs: number;
 }
 
+/**
+ * Véspera do jogo: amanhã é dia de jogo da turma (com horário válido) e já faltam 24 horas ou menos para ele, a mesma janela em
+ * que o app deixa abrir a partida de amanhã. Confere o `amanha` que o app manda nos avisos da partida.
+ */
+export const ehVesperaDeJogo = (turma: Dados, agoraMs: number): boolean => {
+  const amanha = partidaDeHoje(turma, agoraMs + 24 * 3600_000);
+  return amanha !== null && agoraMs >= amanha.partidaMs - 24 * 3600_000;
+};
+
 /** A partida de HOJE da turma (dia de jogo e horário válido), ou null. */
 export const partidaDeHoje = (turma: Dados, agoraMs: number): DiaInfo | null => {
   const m = typeof turma?.horario === "string" ? /^(\d{1,2}):(\d{2})$/.exec(turma.horario.trim()) : null;
@@ -144,6 +153,21 @@ export const partidaDeHoje = (turma: Dados, agoraMs: number): DiaInfo | null => 
     partidaMs: inicio + (Number(m[1]) * 60 + Number(m[2])) * 60_000,
     fimMs: inicio + DIA_MS,
   };
+};
+
+/**
+ * A partida que vale para um desafio do dia: a de hoje (enquanto não começou) ou, na véspera, a de amanhã (24 h antes do
+ * horário, a mesma janela em que a partida de amanhã pode ser aberta). Depois do horário de hoje, sem véspera: a de hoje
+ * (para o aviso de "muito em cima").
+ */
+export const partidaParaDesafio = (turma: Dados, agoraMs: number): (DiaInfo & { amanha: boolean }) | null => {
+  const hoje = partidaDeHoje(turma, agoraMs);
+  if (hoje && agoraMs < hoje.partidaMs) return { ...hoje, amanha: false };
+  if (ehVesperaDeJogo(turma, agoraMs)) {
+    const amanha = partidaDeHoje(turma, agoraMs + DIA_MS);
+    if (amanha) return { ...amanha, amanha: true };
+  }
+  return hoje ? { ...hoje, amanha: false } : null;
 };
 
 export interface PartidaSalva {
@@ -329,7 +353,7 @@ const MOTIVO_DM = {
 
 export type Criacao = { ok: true; id: string; dados: Record<string, unknown>; draft: PushDraft } | Negado;
 
-/** O período do desafio: temporada (atual com folga mínima, ou a próxima) ou a partida de hoje (até 30 min antes). */
+/** O período do desafio: temporada (atual com folga mínima, ou a próxima) ou a partida do dia (hoje, ou amanhã na véspera; até 30 min antes). */
 const periodoDoDesafio = (
   c: ContextoCriacao,
 ):
@@ -337,8 +361,8 @@ const periodoDoDesafio = (
   | Negado => {
   const temporadaAtual = temporadaInfo(c.agoraMs);
   if (c.tipo === "dia") {
-    const partida = partidaDeHoje(c.turmaDados, c.agoraMs);
-    if (!partida) return negar(409, "sem_partida_hoje", "Esta turma não tem partida hoje.");
+    const partida = partidaParaDesafio(c.turmaDados, c.agoraMs);
+    if (!partida) return negar(409, "sem_partida_hoje", "Esta turma não tem partida hoje (nem amanhã, para desafiar na véspera).");
     if (c.agoraMs > partida.partidaMs - MINUTOS_ANTES_DA_PARTIDA * 60_000) {
       return negar(409, "partida_muito_proxima", `Só dá para desafiar até ${MINUTOS_ANTES_DA_PARTIDA} minutos antes da partida.`);
     }
@@ -346,7 +370,7 @@ const periodoDoDesafio = (
       ok: true,
       chave: partida.chave,
       prazoParaAceitarMs: partida.partidaMs,
-      descricao: `na partida de hoje (${partida.horario})`,
+      descricao: `na partida de ${partida.amanha ? "amanhã" : "hoje"} (${partida.horario})`,
       campos: {
         tipo: "dia",
         dia: partida.dia,
@@ -406,7 +430,8 @@ export const autorizarCriacao = (c: ContextoCriacao): Criacao => {
   if (c.existente) {
     const status = c.existente.status;
     if (status === "recusado") return negar(409, "ja_recusado", `Este atleta já recusou um desafio seu ${nesse}.`);
-    if (status !== "cancelado") return negar(409, "ja_existe", `Vocês já têm um desafio ${nesse}.`);
+    // Cancelado ou expirado (nunca valeu, sem resultado, vaga já liberada): pode desafiar de novo, o doc é sobrescrito.
+    if (status !== "cancelado" && status !== "expirado") return negar(409, "ja_existe", `Vocês já têm um desafio ${nesse}.`);
   }
   if (c.ativosDesafiante >= MAX_DESAFIOS_ATIVOS) {
     return negar(409, "limite_desafiante", `Você já tem ${MAX_DESAFIOS_ATIVOS} desafios ativos. Termine ou cancele algum antes.`);

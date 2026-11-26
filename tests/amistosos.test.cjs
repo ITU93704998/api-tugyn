@@ -90,6 +90,10 @@ test('par de times: em andamento bloqueia; terminado libera; sem acordo bloqueia
   assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('aceito', AGORA - R.PRAZO_FINALIZAR_MS)] })), null);
   assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('finalizado', passado), jogo('cancelado', passado)] })), null);
   assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [jogo('sem_acordo', passado)] })).code, 'sem-acordo');
+  // Sem acordo: 30 dias de espera, contados de quando ficou sem acordo.
+  const semAcordo = (diasAtras) => jogo('sem_acordo', passado, { semAcordoEm: Timestamp.fromMillis(AGORA - diasAtras * 24 * 3600_000) });
+  assert.match(A.motivoParaNaoPropor(cenario({ comEle: [semAcordo(29)] })).error, /a partir de/);
+  assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [semAcordo(31)] })), null);
 });
 
 test('placar: só depois do jogo; o outro confirma ou manda outro uma vez; na 2ª rodada não concordar = sem acordo', () => {
@@ -97,6 +101,11 @@ test('placar: só depois do jogo; o outro confirma ou manda outro uma vez; na 2�
   const rival = time({ donoId: 'rival' });
   assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), base, 2, 1), null);
   assert.equal(R.motivoParaNaoInformarPlacar('ana', AGORA, 'dono_1', time(), base, 2, 1).code, 'nao-dono');
+  // Capitão (camisa marcada pelo dono) também cuida do placar; capitão que saiu do elenco, não.
+  const comCapita = time({ camisas: { ana: { numero: 10, capitao: true } } });
+  assert.equal(R.motivoParaNaoInformarPlacar('ana', AGORA, 'dono_1', comCapita, base, 2, 1), null);
+  assert.equal(R.motivoParaNaoInformarPlacar('ana', AGORA, 'dono_1', { ...comCapita, membros: ['dono'] }, base, 2, 1).code, 'nao-dono');
+  assert.equal(R.motivoParaNaoInformarPlacar('ana', AGORA, 'dono_1', time({ camisas: { ana: { numero: 10 } } }), base, 2, 1).code, 'nao-dono');
   assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), { ...base, quando: Timestamp.fromMillis(AGORA + 60_000) }, 2, 1).code, 'cedo');
   assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), base, 100, 1).code, 'placar-invalido');
   assert.equal(R.motivoParaNaoInformarPlacar('dono', AGORA, 'dono_1', time(), base, 1.5, 1).code, 'placar-invalido');
@@ -117,7 +126,7 @@ test('placar: só depois do jogo; o outro confirma ou manda outro uma vez; na 2�
   assert.equal(R.motivoParaNaoRecusarPlacar('rival', AGORA, 'rival_1', rival, contestado).code, 'proprio');
 });
 
-test('prazos: placar sem resposta em 1 hora vale; jogo confirmado sem placar em 3 dias fica sem placar', () => {
+test('prazos: placar sem resposta em 12 horas vale; jogo confirmado sem placar em 3 dias fica sem placar', () => {
   const placar = { status: 'placar', quando: Timestamp.fromMillis(AGORA - 2 * 3600_000), proposta: { porTimeId: 'dono_1', golsDe: 4, golsPara: 0, rodada: 2, venceEm: Timestamp.fromMillis(AGORA) } };
   assert.deepEqual({ ...R.efetivo(placar, AGORA) }, { status: 'finalizado', resultado: { golsDe: 4, golsPara: 0 } });
   assert.equal(R.efetivo(placar, AGORA - 1).status, 'placar');
@@ -134,6 +143,7 @@ test('artilheiros: dono, só do elenco, soma até o placar do time e por 7 dias'
   assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { ana: 4 }).code, 'soma');
   assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), a, { estranho: 1 }).code, 'jogador');
   assert.equal(R.motivoParaNaoMarcarArtilheiros('ana', AGORA, 'dono_1', time(), a, { ana: 1 }).code, 'nao-dono');
+  assert.equal(R.motivoParaNaoMarcarArtilheiros('ana', AGORA, 'dono_1', time({ camisas: { ana: { capitao: true } } }), a, { ana: 1 }), null);
   assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA + R.PRAZO_ARTILHEIROS_MS, 'dono_1', time(), a, { ana: 1 }).code, 'prazo');
   assert.equal(R.motivoParaNaoMarcarArtilheiros('rival', AGORA, 'rival_1', time({ donoId: 'rival', membros: ['rival', 'zé'] }), a, { 'zé': 2 }).code, 'soma');
   assert.equal(R.motivoParaNaoMarcarArtilheiros('dono', AGORA, 'dono_1', time(), { ...a, status: 'placar' }, { ana: 1 }).code, 'nao-finalizado');
@@ -213,8 +223,9 @@ test('avisos: texto e destino (abre o time na aba Jogos)', () => {
   assert.deepEqual({ ...novo.data }, { tipo: 'time_amistoso', turmaId: '', timeId: 'rival_1' });
   assert.equal(A.avisoDeAmistoso('aceito', amistoso, { nome: 'Rivais' }, 'dono_1').title, 'Amistoso confirmado!');
   const comPlacar = { ...amistoso, de: { nome: 'Os Brabos' }, para: { nome: 'Rivais' }, proposta: { porTimeId: 'dono_1', golsDe: 3, golsPara: 2, rodada: 1 } };
-  assert.equal(A.avisoDeAmistoso('placar', comPlacar, { nome: 'Os Brabos' }, 'rival_1').body, 'Os Brabos informou o placar: Os Brabos 3 x 2 Rivais. Confirme em até 1 hora.');
-  assert.match(A.avisoDeAmistoso('sem_acordo', comPlacar, { nome: 'Rivais' }, 'dono_1').body, /não podem mais se enfrentar/);
+  assert.equal(A.avisoDeAmistoso('placar', comPlacar, { nome: 'Os Brabos' }, 'rival_1').body, 'Os Brabos informou o placar: Os Brabos 3 x 2 Rivais. Confirme em até 12 horas.');
+  assert.equal(R.PRAZO_PLACAR_MS, 12 * 3600_000);
+  assert.match(A.avisoDeAmistoso('sem_acordo', comPlacar, { nome: 'Rivais' }, 'dono_1').body, /daqui a 30 dias/);
 });
 
 test('artilheiros: quem saiu do time mantém e pode ter os gols corrigidos; estranho continua barrado', () => {

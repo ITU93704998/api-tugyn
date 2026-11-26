@@ -235,3 +235,38 @@ test('revalidação AUD-04: revisão malformada é recusada; partida nova aceita
   const outra = await enviar(fakeDb(base()).db, 'org', { ...corpo(ANA1), revisaoEsperada: 3 });
   assert.equal(outra.code, 'partida_desatualizada'); assert.equal(outra.revisaoAtual, 0);
 });
+
+test('faltas: "confirmou e não veio" é gravado, sem quem jogou, sem repetir e em ordem; não mexe em estatística', async () => {
+  const { db, docs } = fakeDb(base());
+  const r = await enviar(db, 'org', corpo(ANA1, { faltaram: ['bia', 'ana', 'bia', 'temp'] }));
+  assert.equal(r.ok, true);
+  assert.deepEqual([...docs.get(`${T}/partidas/p1`).faltaram], ['bia', 'temp']);
+  assert.deepEqual([...r.participantesAlterados], ['ana']);
+  assert.equal(docs.get(`${T}/participantes/bia`).jogos, 0);
+});
+
+test('faltas: mudar só as faltas é uma correção (com revisão); reenvio igual não escreve', async () => {
+  const { db, docs, escritas } = fakeDb(base());
+  await enviar(db, 'org', corpo(ANA1, { faltaram: ['bia'] }));
+  const n = escritas.length;
+  assert.equal((await enviar(db, 'org', { ...corpo(ANA1, { faltaram: ['bia'] }), revisaoEsperada: 1 })).alterado, false);
+  assert.equal(escritas.length, n);
+  const semRevisao = await enviar(db, 'org', corpo(ANA1, { faltaram: [] }));
+  assert.equal(semRevisao.ok, false);
+  assert.equal(semRevisao.code, 'partida_desatualizada');
+  const r = await enviar(db, 'org', { ...corpo(ANA1, { faltaram: [] }), revisaoEsperada: 1 });
+  assert.equal(r.alterado, true);
+  assert.deepEqual([...docs.get(`${T}/partidas/p1`).faltaram], []);
+});
+
+test('faltas: app antigo (sem o campo) mantém as gravadas; lista malformada é recusada', async () => {
+  const { db, docs } = fakeDb(base());
+  await enviar(db, 'org', corpo(ANA1, { faltaram: ['bia'] }));
+  const r = await enviar(db, 'org', corpo(ANA1));
+  assert.equal(r.alterado, false);
+  assert.deepEqual([...docs.get(`${T}/partidas/p1`).faltaram], ['bia']);
+  for (const faltaram of ['bia', [7], ['a/b'], Array.from({ length: 101 }, (_, i) => 'u' + i)]) {
+    const p = mod.parsePartidaEnviada(corpo(ANA1, { faltaram }));
+    assert.equal(p.ok, false, JSON.stringify(faltaram).slice(0, 40));
+  }
+});

@@ -10,7 +10,7 @@ const token = 'ExpoPushToken[aaaaaaaaaaa1]';
 function load(file, overrides = {}) {
   const module = { exports: {} };
   const js = ts.transpileModule(fs.readFileSync(path.join(root, file), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const defaults = { 'node:crypto': require('node:crypto'), './validation': { isSafeUid: v => typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(v) } };
+  const defaults = { 'node:crypto': require('node:crypto'), './_lib/desafios': { ehVesperaDeJogo: () => false }, './validation': { isSafeUid: v => typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(v) } };
   vm.runInNewContext(js, {
     module, exports: module.exports, Date, Buffer, process, AbortController, setTimeout, clearTimeout, fetch, console: { log() {}, warn() {}, error() {} },
     require(name) { if (name in overrides) return overrides[name]; if (name in defaults) return defaults[name]; throw Error('Missing mock '+name); },

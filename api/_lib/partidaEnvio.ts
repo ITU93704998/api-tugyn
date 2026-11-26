@@ -17,6 +17,8 @@ import { isSafeUid } from "./validation";
  */
 
 export const MAX_JOGADORES_PARTIDA = 100;
+/** Até quantas faltas ("confirmou e não veio") vão por partida. */
+export const MAX_FALTAS_PARTIDA = 100;
 export const MAX_STAT_POR_PARTIDA = 99;
 const NOME_MAX = 100;
 const HORA_MS = 3_600_000;
@@ -50,6 +52,11 @@ export interface PartidaEnviada {
   gerado: boolean;
   modalidade: "futebol" | "futsal" | null;
   jogadores: JogadorDoc[];
+  /**
+   * Membros que confirmaram na "Partida de hoje" e não vieram (ids ordenados, nunca alguém da lista de jogadores). Null: não
+   * informado (app antigo): as faltas já gravadas ficam como estão.
+   */
+  faltaram: string[] | null;
   /**
    * Revisão da partida que o aparelho conhece (a devolvida no último envio confirmado; 0 se nunca enviou). Null: não informada
    * (app antigo ou partida enviada por versão anterior): vale só para partida NOVA e para reenvio idêntico; mudar uma partida
@@ -104,6 +111,13 @@ export const parsePartidaEnviada = (body: Dados): { ok: true; value: PartidaEnvi
       : typeof jpt === "string" && /^\d{1,2}$/.test(jpt)
         ? jpt
         : 0;
+  // Faltas: presente e malformado é recusado; ausente = app antigo (não mexe nas gravadas).
+  let faltaram: string[] | null = null;
+  if (p.faltaram !== undefined && p.faltaram !== null) {
+    if (!Array.isArray(p.faltaram) || p.faltaram.length > MAX_FALTAS_PARTIDA || !p.faltaram.every(isSafeUid)) return recusa("Lista de faltas inválida.");
+    const jogaram = new Set(jogadores.map((j) => j.participanteId));
+    faltaram = [...new Set(p.faltaram as string[])].filter((id) => !jogaram.has(id)).sort();
+  }
   const data = texto(p.data, 40);
   return {
     ok: true,
@@ -117,10 +131,15 @@ export const parsePartidaEnviada = (body: Dados): { ok: true; value: PartidaEnvi
       gerado: p.gerado === true,
       modalidade: p.modalidade === "futsal" ? "futsal" : p.modalidade === "futebol" ? "futebol" : null,
       jogadores,
+      faltaram,
       revisaoEsperada: typeof rev === "number" ? rev : null,
     },
   };
 };
+
+/** Faltas gravadas num documento de partida (lidas com cuidado: podem não existir). */
+export const faltasGravadas = (v: unknown): string[] =>
+  Array.isArray(v) ? [...new Set(v.filter((id): id is string => isSafeUid(id)))].sort() : [];
 
 /** Só jogadores da turma (com `participanteId`), um por pessoa (repetidos somam), em ordem estável. Igual ao app. */
 export const normalizarJogadores = (jogadores: Dados[]): JogadorDoc[] => {
@@ -257,8 +276,11 @@ export const enviarPartida = async (db: Firestore, uid: string, p: PartidaEnviad
     const nome = p.nome || texto(armazenado?.nome, NOME_MAX) || `Partida ${new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo" }).format(agora)}`;
     const data = p.data || texto(armazenado?.data, 40) || new Date(agora).toISOString();
     const conteudo = { nome, jogadoresPorTime: p.jogadoresPorTime, metodoSorteio: p.metodoSorteio, gerado: p.gerado, jogadores: p.jogadores };
+    const faltasAntes = faltasGravadas(armazenado?.faltaram);
+    const mudouFaltas = p.faltaram !== null && p.faltaram.join("|") !== faltasAntes.join("|");
     const mudouConteudo =
       !armazenado ||
+      mudouFaltas ||
       assinatura({
         nome: texto(armazenado.nome, NOME_MAX),
         jogadoresPorTime: armazenado.jogadoresPorTime ?? 0,
@@ -308,6 +330,8 @@ export const enviarPartida = async (db: Firestore, uid: string, p: PartidaEnviad
       enviadaPor: uid,
       revisao: revisaoAtual + 1,
     };
+    // Quem confirmou e não veio (aba Presença da turma). Sem a informação (app antigo), mantém o que estava gravado.
+    if (p.faltaram !== null) dados.faltaram = p.faltaram;
 
     const hoje = diaDeBrasilia(agora);
     const diaGravado = typeof armazenado?.diaDoJogo === "string" && DIA_DO_JOGO.test(armazenado.diaDoJogo) ? armazenado.diaDoJogo : null;

@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import { FieldValue, type Firestore, Timestamp, type Transaction } from "firebase-admin/firestore";
 import {
+  ESPERA_SEM_ACORDO_MS,
   MAX_GOLS,
   MAX_SUGESTOES,
   PRAZO_PLACAR_MS,
@@ -142,6 +143,12 @@ export const quandoTexto = (ms: number): string => {
   const d = new Date(ms + FUSO_MS);
   const dois = (n: number) => String(n).padStart(2, "0");
   return `${SEMANA[d.getUTCDay()]}, ${dois(d.getUTCDate())}/${dois(d.getUTCMonth() + 1)} às ${dois(d.getUTCHours())}:${dois(d.getUTCMinutes())}`;
+};
+
+/** "12/11" (dia em Brasília). */
+const diaCurto = (ms: number): string => {
+  const d = new Date(ms + FUSO_MS);
+  return `${String(d.getUTCDate()).padStart(2, "0")}/${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 };
 
 const limparLocal = (valor: unknown): string | null => {
@@ -300,7 +307,7 @@ type Negado = { ok: false; status: number; code: string; error: string };
 const negar = (status: number, code: string, error: string): Negado => ({ ok: false, status, code, error });
 
 /**
- * Status que podem impedir um novo amistoso entre o mesmo par: "sem_acordo" (para sempre) e os que podem estar em
+ * Status que podem impedir um novo amistoso entre o mesmo par: "sem_acordo" (por 30 dias) e os que podem estar em
  * andamento ("pendente", "aceito", "placar"; o prazo de cada um é conferido em `emAndamento`). A busca do par filtra
  * só por eles, para que um histórico longo de jogos encerrados não esconda um jogo ativo (auditoria LIB-03).
  */
@@ -321,8 +328,10 @@ export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
   if (c.quando > c.agora + PRAZO_MAXIMO_MS) return negar(400, "longe", "Marque com no máximo 120 dias de antecedência.");
   // Amistosos com um time que foi apagado (e talvez recriado com o mesmo id) não contam.
   const comEle = c.comEle.filter((a) => a.adversarioEncerrado !== true);
-  if (comEle.some((a) => a.status === "sem_acordo")) {
-    return negar(409, "sem-acordo", "Estes times não podem mais se enfrentar: um amistoso entre eles terminou sem acordo no placar.");
+  // Sem acordo no placar: 30 dias de espera (sem a data gravada, conta do horário do jogo).
+  const liberaEm = Math.max(0, ...comEle.filter((a) => a.status === "sem_acordo").map((a) => (millis(a.semAcordoEm) || millis(a.quando)) + ESPERA_SEM_ACORDO_MS));
+  if (liberaEm > c.agora) {
+    return negar(409, "sem-acordo", `Um amistoso entre estes times terminou sem acordo no placar. Vocês podem marcar outro a partir de ${diaCurto(liberaEm)}.`);
   }
   if (comEle.some((a) => emAndamento(a, c.agora))) return negar(409, "em-andamento", "Já existe um amistoso em andamento entre esses times.");
   // Convites vencidos (prazo ou horário) não ocupam vaga.
@@ -399,13 +408,13 @@ export const avisoDeAmistoso = (evento: EventoAmistoso, amistoso: Doc, quemAgiu:
   const placar = p ? placarTexto(amistoso, p.golsDe, p.golsPara) : r ? placarTexto(amistoso, Number(r.golsDe), Number(r.golsPara)) : "";
   switch (evento) {
     case "placar":
-      return { title: "Placar para confirmar", body: `${nome(quemAgiu)} informou o placar: ${placar}. Confirme em até 1 hora.`, data };
+      return { title: "Placar para confirmar", body: `${nome(quemAgiu)} informou o placar: ${placar}. Confirme em até 12 horas.`, data };
     case "contestado":
-      return { title: "Placar contestado", body: `${nome(quemAgiu)} não concordou e informou: ${placar}. Confirme em até 1 hora.`, data };
+      return { title: "Placar contestado", body: `${nome(quemAgiu)} não concordou e informou: ${placar}. Confirme em até 12 horas.`, data };
     case "confirmado":
       return { title: "Placar confirmado", body: `${nome(quemAgiu)} confirmou o placar: ${placar}.`, data };
     case "sem_acordo":
-      return { title: "Amistoso sem acordo", body: `${nome(quemAgiu)} não concordou com o placar. O jogo foi para o histórico sem acordo e os times não podem mais se enfrentar.`, data };
+      return { title: "Amistoso sem acordo", body: `${nome(quemAgiu)} não concordou com o placar. O jogo não conta e os times podem marcar outro amistoso daqui a 30 dias.`, data };
   }
 };
 

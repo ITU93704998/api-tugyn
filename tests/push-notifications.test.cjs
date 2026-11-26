@@ -20,7 +20,7 @@ const attendance = (t = turma, j = jogo, uid = 'jogador', dia = '20261026') => a
 
 test('aceita o novo evento sem confiar em destinatario ou nome enviados pelo cliente', () => {
   const parsed = parsePushBody({ action: 'notificar', evento: 'presenca_confirmada', turmaId: 'turma1', userId: 'vitima', nome: 'Falso' });
-  assert.deepEqual(parsed, { ok: true, value: { action: 'notificar', evento: 'presenca_confirmada', turmaId: 'turma1' } });
+  assert.deepEqual(parsed, { ok: true, value: { action: 'notificar', evento: 'presenca_confirmada', turmaId: 'turma1', amanha: false } });
   assert.equal(parsePushBody({ action: 'notificar', evento: 'presenca_confirmada', turmaId: '../turma' }).ok, false);
 });
 test('avisa o organizador e usa o nome da presenca salva', () => {
@@ -60,4 +60,20 @@ test('mensagem Expo conserva o novo evento e o canal existente', () => {
   const messages = buildMessages(['ExpoPushToken[teste123456]'], attendance().draft);
   assert.equal(messages[0].data.tipo, 'presenca_confirmada');
   assert.equal(messages[0].channelId, 'avisos-turma');
+});
+
+test('véspera: o app só diz "amanhã" (booleano); o texto do aviso fala da partida de amanhã', () => {
+  const amanha = parsePushBody({ action: 'notificar', evento: 'partida_aberta', turmaId: 'turma1', amanha: true });
+  assert.equal(amanha.ok, true);
+  assert.equal(amanha.value.amanha, true);
+  assert.equal(parsePushBody({ action: 'notificar', evento: 'partida_aberta', turmaId: 'turma1' }).value.amanha, false);
+  assert.equal(parsePushBody({ action: 'notificar', evento: 'presenca_confirmada', turmaId: 'turma1', amanha: '20261027' }).ok, false);
+  const aberta = authorizeGameOpened('organizador', 'turma1', '20261027', turma, { ...jogo, horario: '08:00' }, true);
+  assert.equal(aberta.ok, true);
+  assert.match(aberta.draft.title, /^Partida de amanhã/);
+  assert.match(aberta.draft.body, /partida de amanhã às 08:00/);
+  assert.equal(aberta.dedupeKey, 'partida_aberta_turma1_20261027');
+  const presenca = authorizeAttendanceConfirmed('jogador', 'turma1', '20261027', turma, jogo, true);
+  assert.match(presenca.draft.body, /partida de amanhã/);
+  assert.match(authorizeGameOpened('organizador', 'turma1', '20261026', turma, jogo).draft.body, /partida de hoje/);
 });

@@ -17,6 +17,7 @@ function load(file, overrides = {}, logs = []) {
     'node:crypto': require('node:crypto'),
     'firebase-admin/firestore': { FieldValue: { delete: () => REMOVE } },
     './validation': {},
+    './_lib/desafios': { ehVesperaDeJogo: () => false },
   };
   vm.runInNewContext(js, {
     module, exports: module.exports, Date, Buffer, process, AbortController, setTimeout, clearTimeout, fetch,

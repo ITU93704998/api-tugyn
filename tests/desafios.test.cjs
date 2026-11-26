@@ -83,6 +83,8 @@ test('criação: casos permitidos e negados', () => {
   assert.equal(d.autorizarCriacao({ ...base, existente: { status: 'recusado' } }).code, 'ja_recusado');
   assert.equal(d.autorizarCriacao({ ...base, existente: { status: 'aceito' } }).code, 'ja_existe');
   assert.equal(d.autorizarCriacao({ ...base, existente: { status: 'cancelado' } }).ok, true);
+  assert.equal(d.autorizarCriacao({ ...base, existente: { status: 'expirado' } }).ok, true);
+  assert.equal(d.autorizarCriacao({ ...base, existente: { status: 'finalizado' } }).code, 'ja_existe');
   assert.equal(d.autorizarCriacao({ ...base, ativosDesafiante: 10 }).code, 'limite_desafiante');
   assert.equal(d.autorizarCriacao({ ...base, ativosDesafiado: 10 }).code, 'limite_desafiado');
 });
@@ -299,4 +301,36 @@ test('departamento médico: quem perdeu o vínculo com a turma não fica sabendo
   }
   // ainda juntos na turma ativa: aí sim o motivo é o DM
   assert.match(d.motivoParaNaoAceitar({ ...base_, turma: { status: 'ativa', participantes: ['a', 'b'] } }), /departamento médico/);
+});
+
+test('véspera de jogo: só 24 h antes do horário de amanhã, em dia de jogo e com horário válido', () => {
+  const br = (dia, hora) => Date.parse(`${dia}T${hora}:00-03:00`);
+  const sabado8 = { diasSemana: ['saturday'], horario: '08:00' };
+  assert.equal(d.ehVesperaDeJogo(sabado8, br('2026-11-27', '07:59')), false);
+  assert.equal(d.ehVesperaDeJogo(sabado8, br('2026-11-27', '08:00')), true);
+  assert.equal(d.ehVesperaDeJogo(sabado8, br('2026-11-27', '23:59')), true);
+  assert.equal(d.ehVesperaDeJogo(sabado8, br('2026-11-26', '12:00')), false);
+  assert.equal(d.ehVesperaDeJogo({ diasSemana: ['sábado'], horario: '08:00' }, br('2026-11-27', '20:00')), true);
+  assert.equal(d.ehVesperaDeJogo({ diasSemana: ['saturday'], horario: '' }, br('2026-11-27', '20:00')), false);
+  assert.equal(d.ehVesperaDeJogo(null, br('2026-11-27', '20:00')), false);
+});
+
+test('desafio do dia na véspera: vale a partida de amanhã a partir de 24 h antes do horário', () => {
+  const br = (dia, hora) => Date.parse(`${dia}T${hora}:00-03:00`);
+  const quarta20 = { ...turmaHoje, diasSemana: ['wednesday'], horario: '20:00' };
+  const dia = { ...base, tipo: 'dia', temporada: undefined, turmaDados: quarta20 };
+  assert.equal(d.autorizarCriacao({ ...dia, agoraMs: br('2026-11-10', '19:59') }).code, 'sem_partida_hoje');
+  const ok = d.autorizarCriacao({ ...dia, agoraMs: br('2026-11-10', '20:00') });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.id, 'd20261111__a__b');
+  assert.equal(ok.dados.dia, '2026-11-11');
+  assert.equal(ok.dados.inicioEm.getTime(), br('2026-11-11', '20:00'));
+  assert.match(ok.draft.body, /partida de amanhã \(20:00\)/);
+  // No dia, volta a ser "hoje"; a regra dos 30 minutos continua.
+  assert.match(d.autorizarCriacao({ ...dia, agoraMs: br('2026-11-11', '10:00') }).draft.body, /partida de hoje \(20:00\)/);
+  assert.equal(d.autorizarCriacao({ ...dia, agoraMs: br('2026-11-11', '19:40') }).code, 'partida_muito_proxima');
+  // Dias seguidos: a de hoje vale até começar; depois dela, a de amanhã.
+  const seguidos = { ...dia, turmaDados: { ...quarta20, diasSemana: ['tuesday', 'wednesday'] } };
+  assert.equal(d.autorizarCriacao({ ...seguidos, agoraMs: br('2026-11-10', '19:00') }).dados.dia, '2026-11-10');
+  assert.equal(d.autorizarCriacao({ ...seguidos, agoraMs: br('2026-11-10', '20:30') }).dados.dia, '2026-11-11');
 });
