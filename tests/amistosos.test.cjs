@@ -75,7 +75,7 @@ test('propor: dono, outro time, outro dono, mesma modalidade, sem bloqueio, praz
   assert.equal(A.motivoParaNaoPropor(cenario({ quando: AGORA + 121 * 24 * 3600_000 })).code, 'longe');
   const comRival = { de: { timeId: 'rival_1' }, para: { timeId: 'dono_1' }, status: 'pendente', quando: Timestamp.fromMillis(AGORA + 3600_000) };
   assert.equal(A.motivoParaNaoPropor(cenario({ comEle: [comRival] })).code, 'em-andamento');
-  const enviados = Array.from({ length: A.MAX_PENDENTES }, (_, i) => ({ de: { timeId: 'dono_1' }, para: { timeId: `x${i}_1` } }));
+  const enviados = Array.from({ length: A.MAX_PENDENTES }, (_, i) => ({ de: { timeId: 'dono_1' }, para: { timeId: `x${i}_1` }, status: 'pendente', quando: Timestamp.fromMillis(AGORA + 3 * 24 * 3600_000) }));
   assert.equal(A.motivoParaNaoPropor(cenario({ pendentes: enviados })).code, 'muitos');
 });
 
@@ -336,4 +336,83 @@ test('dados públicos: recebeAmistosos acompanha a pausa do dono', () => {
   assert.equal(A.parseAmistosoBody({ action: 'time_amistosos', timeId: 'dono_1', receber: 'sim' }).ok, false);
   assert.equal(A.parseAmistosoBody({ action: 'time_amistosos', timeId: 'dono_1', receber: false }).value.receber, false);
   assert.ok(A.ehAcaoDeAmistoso({ action: 'time_amistosos' }));
+});
+
+// ─── Datas: prazo do convite, vez de responder, sugerir outro dia, dias ocupados ───
+
+const H = 3600_000;
+const convite = (extra = {}) => ({
+  de: { timeId: 'rival_1', nome: 'Rivais' }, para: { timeId: 'dono_1', nome: 'Os Brabos' }, status: 'pendente',
+  quando: Timestamp.fromMillis(AGORA + 5 * 24 * H), ...extra,
+});
+
+test('prazo do convite: 48 h ou 2 h antes do jogo; jogo em cima da hora vale até o horário', () => {
+  assert.equal(R.prazoDeResposta(AGORA, AGORA + 5 * 24 * H), AGORA + 48 * H);
+  assert.equal(R.prazoDeResposta(AGORA, AGORA + 10 * H), AGORA + 8 * H);
+  assert.equal(R.prazoDeResposta(AGORA, AGORA + 2 * H), AGORA + 2 * H, 'menos de 30 min de prazo: vale até o jogo');
+  assert.equal(R.respostaAte(convite()), AGORA + 5 * 24 * H, 'convite antigo sem o campo: até o horário');
+  assert.equal(R.conviteAberto(convite({ respostaAte: Timestamp.fromMillis(AGORA - 1) }), AGORA), false);
+  assert.equal(R.emAndamento(convite({ respostaAte: Timestamp.fromMillis(AGORA - 1) }), AGORA), false, 'vencido libera novo convite');
+  assert.equal(R.emAndamento(convite({ respostaAte: Timestamp.fromMillis(AGORA + H) }), AGORA), true);
+});
+
+test('responder: só o time da vez e dentro do prazo', () => {
+  assert.equal(A.motivoParaNaoResponder('dono', AGORA, 'dono_1', time(), convite()), null);
+  assert.equal(A.motivoParaNaoResponder('dono', AGORA, 'dono_1', time(), convite({ respostaAte: Timestamp.fromMillis(AGORA - 1) })).code, 'vencido');
+  assert.equal(A.motivoParaNaoResponder('dono', AGORA, 'dono_1', time(), convite({ vez: 'rival_1' })).code, 'nao-e-a-vez');
+  // Depois de uma sugestão, quem convidou responde.
+  assert.equal(A.motivoParaNaoResponder('rival', AGORA, 'rival_1', time({ donoId: 'rival' }), convite({ vez: 'rival_1' })), null);
+  assert.equal(A.motivoParaNaoResponder('x', AGORA, 'x_1', time({ donoId: 'x' }), convite()).code, 'nao-convidado');
+});
+
+test('cancelar: convite vencido não é mais desmarcado', () => {
+  assert.equal(A.motivoParaNaoCancelar('dono', AGORA, 'dono_1', time(), convite({ respostaAte: Timestamp.fromMillis(AGORA - 1) })).code, 'vencido');
+  assert.equal(A.motivoParaNaoCancelar('dono', AGORA, 'dono_1', time(), convite()), null);
+});
+
+test('sugerir outro dia: vez, limite de trocas, horário válido e diferente', () => {
+  const quando = AGORA + 6 * 24 * H;
+  assert.equal(A.motivoParaNaoSugerir('dono', AGORA, 'dono_1', time(), convite(), quando), null);
+  assert.equal(A.motivoParaNaoSugerir('dono', AGORA, 'dono_1', time(), convite({ vez: 'rival_1' }), quando).code, 'nao-e-a-vez');
+  assert.equal(A.motivoParaNaoSugerir('dono', AGORA, 'dono_1', time(), convite({ sugestoes: R.MAX_SUGESTOES }), quando).code, 'sugestoes');
+  assert.equal(A.motivoParaNaoSugerir('dono', AGORA, 'dono_1', time(), convite(), AGORA + 10 * 60_000).code, 'cedo');
+  assert.equal(A.motivoParaNaoSugerir('dono', AGORA, 'dono_1', time(), convite(), AGORA + 121 * 24 * H).code, 'longe');
+  assert.equal(A.motivoParaNaoSugerir('dono', AGORA, 'dono_1', time(), convite(), AGORA + 5 * 24 * H).code, 'mesma-data');
+  assert.equal(A.motivoParaNaoSugerir('ana', AGORA, 'dono_1', time(), convite(), quando).code, 'nao-dono');
+});
+
+test('sugerir: pedido validado como o convite; aviso diz o novo dia', () => {
+  const id = 'a'.repeat(20);
+  const ok = A.parseAmistosoBody({ action: 'amistoso_sugerir', timeId: 'dono_1', amistosoId: id, data: '2026-11-10', hora: '20:00', local: '  Arena  Sul ' });
+  assert.deepEqual(ok.value, { action: 'amistoso_sugerir', timeId: 'dono_1', amistosoId: id, data: '2026-11-10', hora: '20:00', local: 'Arena Sul' });
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_sugerir', timeId: 'dono_1', amistosoId: id, data: '2026-02-31', hora: '20:00', local: 'Arena' }).ok, false);
+  assert.equal(A.parseAmistosoBody({ action: 'amistoso_sugerir', timeId: 'dono_1', amistosoId: id, data: '2026-11-10', hora: '20:00', local: 'x' }).ok, false);
+  assert.ok(A.ehAcaoDeAmistoso({ action: 'amistoso_sugerir' }) && A.ehAcaoDeAmistoso({ action: 'time_agenda' }));
+  const aviso = A.avisoDeAmistoso('sugestao', convite({ local: 'Arena Sul', quando: Timestamp.fromMillis(Date.UTC(2026, 10, 7, 23, 0)) }), { nome: 'Os Brabos' }, 'rival_1');
+  assert.equal(aviso.title, 'Sugestão de outro dia');
+  assert.equal(aviso.body, 'Os Brabos sugeriu outro dia para o amistoso: sáb, 07/11 às 20:00 · Arena Sul');
+});
+
+test('convites vencidos não ocupam a vaga de convites enviados', () => {
+  const vencidos = Array.from({ length: A.MAX_PENDENTES }, (_, i) => ({ de: { timeId: 'dono_1' }, para: { timeId: 'x' + i + '_1' }, status: 'pendente', quando: Timestamp.fromMillis(AGORA + 3 * 24 * H), respostaAte: Timestamp.fromMillis(AGORA - 1) }));
+  assert.equal(A.motivoParaNaoPropor(cenario({ pendentes: vencidos })), null);
+});
+
+test('dias ocupados: só a data (Brasília) dos jogos confirmados futuros', () => {
+  const j = (status, quandoMs, extra = {}) => ({ status, quando: Timestamp.fromMillis(quandoMs), ...extra });
+  const dias = A.diasOcupados([
+    j('aceito', Date.UTC(2026, 10, 8, 2, 0)), // 07/11 23:00 em Brasília
+    j('aceito', Date.UTC(2026, 10, 7, 22, 0)), // mesmo dia
+    j('pendente', Date.UTC(2026, 10, 9, 22, 0)),
+    j('aceito', AGORA - H),
+    j('aceito', Date.UTC(2026, 10, 12, 22, 0), { adversarioEncerrado: true }),
+  ], AGORA);
+  assert.deepEqual(dias, ['2026-11-07']);
+});
+
+test('time público leva dias e períodos em que costuma jogar (só valores válidos)', () => {
+  const pub = A.timePublico('t_1', time({ donoId: 'rival', diasJogo: [6, 2, 2, 9, 'x'], periodosJogo: ['noite', 'madrugada', 'manha'] }), 'x');
+  assert.deepEqual(pub.diasJogo, [2, 6]);
+  assert.deepEqual(pub.periodosJogo, ['manha', 'noite']);
+  assert.deepEqual(A.timePublico('t_1', time({ donoId: 'rival' }), 'x').diasJogo, []);
 });

@@ -15,11 +15,16 @@ import { jogaModalidade, modalidadePrincipal, modalidadesDoTime } from "./modali
  *    não grava esse campo (as regras não o aceitam), então ninguém enche a lista para aparecer em buscas alheias. O app
  *    pede `time_indexar` depois de criar ou renomear o time; times antigos ganham o campo quando alguma listagem os lê
  *    (e pelo script `scripts/indexar-nomes-times.cjs`).
+ *  - Dia da semana: só os times que marcaram que costumam jogar nesse dia (`diasJogo`, gravado só pelo servidor pela ação
+ *    `time_agenda`), conferido depois da leitura como a modalidade.
  */
 
 export const MODALIDADES = ["campo", "society", "futsal"] as const;
 export const GENEROS = ["masculino", "feminino", "misto"] as const;
 export type Regiao = "cidade" | "estado";
+/** Períodos do dia em que o time costuma jogar. */
+export const PERIODOS = ["manha", "tarde", "noite"] as const;
+export type Periodo = (typeof PERIODOS)[number];
 export const LIMITE_MAX = 20;
 /**
  * Lidos a mais por lote. Com filtro de modalidade, muitos saem depois (os de outra modalidade), então a folga é maior.
@@ -43,6 +48,15 @@ export interface PedidoExplorar {
   cursor: string;
   /** Parte do nome ("" = todos). */
   busca: string;
+  /** Dia da semana (0 = domingo … 6 = sábado); -1 = qualquer dia. */
+  dia: number;
+}
+export interface PedidoAgenda {
+  action: "time_agenda";
+  timeId: string;
+  /** Dias da semana (0 = domingo … 6 = sábado), sem repetir; vazio = não informado. */
+  dias: number[];
+  periodos: Periodo[];
 }
 export interface PedidoIndexar {
   action: "time_indexar";
@@ -75,7 +89,31 @@ export const parseExplorar = (b: Record<string, unknown>): Parse<PedidoExplorar>
   if (cursor !== "" && (typeof cursor !== "string" || !TIME_ID.test(cursor))) return { ok: false, error: "Página inválida." };
   const busca = b.busca ?? "";
   if (typeof busca !== "string" || busca.length > BUSCA_MAX) return { ok: false, error: "Busca inválida." };
-  return { ok: true, value: { action: "time_explorar", timeId: b.timeId, regiao, modalidade: modalidade as PedidoExplorar["modalidade"], genero: genero as PedidoExplorar["genero"], limite: limite as number, cursor: cursor as string, busca: normalizarTexto(busca) } };
+  const dia = b.dia === undefined || b.dia === null ? -1 : b.dia;
+  if (!Number.isInteger(dia) || (dia as number) < -1 || (dia as number) > 6) return { ok: false, error: "Dia inválido." };
+  return { ok: true, value: { action: "time_explorar", timeId: b.timeId, regiao, modalidade: modalidade as PedidoExplorar["modalidade"], genero: genero as PedidoExplorar["genero"], limite: limite as number, cursor: cursor as string, busca: normalizarTexto(busca), dia: dia as number } };
+};
+
+const ehDia = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 6;
+const ehPeriodo = (v: unknown): v is Periodo => (PERIODOS as readonly unknown[]).includes(v);
+
+export const parseAgenda = (b: Record<string, unknown>): Parse<PedidoAgenda> => {
+  if (typeof b.timeId !== "string" || !TIME_ID.test(b.timeId)) return { ok: false, error: "Time inválido." };
+  const dias = b.dias ?? [];
+  const periodos = b.periodos ?? [];
+  if (!Array.isArray(dias) || dias.length > 7 || !dias.every(ehDia)) return { ok: false, error: "Dias inválidos." };
+  if (!Array.isArray(periodos) || periodos.length > PERIODOS.length || !periodos.every(ehPeriodo)) return { ok: false, error: "Períodos inválidos." };
+  return {
+    ok: true,
+    value: { action: "time_agenda", timeId: b.timeId, dias: [...new Set(dias)].sort((x, y) => x - y), periodos: PERIODOS.filter((p) => periodos.includes(p)) },
+  };
+};
+
+/** Dias e períodos em que o time costuma jogar (só valores válidos, em ordem). Times sem o campo: listas vazias. */
+export const agendaDoTime = (d: Doc): { diasJogo: number[]; periodosJogo: Periodo[] } => {
+  const dias = Array.isArray(d.diasJogo) ? d.diasJogo.filter(ehDia) : [];
+  const periodos = Array.isArray(d.periodosJogo) ? d.periodosJogo : [];
+  return { diasJogo: [...new Set(dias)].sort((x, y) => x - y), periodosJogo: PERIODOS.filter((p) => periodos.includes(p)) };
 };
 
 export const parseIndexar = (b: Record<string, unknown>): Parse<PedidoIndexar> =>
@@ -141,9 +179,9 @@ export const filtrosDaRegiao = (cidade: unknown, regiao: Regiao): [string, strin
 export const entraNaLista = (id: string, d: Doc, uid: string, referenciaId: string): boolean =>
   id !== referenciaId && d.ocultoNaBusca !== true && d.semAmistosos !== true && !(Array.isArray(d.membros) && d.membros.includes(uid));
 
-/** Modalidade (qualquer uma do time) e nome (o índice traz candidatos; aqui confere com o nome atual). */
-export const passaNosFiltros = (d: Doc, modalidade: string, busca: string): boolean =>
-  (!modalidade || jogaModalidade(d, modalidade)) && nomeCasaComBusca(texto(d.nome, 40), busca);
+/** Modalidade (qualquer uma do time), nome (o índice traz candidatos; aqui confere com o nome atual) e dia da semana. */
+export const passaNosFiltros = (d: Doc, modalidade: string, busca: string, dia = -1): boolean =>
+  (!modalidade || jogaModalidade(d, modalidade)) && nomeCasaComBusca(texto(d.nome, 40), busca) && (dia < 0 || agendaDoTime(d).diasJogo.includes(dia));
 
 export const timeDaVitrine = (id: string, d: Doc, chave: string) => {
   const cidade = d.cidade as Doc | undefined;
@@ -160,6 +198,7 @@ export const timeDaVitrine = (id: string, d: Doc, chave: string) => {
     faixaEtaria: texto(d.faixaEtaria, 10),
     cidade: cidade?.city ? { city: texto(cidade.city, 100), state: texto(cidade.state, 40) } : null,
     jogadores: Array.isArray(d.membros) ? d.membros.length : 0,
+    ...agendaDoTime(d),
     chave,
   };
 };
@@ -193,7 +232,7 @@ export const explorarTimes = async (
   if (termo) base = base.where("nomeBusca", "array-contains", termo);
   base = base.orderBy(FieldPath.documentId());
 
-  const tamanho = p.limite + (p.modalidade ? FOLGA_LEITURA : FOLGA_SEM_MODALIDADE);
+  const tamanho = p.limite + (p.modalidade || p.dia >= 0 ? FOLGA_LEITURA : FOLGA_SEM_MODALIDADE);
   const times: ReturnType<typeof timeDaVitrine>[] = [];
   let ultimoLido = p.cursor;
   let acabou = false;
@@ -210,7 +249,7 @@ export const explorarTimes = async (
       ultimoLido = doc.id;
       const d = doc.data();
       if (!nomeBuscaEmDia(d)) reindexar.push({ id: doc.id, nomeBusca: palavrasDoNome(texto(d.nome, 40)), lido: doc.updateTime });
-      if (!entraNaLista(doc.id, d, uid, p.timeId) || !passaNosFiltros(d, p.modalidade, p.busca)) continue;
+      if (!entraNaLista(doc.id, d, uid, p.timeId) || !passaNosFiltros(d, p.modalidade, p.busca, p.dia)) continue;
       const chave = texto(d.chave, 6) || (await garantirChave(doc.id));
       if (!chave) continue;
       times.push(timeDaVitrine(doc.id, d, chave));
@@ -268,4 +307,14 @@ export const definirRecebeAmistosos = async (db: Firestore, uid: string, p: Pedi
   if (time.get("donoId") !== uid) return negar(403, "nao-dono", "Só o dono muda isso.");
   await ref.update({ semAmistosos: !p.receber });
   return { ok: true, body: { receber: p.receber } };
+};
+
+/** O dono escolhe os dias da semana e os períodos em que o time costuma jogar (gravado só aqui: o app não grava esses campos). */
+export const definirAgenda = async (db: Firestore, uid: string, p: PedidoAgenda): Promise<Resultado> => {
+  const ref = db.doc(`times/${p.timeId}`);
+  const time = await ref.get();
+  if (!time.exists) return negar(404, "nao-encontrado", "Este time não existe mais.");
+  if (time.get("donoId") !== uid) return negar(403, "nao-dono", "Só o dono muda isso.");
+  await ref.update({ diasJogo: p.dias, periodosJogo: p.periodos });
+  return { ok: true, body: { diasJogo: p.dias, periodosJogo: p.periodos } };
 };

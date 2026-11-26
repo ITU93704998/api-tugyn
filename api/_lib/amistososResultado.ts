@@ -61,10 +61,37 @@ export const efetivo = (a: Doc, agora: number): Efetivo => {
   return { status };
 };
 
+// ─── Convite: prazo de resposta e de quem é a vez ─────────────────────────────
+
+/** O convite vence 48 h depois de enviado (ou da última sugestão de data)... */
+export const PRAZO_RESPOSTA_MS = 48 * 3600_000;
+/** ...ou 2 h antes do jogo, o que vier primeiro. */
+export const FOLGA_ANTES_DO_JOGO_MS = 2 * 3600_000;
+/** Prazo menor que isto (jogo muito em cima da hora): vale até o horário do jogo, como antes. */
+export const PRAZO_MINIMO_MS = 30 * 60_000;
+/** Sugestões de outro dia por convite (as duas pontas somadas): evita um vai e vem sem fim. */
+export const MAX_SUGESTOES = 3;
+
+/** Até quando o convite pode ser respondido, a partir de `desde` (envio ou última sugestão). */
+export const prazoDeResposta = (desde: number, quando: number): number => {
+  const limite = Math.min(desde + PRAZO_RESPOSTA_MS, quando - FOLGA_ANTES_DO_JOGO_MS);
+  return limite < desde + PRAZO_MINIMO_MS ? quando : limite;
+};
+
+/** Até quando responder (convites antigos, sem o campo: até o horário do jogo). */
+export const respostaAte = (a: Doc): number => millis(a.respostaAte) || millis(a.quando);
+
+/** O time que precisa responder agora: o convidado, ou quem recebeu a última sugestão de data. */
+export const vezDe = (a: Doc): string => (typeof a.vez === "string" && a.vez ? a.vez : String((a.para as Doc | undefined)?.timeId ?? ""));
+
+/** Convite ainda esperando resposta (nem venceu o prazo, nem passou o horário). */
+export const conviteAberto = (a: Doc, agora: number): boolean =>
+  String(a.status) === "pendente" && millis(a.quando) > agora && respostaAte(a) > agora;
+
 /** Ainda em andamento entre os dois times (impede marcar outro amistoso entre eles). */
 export const emAndamento = (a: Doc, agora: number): boolean => {
   const { status } = efetivo(a, agora);
-  return status === "aceito" || status === "placar" || (status === "pendente" && millis(a.quando) > agora);
+  return status === "aceito" || status === "placar" || conviteAberto(a, agora);
 };
 
 const ladoId = (a: Doc, lado: "de" | "para"): string => String((a[lado] as Doc | undefined)?.timeId ?? "");

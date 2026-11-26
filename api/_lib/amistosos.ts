@@ -2,8 +2,10 @@ import { randomInt } from "node:crypto";
 import { FieldValue, type Firestore, Timestamp, type Transaction } from "firebase-admin/firestore";
 import {
   MAX_GOLS,
+  MAX_SUGESTOES,
   PRAZO_PLACAR_MS,
   type StatusAmistoso,
+  conviteAberto,
   diferencaDeGols,
   efetivo,
   emAndamento,
@@ -14,13 +16,16 @@ import {
   motivoParaNaoRecusarPlacar,
   placarDoDocumento,
   placarTexto,
+  prazoDeResposta,
   propostaDe,
+  respostaAte,
   resumoDoResultado,
+  vezDe,
 } from "./amistososResultado";
 import { DEDUPE_MS, type PushDraft } from "./push";
 import { type Aviso, COLECAO_AVISOS, avisoPendente, enviarAviso } from "./pushEnvio";
 import { isValidLinkId, timeDoDocumento } from "./timeLink";
-import { type PedidoExplorar, type PedidoIndexar, type PedidoRecebeAmistosos, type PedidoVitrine, definirRecebeAmistosos, definirVitrine, explorarTimes, indexarNome, parseExplorar, parseIndexar, parseRecebeAmistosos, parseVitrine } from "./explorarTimes";
+import { type PedidoAgenda, type PedidoExplorar, type PedidoIndexar, type PedidoRecebeAmistosos, type PedidoVitrine, agendaDoTime, definirAgenda, definirRecebeAmistosos, definirVitrine, explorarTimes, indexarNome, parseAgenda, parseExplorar, parseIndexar, parseRecebeAmistosos, parseVitrine } from "./explorarTimes";
 import { MODALIDADES_TIME, type ModalidadeTime, NOME_MODALIDADE, modalidadePrincipal, modalidadesDoTime, modalidadesEmComum } from "./modalidadesTime";
 
 /**
@@ -33,7 +38,10 @@ import { MODALIDADES_TIME, type ModalidadeTime, NOME_MODALIDADE, modalidadePrinc
  *  - amistoso_propor { timeId, adversarioId, data, hora, local, modalidade? }   o dono convida outro time; a modalidade do
  *                                                               jogo é uma das que os dois times têm (sem ela, versões antigas:
  *                                                               a principal de quem convida, se o outro também joga, ou a 1ª em comum)
- *  - amistoso_responder { timeId, amistosoId, aceitar }       o dono do time convidado aceita ou recusa
+ *  - amistoso_responder { timeId, amistosoId, aceitar }       o dono do time da vez (o convidado, ou quem recebeu a última
+ *                                                               sugestão de data) aceita ou recusa
+ *  - amistoso_sugerir { timeId, amistosoId, data, hora, local }   o time da vez sugere outro dia/horário/local; a vez passa
+ *                                                               para o outro (até MAX_SUGESTOES por convite)
  *  - amistoso_cancelar { timeId, amistosoId }                 o dono de qualquer um dos dois desmarca (antes do jogo)
  *  - time_encerrar { timeId }                                  o dono apaga o time: cancela os amistosos em aberto nos
  *                                                               adversários, apaga a chave, o histórico, o resumo e o time
@@ -45,6 +53,9 @@ import { MODALIDADES_TIME, type ModalidadeTime, NOME_MODALIDADE, modalidadePrinc
  *  - time_explorar { timeId, regiao, modalidade, genero, limite, cursor, busca }   adversários na cidade/estado do time (`explorarTimes.ts`)
  *  - time_vitrine { timeId, visivel }                           o dono tira (ou põe) o time em "Explorar adversários"
  *  - time_amistosos { timeId, receber }                         o dono pausa (ou volta a aceitar) convites de amistoso
+ *  - time_agenda { timeId, dias, periodos }                     o dono escolhe os dias da semana e os períodos em que o time costuma jogar
+ * Convite pendente vence pelo prazo (`respostaAte`: 48 h ou 2 h antes do jogo, ver `prazoDeResposta`); vencido fica como
+ * "sem resposta" sem precisar gravar nada (como o convite cujo horário passou).
  *  - time_indexar { timeId }                                    atualiza as palavras do nome para a busca (depois de criar/renomear)
  * Regras do resultado em `amistososResultado.ts`. O retrospecto de cada time fica em `times/{id}/resumo/geral`.
  * O amistoso fica em `times/{id}/amistosos/{amistosoId}` com uma cópia em cada time (o elenco de cada um lê a sua; o app
@@ -83,6 +94,7 @@ export type AmistosoRequest =
   | { action: "time_link"; linkId: string }
   | { action: "amistoso_propor"; timeId: string; adversarioId: string; data: string; hora: string; local: string; modalidade: ModalidadeTime | "" }
   | { action: "amistoso_responder"; timeId: string; amistosoId: string; aceitar: boolean }
+  | { action: "amistoso_sugerir"; timeId: string; amistosoId: string; data: string; hora: string; local: string }
   | { action: "amistoso_cancelar"; timeId: string; amistosoId: string }
   | { action: "time_encerrar"; timeId: string }
   | { action: "amistoso_placar"; timeId: string; amistosoId: string; golsMeu: number; golsOutro: number }
@@ -93,13 +105,14 @@ export type AmistosoRequest =
   | PedidoExplorar
   | PedidoVitrine
   | PedidoRecebeAmistosos
+  | PedidoAgenda
   | PedidoIndexar;
 
 type Parse = { ok: true; value: AmistosoRequest } | { ok: false; error: string };
 
 export const ehAcaoDeAmistoso = (body: unknown): boolean => {
   const action = (body as { action?: unknown } | null)?.action;
-  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_link" || action === "time_encerrar" || action === "time_explorar" || action === "time_vitrine" || action === "time_amistosos" || action === "time_indexar");
+  return typeof action === "string" && (action.startsWith("amistoso_") || action === "time_chave" || action === "time_buscar" || action === "time_link" || action === "time_encerrar" || action === "time_explorar" || action === "time_vitrine" || action === "time_amistosos" || action === "time_agenda" || action === "time_indexar");
 };
 
 export const normalizarChave = (valor: unknown): string | null => {
@@ -167,6 +180,13 @@ export const parseAmistosoBody = (body: unknown): Parse => {
       if (!timeOk || typeof b.amistosoId !== "string" || !AMISTOSO_ID.test(b.amistosoId)) return { ok: false, error: "Amistoso inválido." };
       if (typeof b.aceitar !== "boolean") return { ok: false, error: "Resposta inválida." };
       return { ok: true, value: { action: "amistoso_responder", timeId: b.timeId as string, amistosoId: b.amistosoId, aceitar: b.aceitar } };
+    case "amistoso_sugerir": {
+      if (!timeOk || typeof b.amistosoId !== "string" || !AMISTOSO_ID.test(b.amistosoId)) return { ok: false, error: "Amistoso inválido." };
+      if (typeof b.data !== "string" || typeof b.hora !== "string" || instanteDe(b.data, b.hora) === null) return { ok: false, error: "Dia ou horário inválido." };
+      const local = limparLocal(b.local);
+      if (!local) return { ok: false, error: `Informe o local (de ${LOCAL_MIN} a ${LOCAL_MAX} caracteres).` };
+      return { ok: true, value: { action: "amistoso_sugerir", timeId: b.timeId as string, amistosoId: b.amistosoId, data: b.data, hora: b.hora, local } };
+    }
     case "amistoso_cancelar":
     case "amistoso_confirmar":
     case "amistoso_recusar_placar":
@@ -197,6 +217,8 @@ export const parseAmistosoBody = (body: unknown): Parse => {
       return parseVitrine(b);
     case "time_amistosos":
       return parseRecebeAmistosos(b);
+    case "time_agenda":
+      return parseAgenda(b);
     default:
       return { ok: false, error: "Ação inválida." };
   }
@@ -243,6 +265,7 @@ export const timePublico = (timeId: string, d: Doc, uid: string) => {
     souDono: d.donoId === uid,
     souMembro: membros.includes(uid),
     recebeAmistosos: d.semAmistosos !== true,
+    ...agendaDoTime(d),
   };
 };
 
@@ -302,7 +325,8 @@ export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
     return negar(409, "sem-acordo", "Estes times não podem mais se enfrentar: um amistoso entre eles terminou sem acordo no placar.");
   }
   if (comEle.some((a) => emAndamento(a, c.agora))) return negar(409, "em-andamento", "Já existe um amistoso em andamento entre esses times.");
-  const enviados = c.pendentes.filter((p) => (p.de as Doc)?.timeId === c.meuId).length;
+  // Convites vencidos (prazo ou horário) não ocupam vaga.
+  const enviados = c.pendentes.filter((p) => (p.de as Doc)?.timeId === c.meuId && conviteAberto(p, c.agora)).length;
   if (enviados >= MAX_PENDENTES) return negar(429, "muitos", `Seu time já tem ${MAX_PENDENTES} convites esperando resposta.`);
   return null;
 };
@@ -310,9 +334,24 @@ export const motivoParaNaoPropor = (c: CenarioProposta): Negado | null => {
 export const motivoParaNaoResponder = (uid: string, agora: number, meuId: string, meu: Doc | null, amistoso: Doc | null): Negado | null => {
   if (!meu || meu.donoId !== uid) return negar(403, "nao-dono", "Só o dono do time responde convites de amistoso.");
   if (!amistoso) return negar(404, "inexistente", "Este convite não existe mais.");
-  if ((amistoso.para as Doc)?.timeId !== meuId) return negar(403, "nao-convidado", "Este convite não é para o seu time.");
+  const ehDoPar = (amistoso.para as Doc)?.timeId === meuId || (amistoso.de as Doc)?.timeId === meuId;
+  if (!ehDoPar) return negar(403, "nao-convidado", "Este convite não é para o seu time.");
   if (amistoso.status !== "pendente") return negar(409, "respondido", "Este convite já foi respondido ou cancelado.");
   if (millis(amistoso.quando) <= agora) return negar(409, "passou", "O horário deste amistoso já passou.");
+  if (respostaAte(amistoso) <= agora) return negar(409, "vencido", "O prazo para responder este convite terminou.");
+  if (vezDe(amistoso) !== meuId) return negar(409, "nao-e-a-vez", "Agora é a vez do outro time responder.");
+  return null;
+};
+
+/** Sugerir outro dia: as mesmas regras de responder, mais o limite de sugestões e as do horário (como ao convidar). */
+export const motivoParaNaoSugerir = (uid: string, agora: number, meuId: string, meu: Doc | null, amistoso: Doc | null, quando: number): Negado | null => {
+  const negado = motivoParaNaoResponder(uid, agora, meuId, meu, amistoso);
+  if (negado || !amistoso) return negado;
+  const feitas = Number.isInteger(amistoso.sugestoes) ? (amistoso.sugestoes as number) : 0;
+  if (feitas >= MAX_SUGESTOES) return negar(409, "sugestoes", "Este convite já teve muitas trocas de data. Aceite, recuse ou mande um convite novo.");
+  if (quando < agora + ANTECEDENCIA_MS) return negar(400, "cedo", "Escolha um horário com pelo menos 30 minutos de antecedência.");
+  if (quando > agora + PRAZO_MAXIMO_MS) return negar(400, "longe", "Marque com no máximo 120 dias de antecedência.");
+  if (quando === millis(amistoso.quando)) return negar(400, "mesma-data", "Escolha um dia ou horário diferente do convite.");
   return null;
 };
 
@@ -321,6 +360,7 @@ export const motivoParaNaoCancelar = (uid: string, agora: number, meuId: string,
   if (!amistoso) return negar(404, "inexistente", "Este amistoso não existe mais.");
   if (amistoso.status !== "pendente" && amistoso.status !== "aceito") return negar(409, "fechado", "Este amistoso já foi recusado ou cancelado.");
   if (millis(amistoso.quando) <= agora) return negar(409, "passou", "O horário deste amistoso já passou.");
+  if (amistoso.status === "pendente" && respostaAte(amistoso) <= agora) return negar(409, "vencido", "Este convite já venceu sem resposta.");
   return null;
 };
 
@@ -329,7 +369,7 @@ export const outroLado = (amistoso: Doc, meuId: string): Doc => ((amistoso.de as
 
 // ─── Avisos ───────────────────────────────────────────────────────────────────
 
-export type EventoAmistoso = "novo" | "aceito" | "recusado" | "cancelado" | "placar" | "contestado" | "confirmado" | "sem_acordo";
+export type EventoAmistoso = "novo" | "sugestao" | "aceito" | "recusado" | "cancelado" | "placar" | "contestado" | "confirmado" | "sem_acordo";
 
 const nome = (d: Doc | undefined): string => texto(d?.nome, NOME_MAX) || "Um time";
 /** " de futsal" (amistosos antigos não guardam a modalidade). */
@@ -345,6 +385,8 @@ export const avisoDeAmistoso = (evento: EventoAmistoso, amistoso: Doc, quemAgiu:
   switch (evento) {
     case "novo":
       return { title: "Convite para amistoso", body: `${nome(quemAgiu)} chamou o seu time para um amistoso${deModalidade(amistoso)}: ${quando} · ${local}`, data };
+    case "sugestao":
+      return { title: "Sugestão de outro dia", body: `${nome(quemAgiu)} sugeriu outro dia para o amistoso: ${quando} · ${local}`, data };
     case "aceito":
       return { title: "Amistoso confirmado!", body: `${nome(quemAgiu)} aceitou o amistoso de ${quando} · ${local}`, data };
     case "recusado":
@@ -456,6 +498,19 @@ export const resumoPublico = (d: Doc | undefined) => {
   };
 };
 
+/** Confirmados lidos para os dias ocupados (um por adversário; os vencidos viram sem placar em aplicarPrazos, logo antes). */
+const MAX_FUTUROS_LIDOS = 60;
+
+/** "2026-11-28" (dia em Brasília). */
+export const diaDe = (ms: number): string => new Date(ms + FUSO_MS).toISOString().slice(0, 10);
+
+/**
+ * Dias (em Brasília) em que o time já tem amistoso confirmado, para quem vai convidar ver "ocupado nesse dia". Só a data:
+ * sem adversário, horário ou local. Convites ainda pendentes não contam (podem ser recusados).
+ */
+export const diasOcupados = (amistosos: Doc[], agora: number): string[] =>
+  [...new Set(amistosos.filter((a) => a.status === "aceito" && a.adversarioEncerrado !== true && millis(a.quando) > agora).map((a) => diaDe(millis(a.quando))))].sort();
+
 const buscar = async (db: Firestore, uid: string, chave: string): Promise<Resultado> => {
   const ref = await db.doc(`${COLECAO_CHAVES}/${chave}`).get();
   const timeId = ref.exists ? ref.get("timeId") : null;
@@ -493,10 +548,22 @@ const buscar = async (db: Firestore, uid: string, chave: string): Promise<Result
     }];
   });
   const ultimosResultados = ultimosJogos.map((j): "V" | "E" | "D" => (j.golsMeu > j.golsAdversario ? "V" : j.golsMeu === j.golsAdversario ? "E" : "D"));
-  const resumo = await resumoRef(db, time.id).get();
+  const [resumo, futuros] = await Promise.all([
+    resumoRef(db, time.id).get(),
+    // Só os confirmados (convites pendentes não ocupam a consulta): sai só a data dos futuros, sem adversário, horário ou local.
+    db.collection(`times/${time.id}/${SUB_AMISTOSOS}`).where("status", "==", "aceito").limit(MAX_FUTUROS_LIDOS).get(),
+  ]);
   return {
     ok: true,
-    body: { time: { ...timePublico(time.id, time.data() ?? {}, uid), ultimosResultados, ultimosJogos, resumo: resumoPublico(resumo.data()) } },
+    body: {
+      time: {
+        ...timePublico(time.id, time.data() ?? {}, uid),
+        ultimosResultados,
+        ultimosJogos,
+        resumo: resumoPublico(resumo.data()),
+        diasOcupados: diasOcupados(futuros.docs.map((d) => d.data()), Date.now()),
+      },
+    },
   };
 };
 
@@ -536,6 +603,9 @@ const propor = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { 
       local: p.local,
       modalidade: modalidadeDoJogo(meu.data() ?? {}, adversario.data() ?? {}, p.modalidade) as ModalidadeTime,
       status: "pendente" as StatusAmistoso,
+      vez: p.adversarioId,
+      respostaAte: Timestamp.fromMillis(prazoDeResposta(Date.now(), quando)),
+      sugestoes: 0,
       criadoEm: FieldValue.serverTimestamp(),
       atualizadoEm: FieldValue.serverTimestamp(),
     };
@@ -591,11 +661,58 @@ const responder = async (db: Firestore, uid: string, p: Extract<AmistosoRequest,
     p.amistosoId,
     (meu, a) => motivoParaNaoResponder(uid, Date.now(), p.timeId, meu, a),
     () => (p.aceitar ? "aceito" : "recusado"),
-    (a, outro, dono) => prepararAviso(dono, p.amistosoId, evento, avisoDeAmistoso(evento, a, a.para as Doc, String(outro.timeId))),
+    (a, outro, dono) => prepararAviso(dono, p.amistosoId, evento, avisoDeAmistoso(evento, a, meuLado(a, p.timeId), String(outro.timeId))),
   );
   if (!r.ok || !("amistoso" in r)) return r;
   await dispararAviso(db, r.aviso);
   return { ok: true, body: { status: r.status } };
+};
+
+/**
+ * O time da vez sugere outro dia (e horário/local): o convite continua pendente com a data nova, a vez passa para o outro
+ * time e o prazo de resposta recomeça. Bloqueio entre os donos impede (como ao convidar).
+ */
+const sugerir = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_sugerir" }>): Promise<Resultado> => {
+  const quando = instanteDe(p.data, p.hora) as number;
+  const r = await db.runTransaction(async (tx) => {
+    const [meu, minhaCopia] = await tx.getAll(timeRef(db, p.timeId), amistosoRef(db, p.timeId, p.amistosoId));
+    const amistoso = minhaCopia.exists ? (minhaCopia.data() ?? {}) : null;
+    const agora = Date.now();
+    const negado = motivoParaNaoSugerir(uid, agora, p.timeId, meu.exists ? (meu.data() ?? {}) : null, amistoso, quando);
+    if (negado || !amistoso) return negado ?? negar(404, "inexistente", "Este convite não existe mais.");
+    const outro = outroLado(amistoso, p.timeId);
+    const outroId = String(outro.timeId ?? "");
+    const [outroTime, outraCopia] = TIME_ID.test(outroId) ? await tx.getAll(timeRef(db, outroId), amistosoRef(db, outroId, p.amistosoId)) : [null, null];
+    const outroDono = outroTime?.exists ? String(outroTime.get("donoId") ?? "") : "";
+    const [bA, bB] = outroDono ? await tx.getAll(db.doc(`users/${uid}/blocked/${outroDono}`), db.doc(`users/${outroDono}/blocked/${uid}`)) : [null, null];
+    if (!outroTime?.exists) {
+      const fim = { status: "cancelado", canceladoPor: p.timeId, atualizadoEm: FieldValue.serverTimestamp() };
+      tx.update(minhaCopia.ref, fim);
+      if (outraCopia?.exists) tx.update(outraCopia.ref, fim);
+      return negar(409, "time-apagado", "O outro time não existe mais. O convite foi cancelado.");
+    }
+    if (bA?.exists || bB?.exists) return negar(403, "bloqueado", "Não é possível marcar amistoso com este time.");
+    const feitas = Number.isInteger(amistoso.sugestoes) ? (amistoso.sugestoes as number) : 0;
+    const mudanca = {
+      quando: Timestamp.fromMillis(quando),
+      local: p.local,
+      vez: outroId,
+      sugestoes: feitas + 1,
+      sugeridoPor: p.timeId,
+      respostaAte: Timestamp.fromMillis(prazoDeResposta(agora, quando)),
+      atualizadoEm: FieldValue.serverTimestamp(),
+    };
+    tx.update(minhaCopia.ref, mudanca);
+    if (outraCopia?.exists) tx.update(outraCopia.ref, mudanca);
+    const novo = { ...amistoso, ...mudanca };
+    // Uma chave de aviso por rodada: a sugestão seguinte não é barrada pelo aviso da anterior.
+    const aviso = prepararAviso(outroDono, `${p.amistosoId}_${feitas + 1}`, "sugestao", avisoDeAmistoso("sugestao", novo, meuLado(novo, p.timeId), outroId));
+    agendarAviso(tx, db, aviso);
+    return { ok: true as const, aviso };
+  });
+  if (!r.ok) return r;
+  await dispararAviso(db, r.aviso);
+  return { ok: true, body: { status: "pendente" } };
 };
 
 const cancelar = async (db: Firestore, uid: string, p: Extract<AmistosoRequest, { action: "amistoso_cancelar" }>): Promise<Resultado> => {
@@ -883,6 +1000,8 @@ export const executarAmistoso = (db: Firestore, uid: string, pedido: AmistosoReq
       return propor(db, uid, pedido);
     case "amistoso_responder":
       return responder(db, uid, pedido);
+    case "amistoso_sugerir":
+      return sugerir(db, uid, pedido);
     case "amistoso_cancelar":
       return cancelar(db, uid, pedido);
     case "time_encerrar":
@@ -906,6 +1025,8 @@ export const executarAmistoso = (db: Firestore, uid: string, pedido: AmistosoReq
       return definirVitrine(db, uid, pedido);
     case "time_amistosos":
       return definirRecebeAmistosos(db, uid, pedido);
+    case "time_agenda":
+      return definirAgenda(db, uid, pedido);
     case "time_indexar":
       return indexarNome(db, uid, pedido);
   }

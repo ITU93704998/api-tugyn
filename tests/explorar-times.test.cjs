@@ -69,7 +69,7 @@ function bancoFalso(times) {
 
 test('pedido: valida time, região, modalidade, gênero, limite e página', () => {
   assert.deepEqual(A.parseAmistosoBody({ action: 'time_explorar', timeId: 'eu_1' }), {
-    ok: true, value: { action: 'time_explorar', timeId: 'eu_1', regiao: 'cidade', modalidade: '', genero: '', limite: 20, cursor: '', busca: '' },
+    ok: true, value: { action: 'time_explorar', timeId: 'eu_1', regiao: 'cidade', modalidade: '', genero: '', limite: 20, cursor: '', busca: '', dia: -1 },
   });
   assert.equal(A.parseAmistosoBody({ action: 'time_explorar', timeId: 'eu_1', regiao: 'pais' }).ok, false);
   assert.equal(A.parseAmistosoBody({ action: 'time_explorar', timeId: 'eu_1', modalidade: 'praia' }).ok, false);
@@ -104,7 +104,7 @@ test('lista: só dados públicos, sem os meus times, o de referência e os ocult
   assert.ok(r.ok);
   assert.deepEqual(r.body.times.map((t) => t.nome), ['Unidos', 'Sem chave']);
   assert.deepEqual(geradas, ['eva_1']);
-  assert.deepEqual(Object.keys(r.body.times[0]).sort(), ['chave', 'cidade', 'cor', 'corSecundaria', 'escudoUrl', 'faixaEtaria', 'genero', 'jogadores', 'modalidade', 'modalidades', 'nome', 'sigla', 'timeId'].sort());
+  assert.deepEqual(Object.keys(r.body.times[0]).sort(), ['chave', 'cidade', 'cor', 'corSecundaria', 'escudoUrl', 'faixaEtaria', 'genero', 'jogadores', 'modalidade', 'modalidades', 'nome', 'sigla', 'timeId', 'diasJogo', 'periodosJogo'].sort());
   assert.equal(r.body.times[0].jogadores, 2);
   assert.equal(r.body.proximoCursor, null);
   // A modalidade é conferida depois da leitura (times antigos não têm a lista `modalidades`).
@@ -250,4 +250,26 @@ test('folga de leitura: sem filtro de modalidade lê só 1 a mais que a página;
   db.consultas.length = 0;
   await E.explorarTimes(db, 'eu', { ...pedido, modalidade: 'futsal' }, async () => null);
   assert.equal(db.consultas[0].limite, 30);
+});
+
+test('agenda: dias 0 a 6 sem repetir, períodos válidos; só o dono grava', async () => {
+  assert.deepEqual(A.parseAmistosoBody({ action: 'time_agenda', timeId: 'eu_1', dias: [6, 0, 6], periodos: ['noite', 'manha'] }).value,
+    { action: 'time_agenda', timeId: 'eu_1', dias: [0, 6], periodos: ['manha', 'noite'] });
+  assert.equal(A.parseAmistosoBody({ action: 'time_agenda', timeId: 'eu_1', dias: [7], periodos: [] }).ok, false);
+  assert.equal(A.parseAmistosoBody({ action: 'time_agenda', timeId: 'eu_1', dias: [1], periodos: ['madrugada'] }).ok, false);
+  assert.deepEqual(A.parseAmistosoBody({ action: 'time_agenda', timeId: 'eu_1' }).value.dias, []);
+  const gravados = [];
+  const db = { doc: (p) => ({ get: async () => ({ exists: true, get: (c) => (c === 'donoId' ? 'eu' : undefined) }), update: async (v) => gravados.push([p, v]) }) };
+  assert.equal((await E.definirAgenda(db, 'outro', { action: 'time_agenda', timeId: 'eu_1', dias: [1], periodos: [] })).status, 403);
+  assert.equal((await E.definirAgenda(db, 'eu', { action: 'time_agenda', timeId: 'eu_1', dias: [1, 3], periodos: ['noite'] })).ok, true);
+  assert.deepEqual(gravados, [['times/eu_1', { diasJogo: [1, 3], periodosJogo: ['noite'] }]]);
+});
+
+test('filtro por dia: só times que marcaram o dia; dia fora de 0 a 6 é recusado', () => {
+  assert.equal(E.passaNosFiltros({ nome: 'A', diasJogo: [6] }, '', '', 6), true);
+  assert.equal(E.passaNosFiltros({ nome: 'A', diasJogo: [5] }, '', '', 6), false);
+  assert.equal(E.passaNosFiltros({ nome: 'A' }, '', '', 6), false, 'sem dias informados não entra no filtro');
+  assert.equal(E.passaNosFiltros({ nome: 'A' }, '', '', -1), true);
+  assert.equal(A.parseAmistosoBody({ action: 'time_explorar', timeId: 'eu_1', dia: 6 }).value.dia, 6);
+  assert.equal(A.parseAmistosoBody({ action: 'time_explorar', timeId: 'eu_1', dia: 7 }).ok, false);
 });
