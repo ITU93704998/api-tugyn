@@ -2,7 +2,7 @@ import type { VersaoModelo } from "./contratoModelo";
 import { createHash, randomBytes } from "node:crypto";
 import type { VercelRequest } from "@vercel/node";
 import { type AnuncioContrato, type ImagemAnuncio } from "./anuncioContrato";
-import { type Cidade, type ConfigContratos, type Escopo, type Modelo, type ResultadoSelecao, ROTULO_STATUS, STATUS, type Status, TELAS, type Tela } from "./contratoCore";
+import { type Cidade, type ConfigContratos, type Escopo, type Modelo, type ResultadoSelecao, ROTULO_STATUS, STATUS, type Status, TELAS, type Tela, pixCopiaECola } from "./contratoCore";
 import type { ContratoModelo } from "./contratoModelo";
 
 /**
@@ -253,6 +253,8 @@ export const temPrecos = (config: ConfigContratos): boolean => (["text", "banner
 /** O que o CLIENTE pode ver: nunca o hash do token, o id da imagem do comprovante, o histórico interno, nem as observações do administrador. */
 export const visaoPublica = (c: ContratoDoc, config: ConfigContratos, agora: number, modelo: ContratoModelo | null = null) => {
   const mostraPagamento = c.status === "aguardando_pagamento" || c.status === "comprovante_enviado" || c.status === "pago";
+  // Com o contrato a aceitar antes do pagamento, os meios de pagamento só aparecem depois do aceite.
+  const escondeMeios = Boolean((modelo?.configuracao || c.documentoContrato?.preenchivel) && !c.aceite);
   return {
     codigo: c.codigo,
     status: c.status,
@@ -265,8 +267,13 @@ export const visaoPublica = (c: ContratoDoc, config: ConfigContratos, agora: num
     preco: c.preco,
     pagamento: mostraPagamento
       ? {
-          linkCartao: (modelo?.configuracao || c.documentoContrato?.preenchivel) && !c.aceite ? "" : config.pagamento.linkCartao,
-          linkPix: (modelo?.configuracao || c.documentoContrato?.preenchivel) && !c.aceite ? "" : config.pagamento.linkPix,
+          linkCartao: escondeMeios ? "" : config.pagamento.linkCartao,
+          linkPix: escondeMeios ? "" : config.pagamento.linkPix,
+          // Pix com o valor do contrato e o código do pedido (gerado aqui, a partir do preço gravado: o cliente não muda o valor).
+          pixCopiaECola:
+            escondeMeios || c.status === "pago"
+              ? ""
+              : pixCopiaECola({ chave: config.pagamento.pixChave, nome: config.pagamento.pixNome, cidade: config.pagamento.pixCidade, valorCentavos: c.preco ? c.preco.total : null, txid: c.codigo }),
           instrucoes: config.pagamento.instrucoes,
           valorTotal: c.preco ? c.preco.total : null,
           comprovanteEnviadoEm: c.pagamento.comprovante ? c.pagamento.comprovante.enviadoEm : null,
@@ -318,6 +325,26 @@ const png = inicio.subarray(0, 8).every(
   if (!confere) return { ok: false, error: "O arquivo não é uma imagem válida." };
   return { ok: true, mime, bytes, dataUri: valor };
 };
+
+export type ComprovanteValido = ImagemValida | { ok: true; mime: "application/pdf"; bytes: number; dataUri: string };
+
+/** O comprovante: imagem (JPEG, PNG ou WebP) ou PDF, conferido pelos primeiros bytes (não pelo que o navegador diz), até 3 MB. */
+export const validarComprovante = (valor: unknown): ComprovanteValido => {
+  if (typeof valor === "string" && valor.startsWith("data:application/pdf;")) {
+    const m = /^data:application\/pdf;base64,([A-Za-z0-9+/]+={0,2})$/.exec(valor);
+    if (!m) return { ok: false, error: "O arquivo PDF não pôde ser lido. Envie de novo." };
+    const bytes = Math.floor((m[1].length * 3) / 4) - (m[1].endsWith("==") ? 2 : m[1].endsWith("=") ? 1 : 0);
+    if (bytes <= 0) return { ok: false, error: "Arquivo vazio." };
+    if (bytes > COMPROVANTE_MAX_BYTES) return { ok: false, error: "O PDF passa de 3 MB. Envie um print do comprovante." };
+    if (Buffer.from(m[1].slice(0, 8), "base64").subarray(0, 5).toString("latin1") !== "%PDF-") return { ok: false, error: "O arquivo não é um PDF válido." };
+    return { ok: true, mime: "application/pdf", bytes, dataUri: valor };
+  }
+  const imagem = validarImagem(valor);
+  return imagem.ok || typeof valor !== "string" || !valor.startsWith("data:") ? imagem : { ok: false, error: "Envie o comprovante como imagem (JPG, PNG ou WebP) ou PDF." };
+};
+
+/** O comprovante em PDF fica como arquivo "raw" no Cloudinary; a imagem, como "image". */
+export const recursoDoComprovante = (formato: string): "raw" | "image" => (formato === "pdf" ? "raw" : "image");
 
 /** Conta do Cloudinary dos anúncios e comprovantes. Para os comprovantes ela é OBRIGATÓRIA (nunca cai na conta de usuários): sem as 3 variáveis, devolve null. */
 export const contaDosComprovantes = (env: NodeJS.ProcessEnv = process.env): { cloud_name: string; api_key: string; api_secret: string } | null => {

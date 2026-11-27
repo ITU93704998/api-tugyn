@@ -35,7 +35,8 @@ export interface ConfigContratos {
   antecedenciaHoras: number;
   /** Quantos dias o link vale enquanto não houver pagamento. */
   validadeLinkDias: number;
-  pagamento: { linkCartao: string; linkPix: string; instrucoes: string };
+  /** Pix: `pixChave`, `pixNome` e `pixCidade` geram, em cada contrato, o Pix copia e cola com o valor e o código do pedido. */
+  pagamento: { linkCartao: string; linkPix: string; instrucoes: string; pixChave: string; pixNome: string; pixCidade: string };
   contato: { email: string; whatsapp: string; texto: string };
   /** Cidades que o cliente pode escolher. */
   cidades: Cidade[];
@@ -52,6 +53,10 @@ export const LIMITES = {
   emailMax: 120,
   whatsappMax: 30,
   urlMax: 500,
+  /** Limites do padrão do Pix (BR Code): chave até 77, nome do recebedor até 25 e cidade até 15 caracteres. */
+  pixChaveMax: 77,
+  pixNomeMax: 25,
+  pixCidadeMax: 15,
   cidadeNomeMax: 60,
   /** O início não pode ficar mais longe que isto. */
   inicioMaxDias: 365,
@@ -69,7 +74,7 @@ export const configPadrao = (): ConfigContratos => ({
   dias: { min: 1, max: 90 },
   antecedenciaHoras: 24,
   validadeLinkDias: 30,
-  pagamento: { linkCartao: "", linkPix: "", instrucoes: "" },
+  pagamento: { linkCartao: "", linkPix: "", instrucoes: "", pixChave: "", pixNome: "", pixCidade: "" },
   contato: { email: "", whatsapp: "", texto: "" },
   cidades: [],
 });
@@ -81,6 +86,85 @@ const isInt = (value: unknown): value is number => typeof value === "number" && 
 const centavosOuNull = (value: unknown): Centavos | null => (isInt(value) && value >= 0 && value <= LIMITES.precoMaxCentavos ? value : null);
 const inteiroEntre = (value: unknown, min: number, max: number, padrao: number): number => (isInt(value) && value >= min && value <= max ? value : padrao);
 const texto = (value: unknown, max: number): string => (typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max) : "");
+// ── Pix copia e cola (BR Code estático do Banco Central) ──────────────────────────────────────────────────────────────
+
+/**
+ * Chave como o Pix espera: CPF/CNPJ só com números (aceita digitado com pontos e traço), telefone "+55" com DDD e número,
+ * e-mail e chave aleatória em minúsculas. Telefone sem "+55" fica ambíguo com CPF; por isso o formulário pede o "+55".
+ */
+export const normalizarChavePix = (valor: string): string => {
+  const v = valor.trim();
+  if (!v) return "";
+  if (/^[\d.\-/\s]+$/.test(v)) return v.replace(/\D/g, "");
+  if (v.startsWith("+")) return "+" + v.replace(/\D/g, "");
+  return v.replace(/\s/g, "").toLowerCase();
+};
+
+const digitoVerificador = (base: string, pesos: number[]): number => {
+  const resto = pesos.reduce((s, p, i) => s + Number(base[i]) * p, 0) % 11;
+  return resto < 2 ? 0 : 11 - resto;
+};
+/** CPF com os dois dígitos verificadores certos (e sem todos os números iguais). */
+export const cpfValido = (cpf: string): boolean => {
+  if (!/^\d{11}$/.test(cpf) || /^(\d)\1{10}$/.test(cpf)) return false;
+  const d1 = digitoVerificador(cpf, [10, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return d1 === Number(cpf[9]) && digitoVerificador(cpf, [11, 10, 9, 8, 7, 6, 5, 4, 3, 2]) === Number(cpf[10]);
+};
+/** CNPJ com os dois dígitos verificadores certos (e sem todos os números iguais). */
+export const cnpjValido = (cnpj: string): boolean => {
+  if (!/^\d{14}$/.test(cnpj) || /^(\d)\1{13}$/.test(cnpj)) return false;
+  const d1 = digitoVerificador(cnpj, [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return d1 === Number(cnpj[12]) && digitoVerificador(cnpj, [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]) === Number(cnpj[13]);
+};
+
+/**
+ * CPF ou CNPJ (com os dígitos verificadores), telefone +55, e-mail ou chave aleatória. Só ASCII: o CRC do BR Code é calculado
+ * sobre os caracteres, e um e-mail com acento poderia gerar um código que o banco lê diferente.
+ */
+export const chavePixValida = (chave: string): boolean =>
+  chave.length > 0 && chave.length <= LIMITES.pixChaveMax && /^[\x21-\x7e]+$/.test(chave) &&
+  (cpfValido(chave) || cnpjValido(chave) || /^\+55\d{10,11}$/.test(chave) ||
+    /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(chave) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(chave));
+
+/** Nome e cidade no Pix: sem acento e só letras, números, espaço e pontuação simples (alguns bancos recusam o resto). */
+export const textoPix = (valor: string, max: number): string =>
+  valor.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9 .,&'\-]/g, "").replace(/\s+/g, " ").trim().slice(0, max).trim();
+
+const campoPix = (id: string, valor: string): string => id + String(valor.length).padStart(2, "0") + valor;
+
+/** CRC16-CCITT (polinômio 0x1021, início 0xFFFF): o dígito de conferência do BR Code. */
+export const crc16Pix = (s: string): string => {
+  let crc = 0xffff;
+  for (let i = 0; i < s.length; i++) {
+    crc ^= s.charCodeAt(i) << 8;
+    for (let b = 0; b < 8; b++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff;
+  }
+  return crc.toString(16).toUpperCase().padStart(4, "0");
+};
+
+/**
+ * O Pix copia e cola (o mesmo texto vira o QR Code) com o VALOR do contrato e o código do pedido como identificador (txid).
+ * Vazio quando falta chave, nome, cidade ou valor: aí o cliente não vê a opção.
+ */
+export const pixCopiaECola = (p: { chave: string; nome: string; cidade: string; valorCentavos: number | null; txid: string }): string => {
+  const nome = textoPix(p.nome, LIMITES.pixNomeMax), cidade = textoPix(p.cidade, LIMITES.pixCidadeMax);
+  if (!chavePixValida(p.chave) || !nome || !cidade || !isInt(p.valorCentavos) || p.valorCentavos <= 0) return "";
+  const txid = /^[A-Za-z0-9]{1,25}$/.test(p.txid) ? p.txid : "***";
+  const valor = `${Math.floor(p.valorCentavos / 100)}.${String(p.valorCentavos % 100).padStart(2, "0")}`;
+  const corpo =
+    campoPix("00", "01") +
+    campoPix("26", campoPix("00", "br.gov.bcb.pix") + campoPix("01", p.chave)) +
+    campoPix("52", "0000") +
+    campoPix("53", "986") +
+    campoPix("54", valor) +
+    campoPix("58", "BR") +
+    campoPix("59", nome) +
+    campoPix("60", cidade) +
+    campoPix("62", campoPix("05", txid)) +
+    "6304";
+  return corpo + crc16Pix(corpo);
+};
+
 const urlHttps = (value: unknown): string => {
   const v = texto(value, LIMITES.urlMax);
   return /^https:\/\/[^\s]+$/.test(v) ? v : "";
@@ -111,7 +195,15 @@ export const parseConfig = (raw: unknown): ConfigContratos => {
   base.antecedenciaHoras = inteiroEntre(raw.antecedenciaHoras, 0, LIMITES.antecedenciaMaxHoras, base.antecedenciaHoras);
   base.validadeLinkDias = inteiroEntre(raw.validadeLinkDias, 1, LIMITES.validadeMaxDias, base.validadeLinkDias);
   const pagamento = isRecord(raw.pagamento) ? raw.pagamento : {};
-  base.pagamento = { linkCartao: urlHttps(pagamento.linkCartao), linkPix: urlHttps(pagamento.linkPix), instrucoes: texto(pagamento.instrucoes, LIMITES.instrucoesMax) };
+  const chave = normalizarChavePix(texto(pagamento.pixChave, LIMITES.pixChaveMax + 20));
+  base.pagamento = {
+    linkCartao: urlHttps(pagamento.linkCartao),
+    linkPix: urlHttps(pagamento.linkPix),
+    instrucoes: texto(pagamento.instrucoes, LIMITES.instrucoesMax),
+    pixChave: chavePixValida(chave) ? chave : "",
+    pixNome: textoPix(texto(pagamento.pixNome, 60), LIMITES.pixNomeMax),
+    pixCidade: textoPix(texto(pagamento.pixCidade, 60), LIMITES.pixCidadeMax),
+  };
   const contato = isRecord(raw.contato) ? raw.contato : {};
   base.contato = { email: texto(contato.email, LIMITES.emailMax), whatsapp: texto(contato.whatsapp, LIMITES.whatsappMax), texto: texto(contato.texto, LIMITES.contatoTextoMax) };
   const ids = new Set<string>();

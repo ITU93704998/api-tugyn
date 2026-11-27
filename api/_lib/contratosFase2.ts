@@ -36,11 +36,60 @@ export const lerModelo = async (db: Firestore): Promise<ContratoModelo | null> =
   return snapshot.exists ? parseModelo(snapshot.data()) : null;
 };
 
-const urlDoPdf = (conta: { cloud_name: string; api_key: string; api_secret: string }, publicId: string, agora: number): { url: string; expiraEmS: number } => {
-  const expiraEmS = Math.floor(agora / 1000) + PDF_URL_SEGUNDOS;
-  // arquivo "raw" PRIVADO: só abre por este endereço assinado, que expira em 5 minutos
-  return { url: cloudinary.utils.private_download_url(publicId, "", { ...conta, resource_type: "raw", type: "authenticated", expires_at: expiraEmS }), expiraEmS };
+type Conta = { cloud_name: string; api_key: string; api_secret: string };
+type Armazenado = { publicId: string; type: "authenticated" | "private" | "upload"; resource_type: "raw" | "image"; formato: string };
+
+/** Onde o PDF pode estar guardado: o normal é "raw" privado; os outros cobrem arquivos que subiram com outro tipo. */
+const LUGARES_DO_PDF: Array<Pick<Armazenado, "type" | "resource_type">> = [
+  { type: "authenticated", resource_type: "raw" },
+  { type: "private", resource_type: "raw" },
+  { type: "upload", resource_type: "raw" },
+  { type: "authenticated", resource_type: "image" },
+  { type: "private", resource_type: "image" },
+  { type: "upload", resource_type: "image" },
+];
+
+const naoEncontrado = (error: unknown): boolean => {
+  const e = error as { http_code?: number; error?: { http_code?: number } } | null;
+  return e?.http_code === 404 || e?.error?.http_code === 404;
 };
+
+/** Confere no Cloudinary onde o PDF está (null = não existe nesta conta). Evita entregar um link que abre "Resource not found". */
+export const localizarPdf = async (conta: Conta, publicId: string): Promise<Armazenado | null> => {
+  for (const lugar of LUGARES_DO_PDF) {
+    // como "image", o Cloudinary guarda o id SEM a extensão e o formato à parte
+    const id = lugar.resource_type === "image" ? publicId.replace(/\.pdf$/i, "") : publicId;
+    try {
+      await cloudinary.api.resource(id, { ...conta, ...lugar });
+      return { publicId: id, ...lugar, formato: lugar.resource_type === "image" ? "pdf" : "" };
+    } catch (error) {
+      if (!naoEncontrado(error)) throw error;
+    }
+  }
+  return null;
+};
+
+const PDF_SUMIU = "O arquivo do contrato não foi encontrado. Avise a Tugyn ADS para enviar o contrato de novo.";
+
+/** Endereço assinado (5 minutos) do PDF, ou null se o arquivo não existir mais no Cloudinary. */
+/** Assina o endereço (5 minutos) de um PDF cujo lugar já foi conferido. Só gera texto: não falha nem consulta o Cloudinary. */
+const assinarPdf = (conta: Conta, lugar: Armazenado, agora: number): { url: string; expiraEmS: number } => {
+  const expiraEmS = Math.floor(agora / 1000) + PDF_URL_SEGUNDOS;
+  return { url: cloudinary.utils.private_download_url(lugar.publicId, lugar.formato, { ...conta, resource_type: lugar.resource_type, type: lugar.type, expires_at: expiraEmS }), expiraEmS };
+};
+
+/** Endereço assinado (5 minutos) do PDF, ou null se o arquivo não existir mais no Cloudinary. */
+const urlDoPdf = async (conta: Conta, publicId: string, agora: number): Promise<{ url: string; expiraEmS: number } | null> => {
+  const lugar = await localizarPdf(conta, publicId);
+  if (!lugar) {
+    console.error("[contratos] PDF do contrato não encontrado no Cloudinary:", publicId);
+    return null;
+  }
+  return assinarPdf(conta, lugar, agora);
+};
+
+/** O documento escolhido na transação não é o que foi conferido antes dela (outra aba abriu ao mesmo tempo): o cliente tenta de novo. */
+class DocumentoMudou extends Error {}
 
 const destruir = (conta: { cloud_name: string; api_key: string; api_secret: string }, publicId: string, tipo: "upload" | "authenticated", recurso: "image" | "raw") =>
   cloudinary.uploader.destroy(publicId, { ...conta, type: tipo, resource_type: recurso }).catch(() => undefined);
@@ -53,33 +102,58 @@ const aleatorio = (): string => randomBytes(12).toString("base64url");
 export const clientePdf = async (c: CtxCliente) => {
   const { db, res, encontrado, agora } = c;
   if (!(ETAPAS_COM_PDF as readonly string[]).includes(encontrado.data.status)) return responder(res, 409, { error: "Confirme o pedido para consultar o contrato." });
-  const modelo = await modeloDoCliente(db, encontrado.data);
-  if (!modelo) return responder(res, 404, { error: "O contrato ainda não está disponível. Fale com a Tugyn ADS." });
   const conta = contaDosComprovantes();
   if (!conta) return responder(res, 503, { error: "O contrato ainda não está disponível. Fale com a Tugyn ADS." });
+  const { aceite, documentoContrato: fixado } = encontrado.data;
+  // Antes do aceite, um documento já fixado cujo arquivo sumiu do Cloudinary é trocado pela versão ATUAL do contrato
+  // (o cliente ainda não concordou com nada; sem isso, ficaria preso a um PDF que não abre). Depois do aceite, nunca troca.
+  // arquivos já conferidos no Cloudinary (id gravado → onde está): só um deles pode ser registrado como aberto
+  const conferidos = new Map<string, Armazenado>();
+  const conferir = async (publicId: string): Promise<boolean> => {
+    const lugar = conferidos.get(publicId) ?? (await localizarPdf(conta, publicId));
+    if (lugar) conferidos.set(publicId, lugar);
+    return !!lugar;
+  };
+  const fixadoConferido = !!fixado && !aceite && (await conferir(fixado.publicId));
+  const fixadoSumiu = !!fixado && !aceite && !fixadoConferido;
+  if (fixadoSumiu) console.error("[contratos] PDF fixado no contrato não existe mais; usando a versão atual:", fixado.publicId);
+  const modelo = fixadoSumiu ? await lerModelo(db) : await modeloDoCliente(db, encontrado.data);
+  if (!modelo) return responder(res, 404, { error: "O contrato ainda não está disponível. Fale com a Tugyn ADS." });
   let documento = resumoVersao(modelo);
+  const semFixado = !fixado || fixadoSumiu;
+  const vaiGerarPreenchido = semFixado && !aceite && !!modelo.configuracao;
+  // sem o arquivo, o cliente não abre o contrato: não registra a abertura (condição para aceitar) e avisa
+  const aConferir = semFixado ? documento.publicId : fixado.publicId;
+  if (!vaiGerarPreenchido && !(await conferir(aConferir))) {
+    console.error("[contratos] PDF do contrato não encontrado no Cloudinary:", aConferir);
+    return responder(res, 404, { error: PDF_SUMIU });
+  }
   let enviado: Awaited<ReturnType<typeof subirPdf>> | null = null;
-  if (!encontrado.data.documentoContrato && !encontrado.data.aceite && modelo.configuracao) {
+  if (vaiGerarPreenchido && modelo.configuracao) {
     if (!encontrado.data.pedido || !encontrado.data.preco) return responder(res, 409, { error: "Confirme o pedido antes de abrir o contrato preenchido." });
     enviado = await subirPdf(await pdfDoContrato(db, modelo.configuracao, preencherTexto(modelo.configuracao, dadosDoPedido(encontrado.data, modelo.versao))), "contratos-preenchidos/" + encontrado.ref.id);
     documento = { ...documento, ...enviado, preenchivel: true };
+    conferidos.set(enviado.publicId, { publicId: enviado.publicId, type: "authenticated", resource_type: "raw", formato: "" }); // acabou de subir assim
   }
   try {
     await db.runTransaction(async (tx) => {
       const atual = await lerNaTransacao(tx, encontrado.ref);
       if (atual.tokenHash !== encontrado.data.tokenHash || linkExpirado(atual, agora) || !(ETAPAS_COM_PDF as readonly string[]).includes(atual.status)) throw new Conflito();
       if (JSON.stringify(atual.pedido) !== JSON.stringify(encontrado.data.pedido) || JSON.stringify(atual.preco) !== JSON.stringify(encontrado.data.preco)) throw new Conflito();
-      if (atual.documentoContrato) documento = atual.documentoContrato;
+      // o documento fixado vale, a não ser que seja justamente o que sumiu (aí fica o atual, escolhido acima)
+      if (atual.documentoContrato && !(fixadoSumiu && fixado && atual.documentoContrato.publicId === fixado.publicId)) documento = atual.documentoContrato;
       else if (atual.aceite && atual.aceite.versao !== documento.versao) throw new Conflito();
+      // só registra a abertura de um arquivo conferido: o endereço entregue a seguir é só assinatura (não falha)
+      if (!conferidos.has(documento.publicId)) throw new DocumentoMudou();
       tx.update(encontrado.ref, { documentoContrato: documento, pdfSolicitado: { versao: documento.versao, em: agora }, atualizadoEm: agora });
     });
   } catch (error) {
     if (enviado) await apagarPdf(enviado.publicId);
-    if (error instanceof Conflito || error instanceof NaoEncontrado) return responder(res, 409, { error: "O contrato mudou. Atualize a página." });
+    if (error instanceof Conflito || error instanceof NaoEncontrado || error instanceof DocumentoMudou) return responder(res, 409, { error: "O contrato mudou. Atualize a página." });
     throw error;
   }
   if (enviado && enviado.publicId !== documento.publicId) await apagarPdf(enviado.publicId);
-  const { url, expiraEmS } = urlDoPdf(conta, documento.publicId, agora);
+  const { url, expiraEmS } = assinarPdf(conta, conferidos.get(documento.publicId)!, agora);
   return responder(res, 200, { url, sha256: documento.sha256, versao: documento.versao, nome: documento.nome, expiraEm: expiraEmS * 1000 });
 };
 
@@ -234,7 +308,9 @@ export const adminModeloUrl = async (db: Firestore, body: Record<string, unknown
     if (!pdf || pdf.sha256 !== doc.aceite.sha256) return responder(res, 409, { error: "O PDF original deste aceite não está disponível. Não será exibida outra versão." });
     const conta = contaDosComprovantes();
     if (!conta) return responder(res, 503, { error: "Conta do Cloudinary dos anúncios não configurada." });
-    const { url, expiraEmS } = urlDoPdf(conta, pdf.publicId, agora);
+    const link = await urlDoPdf(conta, pdf.publicId, agora);
+    if (!link) return responder(res, 404, { error: "O arquivo deste contrato não foi encontrado no Cloudinary." });
+    const { url, expiraEmS } = link;
     return responder(res, 200, { url, versao: pdf.versao, nome: pdf.nome, expiraEm: expiraEmS * 1000 });
   }
   const modelo = await lerModelo(db);
@@ -248,7 +324,9 @@ export const adminModeloUrl = async (db: Firestore, body: Record<string, unknown
   if (!versao) return responder(res, 404, { error: "Versão não encontrada." });
   const conta = contaDosComprovantes();
   if (!conta) return responder(res, 503, { error: "Conta do Cloudinary dos anúncios não configurada." });
-  const { url, expiraEmS } = urlDoPdf(conta, versao.publicId, agora);
+  const link = await urlDoPdf(conta, versao.publicId, agora);
+  if (!link) return responder(res, 404, { error: "O arquivo desta versão do contrato não foi encontrado no Cloudinary (conta de anúncios). Envie o PDF de novo em Contratos." });
+  const { url, expiraEmS } = link;
   return responder(res, 200, { url, versao: versao.versao, nome: versao.nome, expiraEm: expiraEmS * 1000 });
 };
 

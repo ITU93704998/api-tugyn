@@ -15,6 +15,7 @@ let seq = 0; const uploads = [], removidos = [];
 cloud.uploader.upload = async (data, options) => { const public_id = options.folder + '/teste-' + (++seq) + '.pdf'; uploads.push({ data, options, public_id }); return { public_id }; };
 cloud.uploader.destroy = async id => { removidos.push(id); return {}; };
 cloud.utils.private_download_url = id => 'https://exemplo.test/' + id;
+cloud.api.resource = async () => ({}); // o PDF existe (a conferência no Cloudinary é testada em contrato-exclusao.test.cjs)
 process.env.CLOUDINARY_NAME_ANUNCIOS = 'fake'; process.env.CLOUDINARY_KEY_ANUNCIOS = 'fake'; process.env.CLOUDINARY_SECRET_ANUNCIOS = 'fake';
 function config() { const x = c.configuracaoInicial(); Object.assign(x.empresa, { razao_social: 'Tugyn Serviços Ltda', nome_fantasia: 'Tugyn', cnpj: '00.000.000/0001-00', endereco: 'Rua de Exemplo, 123', email: 'ads@example.com', telefone: '(11) 9 1234-5678', foro: 'São Paulo/SP', privacidade_url: 'https://example.com/privacidade', data_versao: '2026-11-07', horario_inicio: '09:00', horario_fim: '18:00' }); for (const k in x.politicas) x.politicas[k] = 'Condição comercial de teste revisada.'; return x; }
 function dbFake(initial = {}) {
@@ -140,4 +141,43 @@ test('logo: hash inexistente bloqueia prévia/publicação; arquivo inválido é
   assert.equal(c.validarConfiguracao(semLogo, true).ok, true, 'configurações antigas sem logo continuam válidas');
   const ruim = config(); ruim.logo = 'xyz';
   assert.equal(c.validarConfiguracao(ruim).ok, false);
+});
+test('visão do cliente traz o Pix copia e cola com o valor e o código do contrato', () => {
+  const core = require('../api/_lib/contratoCore.ts');
+  const cfg = core.parseConfig({ pagamento: { pixChave: '123.456.789-09', pixNome: 'Tugyn Ads', pixCidade: 'Palmas' } });
+  const v = contratos.visaoPublica(contrato(), cfg, Date.now());
+  assert.match(v.pagamento.pixCopiaECola, /^000201.*0111123456789095204000053039865406123\.455802BR5909Tugyn Ads6006Palmas62100506ABC1236304[0-9A-F]{4}$/);
+  assert.equal(core.crc16Pix(v.pagamento.pixCopiaECola.slice(0, -4)), v.pagamento.pixCopiaECola.slice(-4));
+  assert.equal(contratos.visaoPublica(contrato(), core.parseConfig({}), Date.now()).pagamento.pixCopiaECola, '');
+  const pago = { ...contrato(), status: 'pago' };
+  assert.equal(contratos.visaoPublica(pago, cfg, Date.now()).pagamento.pixCopiaECola, '');
+});
+test('antes do aceite, contrato preso a um PDF que sumiu passa para a versão atual (preenchida)', async () => {
+  const { db, docs } = dbFake();
+  await invoke(db, 'contrato_config_publicar', { configuracao: config(), revisao: 0, revisado: true });
+  const d = contrato();
+  d.documentoContrato = { versao: 1, nome: 'antigo.pdf', publicId: 'contrato-modelo/sumiu.pdf', sha256: 'c'.repeat(64), bytes: 10, enviadoEm: 1 };
+  d.pdfSolicitado = { versao: 1, em: 1 };
+  docs.set('contratos/preso', d);
+  const ref = db.doc('contratos/preso');
+  const original = cloud.api.resource;
+  cloud.api.resource = async (id) => { if (id.includes('sumiu')) throw { error: { http_code: 404 } }; return {}; };
+  try {
+    const ctx = { db, res: response(), body: {}, agora: Date.now(), encontrado: { ref, data: contratos.parseContrato(docs.get(ref.key)) }, config: require('../api/_lib/contratoCore.ts').configPadrao(), ipHash: 'ip_teste' };
+    await fase.clientePdf(ctx);
+    assert.equal(ctx.res.code, 200, JSON.stringify(ctx.res.body));
+    const novo = docs.get(ref.key).documentoContrato;
+    assert.equal(novo.preenchivel, true);
+    assert.notEqual(novo.publicId, 'contrato-modelo/sumiu.pdf');
+    // depois do aceite, nunca troca: com o arquivo sumido, avisa
+    const aceito = contrato();
+    aceito.documentoContrato = { ...d.documentoContrato };
+    aceito.aceite = { versao: 1, sha256: 'c'.repeat(64) };
+    docs.set('contratos/aceito', aceito);
+    const ref2 = db.doc('contratos/aceito');
+    const ctx2 = { db, res: response(), body: {}, agora: Date.now(), encontrado: { ref: ref2, data: contratos.parseContrato(docs.get(ref2.key)) }, config: require('../api/_lib/contratoCore.ts').configPadrao(), ipHash: 'ip_teste' };
+    await fase.clientePdf(ctx2);
+    assert.equal(ctx2.res.code, 404);
+    assert.equal(docs.get(ref2.key).documentoContrato.publicId, 'contrato-modelo/sumiu.pdf');
+  } finally { cloud.api.resource = original; }
 });

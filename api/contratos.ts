@@ -1,6 +1,7 @@
 import { clienteAceitarContrato } from "./_lib/contratosFase2";
 import { adminConfiguracaoContrato, modeloDoCliente, registroAceiteAnterior } from "./_lib/contratoConfiguracaoAdmin";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { randomBytes } from "node:crypto";
 import { v2 as cloudinary } from "cloudinary";
 import { type Firestore, getFirestore } from "firebase-admin/firestore";
 import { getFirebaseApp, requireUser } from "./_lib/auth";
@@ -19,13 +20,15 @@ import {
   parseCriar,
   pedidoEPreco,
   temPrecos,
-  validarImagem,
+  recursoDoComprovante,
+  validarComprovante,
   visaoPublica,
 } from "./_lib/contratos";
 import { Conflito, NaoEncontrado, buscarPorToken, lerConfig, lerNaTransacao, prepararContrato, responder } from "./_lib/contratosComuns";
 import { aprovarSolicitacao, excluirSolicitacao, solicitar } from "./_lib/solicitacoes";
 import { excluirCampanha, publicarAnuncios } from "./_lib/publicacaoAnuncios";
 import { adminAprovar, adminModeloEnviar, adminModeloUrl, adminPedirAjustes, clienteEnviarAnuncio, clienteImagem, clientePdf } from "./_lib/contratosFase2";
+import { adminExcluirContrato } from "./_lib/contratoExclusao";
 import { handleCors } from "./_lib/cors";
 import { dentroDoLimite } from "./_lib/rateLimit";
 
@@ -42,7 +45,7 @@ import { dentroDoLimite } from "./_lib/rateLimit";
 const ACOES_CLIENTE = ["ver", "configurar", "comprovante", "contrato_aceitar", "contrato_pdf", "anuncio_imagem", "anuncio_enviar"] as const;
 /** Sem login nem link: a página pública "quero anunciar". Só aceita a solicitação (e com limite por IP). */
 const ACOES_PUBLICAS = ["solicitar"] as const;
-const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "contrato_config_ver", "contrato_config_logo", "contrato_config_salvar", "contrato_config_previa", "contrato_config_publicar", "aprovar", "pedir_ajustes", "anuncios_publicar", "campanha_excluir"] as const;
+const ACOES_ADMIN = ["solicitacao_aprovar", "solicitacao_excluir", "criar", "novo_link", "ver_comprovante", "confirmar_pagamento", "pedir_comprovante", "cancelar", "modelo_enviar", "modelo_url", "contrato_config_ver", "contrato_config_logo", "contrato_config_salvar", "contrato_config_previa", "contrato_config_publicar", "aprovar", "pedir_ajustes", "anuncios_publicar", "campanha_excluir", "excluir"] as const;
 const ID = /^[A-Za-z0-9]{10,40}$/;
 
 /** Ação da rota → ação do núcleo de etapas (sem `as`: se um nome mudar de um lado, o compilador acusa). */
@@ -109,8 +112,9 @@ const cliente = async (db: Firestore, acao: (typeof ACOES_CLIENTE)[number], body
   // comprovante
   if (!proximoStatus(encontrado.data.status, "enviar_comprovante", "cliente") || !encontrado.data.pedido || !encontrado.data.preco) return responder(res, 409, { error: "Não é possível enviar o comprovante neste momento." });
   if (body.confirmo !== true) return responder(res, 400, { error: "Confirme que você fez o pagamento." });
-  const imagem = validarImagem(body.imagem);
+  const imagem = validarComprovante(body.imagem);
   if (!imagem.ok) return responder(res, 400, { error: imagem.error });
+  const ehPdf = imagem.mime === "application/pdf";
   const conta = contaDosComprovantes();
   if (!conta) return responder(res, 503, { error: "O envio de comprovantes ainda não está disponível. Fale com a Tugyn ADS." });
 
@@ -118,10 +122,11 @@ const cliente = async (db: Firestore, acao: (typeof ACOES_CLIENTE)[number], body
     ...conta, // credenciais por chamada (sem cloudinary.config global)
     folder: `comprovantes/${encontrado.ref.id}`,
     type: "authenticated", // privado: só com link assinado, gerado aqui para o administrador
-    resource_type: "image",
-    allowed_formats: ["jpg", "jpeg", "png", "webp"],
+    // PDF vai como arquivo "raw" (sem processamento: PDFs de banco protegidos também sobem); imagem, como "image"
+    ...(ehPdf ? { resource_type: "raw" as const, public_id: `comprovante-${randomBytes(9).toString("hex")}.pdf` } : { resource_type: "image" as const, allowed_formats: ["jpg", "jpeg", "png", "webp"] }),
     tags: ["comprovante", `contrato_${encontrado.ref.id}`],
   });
+  const formatoEnviado = ehPdf ? "pdf" : String(enviado.format ?? "");
   let gravado: ContratoDoc | null = null;
   try {
     await db.runTransaction(async (tx) => {
@@ -129,13 +134,13 @@ const cliente = async (db: Firestore, acao: (typeof ACOES_CLIENTE)[number], body
       const novoStatus = proximoStatus(atual.status, "enviar_comprovante", "cliente");
       if (atual.tokenHash !== encontrado.data.tokenHash || linkExpirado(atual, agora) || !novoStatus) throw new Conflito();
       if (atual.documentoContrato?.preenchivel && !atual.aceite) throw new Conflito();
-      const pagamento = { ...atual.pagamento, comprovante: { publicId: enviado.public_id, formato: String(enviado.format ?? ""), bytes: Number(enviado.bytes ?? imagem.bytes), enviadoEm: agora }, declaradoEm: agora };
+      const pagamento = { ...atual.pagamento, comprovante: { publicId: enviado.public_id, formato: formatoEnviado, bytes: Number(enviado.bytes ?? imagem.bytes), enviadoEm: agora }, declaradoEm: agora };
       gravado = { ...atual, status: novoStatus, pagamento, atualizadoEm: agora, historico: comHistorico(atual.historico, { em: agora, por: "cliente", acao: "enviou o comprovante e declarou o pagamento" }) };
       tx.update(encontrado.ref, { status: novoStatus, pagamento, atualizadoEm: agora, historico: gravado.historico });
     });
   } catch (error) {
     // a etapa mudou no meio do caminho: a imagem que acabou de subir não é mais necessária
-    await cloudinary.uploader.destroy(enviado.public_id, { ...conta, type: "authenticated", resource_type: "image" }).catch(() => undefined);
+    await cloudinary.uploader.destroy(enviado.public_id, { ...conta, type: "authenticated", resource_type: recursoDoComprovante(formatoEnviado) }).catch(() => undefined);
     if (error instanceof Conflito || error instanceof NaoEncontrado) return responder(res, 409, { error: "O contrato mudou. Atualize a página." });
     throw error;
   }
@@ -185,6 +190,9 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
   const ref = db.collection(COLECAO).doc(id);
   const nota = limparTexto(body.nota, 300);
 
+  // exclusão definitiva (qualquer etapa): campanha, números, arquivos e dados do cliente
+  if (acao === "excluir") return adminExcluirContrato(db, ref, body.codigo, uid, agora, res);
+
   if (acao === "ver_comprovante") {
     const snapshot = await ref.get();
     const doc = snapshot.exists ? parseContrato(snapshot.data()) : null;
@@ -193,8 +201,10 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
     const conta = contaDosComprovantes();
     if (!conta) return responder(res, 503, { error: "Conta do Cloudinary dos anúncios não configurada." });
     const expiraEmSegundos = Math.floor(agora / 1000) + COMPROVANTE_URL_SEGUNDOS;
-    const url = cloudinary.utils.private_download_url(doc.pagamento.comprovante.publicId, doc.pagamento.comprovante.formato || "jpg", { ...conta, type: "authenticated", resource_type: "image", expires_at: expiraEmSegundos });
-    return responder(res, 200, { url, expiraEm: expiraEmSegundos * 1000 });
+    const { publicId, formato } = doc.pagamento.comprovante;
+    const recurso = recursoDoComprovante(formato);
+    const url = cloudinary.utils.private_download_url(publicId, recurso === "raw" ? "" : formato || "jpg", { ...conta, type: "authenticated", resource_type: recurso, expires_at: expiraEmSegundos });
+    return responder(res, 200, { url, expiraEm: expiraEmSegundos * 1000, pdf: recurso === "raw" });
   }
 
   if (acao === "aprovar") return adminAprovar(db, ref, uid, agora, res, body.publicar === true);
@@ -202,7 +212,7 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
 
   if (acao === "pedir_comprovante" && nota.length < 3) return responder(res, 400, { error: "Explique ao cliente o que precisa ser reenviado." });
 
-  let comprovanteAnterior: string | null = null;
+  let comprovanteAnterior: { publicId: string; recurso: "raw" | "image" } | null = null;
   let resposta: Record<string, unknown> = { ok: true };
   // só o link novo precisa da validade padrão: lê ANTES da transação (dentro dela a leitura se repetiria a cada nova tentativa)
   const validadeLinkDias = acao === "novo_link" ? (await lerConfig(db)).validadeLinkDias : 0;
@@ -231,7 +241,7 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
         tokenExpiresAt = validadeAposPagamento(atual.pedido.fimMs); // o link passa a valer SÓ até o fim do anúncio
         item.acao = "confirmou o pagamento";
       } else if (acao === "pedir_comprovante") {
-        comprovanteAnterior = atual.pagamento.comprovante ? atual.pagamento.comprovante.publicId : null;
+        comprovanteAnterior = atual.pagamento.comprovante ? { publicId: atual.pagamento.comprovante.publicId, recurso: recursoDoComprovante(atual.pagamento.comprovante.formato) } : null;
         pagamento = { ...atual.pagamento, comprovante: null, declaradoEm: null, notaDoAdmin: nota };
         item.acao = "pediu novo comprovante";
       } else {
@@ -247,7 +257,8 @@ const admin = async (db: Firestore, acao: (typeof ACOES_ADMIN)[number], body: Re
   }
   // o comprovante antigo (privado) não é mais necessário: apaga (melhor esforço)
   const conta = contaDosComprovantes();
-  if (comprovanteAnterior && conta) await cloudinary.uploader.destroy(comprovanteAnterior, { ...conta, type: "authenticated", resource_type: "image" }).catch(() => undefined);
+  const anterior = comprovanteAnterior as { publicId: string; recurso: "raw" | "image" } | null; // gravado dentro da transação
+  if (anterior && conta) await cloudinary.uploader.destroy(anterior.publicId, { ...conta, type: "authenticated", resource_type: anterior.recurso }).catch(() => undefined);
   return responder(res, 200, resposta);
 };
 

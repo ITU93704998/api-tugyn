@@ -35,7 +35,9 @@ export const buscarPorToken = async (db: Firestore, token: unknown) => {
 
 export const lerNaTransacao = async (tx: Transaction, ref: DocumentReference): Promise<ContratoDoc> => {
   const snapshot = await tx.get(ref);
-  const doc = snapshot.exists ? parseContrato(snapshot.data()) : null;
+  // com a exclusão em andamento (`excluindoEm`), o contrato não aceita mais nenhuma mudança: para o cliente e o painel, ele já não existe
+  const bruto = snapshot.exists ? snapshot.data() : undefined;
+  const doc = bruto && !bruto.excluindoEm ? parseContrato(bruto) : null;
   if (!doc) throw new NaoEncontrado();
   return doc;
 };
